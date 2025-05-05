@@ -95,6 +95,7 @@ XLSX = "fdbf4ff8-1666-58a4-91e7-1b58723a45e0"
 
 [compat]
 ArchGDAL = "0.10.2"
+Distributions = "0.25.119"
 LinearAlgebra = "1.11.0"
 Logging = "1.11.0"
 LoggingExtras = "1.1.0"

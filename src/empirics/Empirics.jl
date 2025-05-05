@@ -13,5 +13,6 @@ BLACKOUT_LENGTH = Quarter(2)
 include("windows.jl")
 include("registrations.jl")
 include("demographics.jl")
+include("mahalanobis.jl")
 
 end
