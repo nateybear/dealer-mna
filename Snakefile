@@ -5,15 +5,6 @@ julia_dealers = glob.glob("src/dealers/**/*.jl")
 julia_empirics = glob.glob("src/empirics/**/*.jl")
 
 
-def transaction_uids(fname):
-    """
-    Get the transaction uids from the treated_registrations folder.
-    """
-    if exists(fname):
-        with open(fname) as f:
-            return f.read().splitlines()
-
-
 rule dealers_init:
     input:
         *julia_dealers,
@@ -43,7 +34,7 @@ rule transactions_for_analysis:
         )
 
 
-rule transaction_uids:
+checkpoint transaction_uids:
     input:
         *julia_src,
         "scripts/transaction_uids.jl",
@@ -56,6 +47,22 @@ rule transaction_uids:
         julia("scripts/transaction_uids.jl", input=input, output=output, log=log)
 
 
+def get_treated_and_control_registrations(wildcards):
+    # Get the output file from the checkpoint at runtime
+    checkpoint_output = checkpoints.transaction_uids.get().output[0]
+    with open(checkpoint_output) as f:
+        uids = f.read().splitlines()
+    return expand(
+        [
+            "data/treated_registrations/last_registrations_before_{uid}.arrow",
+            "data/treated_registrations/first_registrations_after_{uid}.arrow",
+            "data/control_registrations/last_registrations_before_{uid}.arrow",
+            "data/control_registrations/first_registrations_after_{uid}.arrow",
+        ],
+        uid=uids,
+    )
+
+
 rule treated_registrations:
     input:
         *julia_src,
@@ -63,15 +70,10 @@ rule treated_registrations:
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         dealers_init="data/dealers_init.jld2",
     output:
-        expand(
-            [
-                "data/treated_registrations/last_registrations_before_{uid}.arrow",
-                "data/treated_registrations/first_registrations_after_{uid}.arrow",
-            ],
-            uid=transaction_uids(rules.transaction_uids.output[0]),
-        ),
+        "data/treated_registrations/last_registrations_before_{uid}.arrow",
+        "data/treated_registrations/first_registrations_after_{uid}.arrow",
     log:
-        "logs/treated_registrations.log",
+        "logs/treated_registrations_{uid}.log",
     run:
         julia(
             "scripts/treated_registrations.jl",
@@ -88,15 +90,10 @@ rule control_registrations:
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         dealers_init="data/dealers_init.jld2",
     output:
-        expand(
-            [
-                "data/control_registrations/last_registrations_before_{uid}.arrow",
-                "data/control_registrations/first_registrations_after_{uid}.arrow",
-            ],
-            uid=transaction_uids(rules.transaction_uids.output[0]),
-        ),
+        "data/control_registrations/last_registrations_before_{uid}.arrow",
+        "data/control_registrations/first_registrations_after_{uid}.arrow",
     log:
-        "logs/control_registrations.log",
+        "logs/control_registrations_{uid}.log",
     run:
         julia(
             "scripts/control_registrations.jl",
@@ -104,6 +101,11 @@ rule control_registrations:
             output=output,
             log=log,
         )
+
+
+rule analysis_sample:
+    input:
+        get_treated_and_control_registrations,
 
 
 rule dealer_demographics:
