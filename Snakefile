@@ -17,6 +17,7 @@ def transaction_uids(fname):
 rule dealers_init:
     input:
         *julia_dealers,
+        "src/dealers/Dealers.jl",
         "scripts/dealers_init.jl",
     output:
         "data/dealers_init.jld2",

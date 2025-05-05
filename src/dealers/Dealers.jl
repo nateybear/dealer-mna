@@ -211,9 +211,9 @@ function init_transactions!()
         first_buyer_regeffdate = t.first_buyer_regeffdate |> skipmissing |> emptymissing(minimum)
         last_seller_regeffdate = t.last_seller_regeffdate |> skipmissing |> emptymissing(maximum)
 
-        # if another on the same date between the same parties, merge
+        # if another in the same week between the same parties, merge
         i = findfirst(Events) do e
-            e.when == when &&
+            abs(e.when - when) < Week(1) &&
                 e.buyer_name == buyer_name &&
                 e.seller_name == seller_name
         end

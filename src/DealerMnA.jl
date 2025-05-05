@@ -1,5 +1,7 @@
 module DealerMnA
 
+__precompile__(false)
+
 export Geometry, Registrations, Dealers, Empirics, snakemake, with_logging
 
 ### empirics is at the end to pick up snakemake and nonmissing
