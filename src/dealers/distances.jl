@@ -28,6 +28,7 @@ end
 
 function add_distance(r)
     r = add_zips(r)
+    isempty(r) && return missing
     flat_dealers = @> State.df begin
         select(:geometry => :dealer_geometry, :gdns => :dlrgdn, :uid => :dealer_uid)
         flatten(:dlrgdn)

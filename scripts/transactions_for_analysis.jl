@@ -13,7 +13,12 @@ function (@main)(_)
                Empirics.blackout_period(t) ⊆ Empirics.ANALYSIS_DATES
 
                 @info "Transaction $(t.uid) is in the analysis period"
-                if !isempty(Empirics.last_registrations_before(t)) && !isempty(Empirics.first_registrations_after(t))
+                last_registrations = Empirics.last_registrations_before(t)
+                first_registrations = Empirics.first_registrations_after(t)
+                if !ismissing(last_registrations) &&
+                   !ismissing(first_registrations) &&
+                   !isempty(last_registrations) &&
+                   !isempty(first_registrations)
                     push!(out, t)
                 end
             end
