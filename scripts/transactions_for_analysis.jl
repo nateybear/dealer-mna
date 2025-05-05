@@ -25,7 +25,7 @@ function (@main)(_)
         end
         JLD2.save_object(
             snakemake.output[1],
-            transactions_for_analysis
+            out
         )
     end
     return nothing
