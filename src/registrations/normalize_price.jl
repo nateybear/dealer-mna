@@ -1,6 +1,8 @@
 using DataStructures: DefaultDict
 using OnlineStats: Mean, fit!, merge!
 using Base: Fix1, Fix2
+import ..snakemake
+import JLD2
 
 normalize_trim = ByRow() do x...
     trim_vars = reduce(skipmissing(x), init=[""]) do acc, trim
@@ -14,6 +16,10 @@ end
 trimnames(df) = names(df, r"^((trim)|(series))$")
 
 @memoize function price_table()
+    if !isnothing(snakemake) && haskey(snakemake.input, "price_table")
+        return JLD2.load_object(snakemake.input["price_table"])
+    end
+
     out = DefaultDict{NTuple{3,String},Mean}(Mean)
     fitmean(v) = fit!(Mean(), v)
     for s in Arrow.Stream(datadir("arrow/new_registrations.arrow"))

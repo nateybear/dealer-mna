@@ -18,6 +18,17 @@ rule dealers_init:
         julia("scripts/dealers_init.jl", output=output, log=log)
 
 
+rule price_table:
+    input:
+        "scripts/price_table.jl",
+    output:
+        "data/price_table.jld2",
+    log:
+        "logs/price_table.log",
+    run:
+        julia("scripts/price_table.jl", output=output, log=log)
+
+
 rule transactions_for_analysis:
     input:
         *julia_dealers,
@@ -69,9 +80,10 @@ rule treated_registrations:
         "scripts/treated_registrations.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         dealers_init="data/dealers_init.jld2",
+        price_table="data/price_table.jld2",
     output:
-        "data/treated_registrations/last_registrations_before_{uid}.arrow",
-        "data/treated_registrations/first_registrations_after_{uid}.arrow",
+        before="data/treated_registrations/last_registrations_before_{uid}.arrow",
+        after="data/treated_registrations/first_registrations_after_{uid}.arrow",
     log:
         "logs/treated_registrations_{uid}.log",
     run:
@@ -80,6 +92,7 @@ rule treated_registrations:
             input=input,
             output=output,
             log=log,
+            wildcards=wildcards,
         )
 
 
@@ -89,9 +102,10 @@ rule control_registrations:
         "scripts/control_registrations.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         dealers_init="data/dealers_init.jld2",
+        price_table="data/price_table.jld2",
     output:
-        "data/control_registrations/last_registrations_before_{uid}.arrow",
-        "data/control_registrations/first_registrations_after_{uid}.arrow",
+        before="data/control_registrations/last_registrations_before_{uid}.arrow",
+        after="data/control_registrations/first_registrations_after_{uid}.arrow",
     log:
         "logs/control_registrations_{uid}.log",
     run:
@@ -100,6 +114,7 @@ rule control_registrations:
             input=input,
             output=output,
             log=log,
+            wildcards=wildcards,
         )
 
 
