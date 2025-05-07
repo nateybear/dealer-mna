@@ -169,9 +169,23 @@ def get_treatment_effects(wildcards):
     ]
 
 
-rule treatment_effects_summary:
+checkpoint nonempty_treatment_effects:
     input:
         get_treatment_effects,
+        "scripts/nonempty_treatment_effects.jl",
+    output:
+        "data/nonempty_treatment_effects.csv",
+    log:
+        "logs/nonempty_treatment_effects.log",
+    run:
+        julia(
+            "scripts/nonempty_treatment_effects.jl",
+            input=input,
+            output=output,
+            log=log,
+            wildcards=wildcards,
+        )
+
 
 
 ### UTILS: running julia

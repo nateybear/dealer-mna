@@ -39,6 +39,11 @@ function (@main)(_)
 
         dealer_demographics = DataFrame(Arrow.Table(snakemake.input["dealer_demographics"]))
 
+        if any(isempty, (treated_before, treated_after, control_before, control_after))
+            @warn "One of the input dataframes is empty. Skipping event study."
+            Arrow.write(snakemake.output[1], DataFrame())
+            return nothing
+        end
 
         Arrow.write(
             snakemake.output[1],

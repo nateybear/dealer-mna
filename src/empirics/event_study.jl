@@ -80,6 +80,9 @@ function event_study(
             partial_out(outcol, :dealer_uid)
         end
         combine(groupby(panel, :T)) do gdf
+            if !any(gdf.dealer_uid .== treated_uid)
+                return (; outcol => missing)
+            end
             treated_outcome = only(gdf[gdf.dealer_uid.==treated_uid, outcol])
             control_outcomes = @> gdf subset(:dealer_uid => ByRow(!=(treated_uid))) innerjoin(control_weights, on=:dealer_uid)
             synthetic_control_outcome = mean(control_outcomes[!, outcol], w(control_outcomes.weight))
