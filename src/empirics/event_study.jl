@@ -4,6 +4,7 @@ using Dates: Day
 using Lazy: @>
 using DataFrames
 using PartialFunctions
+using Missings
 
 const STATISTICS = (
     mean_baseprice=:mean_price => mean,
@@ -21,7 +22,15 @@ create_time_col(df, date) = @> df begin
     subset(:T => ByRow(in(-6:5)))
 end
 
-partial_out(df, outcome_col, by_col) = @> df groupby(by_col) transform(outcome_col => (x -> x .- mean(x)) => outcome_col)
+function partial_out(df, outcome_col, by_col)
+    weight_sum = @> df groupby(:T) combine(:weight => sum ∘ skipmissing => :weight_sum)
+    df = @> df innerjoin(weight_sum, on=:T) transform([:weight, :weight_sum] => ((x, y) -> coalesce.(x ./ y, 1)) => :weight_temp)
+    @> df begin
+        groupby(by_col)
+        transform([outcome_col, :weight_temp] => ((x, y) -> x .- mean(x, w(y))) => outcome_col)
+        select(Not(:weight_temp, :weight_sum))
+    end
+end
 
 function event_study(
     treated_before,
@@ -76,6 +85,7 @@ function event_study(
 
     function te_estimate(panel, (outcol, _))
         panel = @> panel begin
+            leftjoin(control_weights, on=:dealer_uid)
             partial_out(outcol, :T)
             partial_out(outcol, :dealer_uid)
         end
@@ -84,8 +94,8 @@ function event_study(
                 return (; outcol => missing)
             end
             treated_outcome = only(gdf[gdf.dealer_uid.==treated_uid, outcol])
-            control_outcomes = @> gdf subset(:dealer_uid => ByRow(!=(treated_uid))) innerjoin(control_weights, on=:dealer_uid)
-            synthetic_control_outcome = mean(control_outcomes[!, outcol], w(control_outcomes.weight))
+            control_outcomes = subset(gdf, :dealer_uid => ByRow(!=(treated_uid)))
+            synthetic_control_outcome = mean(control_outcomes[!, outcol], w(disallowmissing(control_outcomes.weight)))
 
             (; outcol => (treated_outcome - synthetic_control_outcome))
         end
