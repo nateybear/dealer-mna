@@ -16,10 +16,10 @@ function (@main)(_)
         bootstrap_estimates = subset(event_study_df, :B => ByRow(!ismissing))
         bootstrap_ses = @> bootstrap_estimates begin
             groupby(:T)
-            combine(statistic => std => :se)
+            combine(statistic => std ∘ skipmissing => :se)
         end
 
-        plot_df = innerjoin(sample_estimate, bootstrap_ses, on=:T)
+        plot_df = dropmissing(innerjoin(sample_estimate, bootstrap_ses, on=:T))
 
         plot(
             plot_df.T,
@@ -37,4 +37,5 @@ function (@main)(_)
 
         png(snakemake.output[1])
     end
+    return nothing
 end
