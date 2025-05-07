@@ -187,6 +187,44 @@ checkpoint nonempty_treatment_effects:
         )
 
 
+rule event_study_plot:
+    input:
+        "data/treatment_effects/{transaction_uid}/{dealer_uid}.arrow",
+        "scripts/event_study_plot.jl",
+    output:
+        "data/event_study_plot/{statistic}/{transaction_uid}_{dealer_uid}.png",
+    log:
+        "logs/event_study_plot_{statistic}_{transaction_uid}_{dealer_uid}.log",
+    run:
+        julia(
+            "scripts/event_study_plot.jl",
+            input=input,
+            output=output,
+            log=log,
+            wildcards=wildcards,
+        )
+
+
+def get_event_study_plots(wildcards):
+    # Get the output file from the checkpoint at runtime
+    transaction_uids = pd.read_csv(
+        checkpoints.nonempty_treatment_effects.get().output[0]
+    )
+    with open(checkpoints.statistics.get().output[0], "r") as f:
+        statistics = f.read().splitlines()
+    return [
+        f"data/event_study_plot/{statistic}/{x.transaction_uid}_{x.dealer_uid}.png"
+        for x in transaction_uids.itertuples()
+        for statistic in statistics
+    ]
+
+
+rule event_study_plots:
+    input:
+        "data/statistics.txt",
+        "data/nonempty_treatment_effects.csv",
+        get_event_study_plots,
+
 
 ### UTILS: running julia
 from snakemake.shell import shell
