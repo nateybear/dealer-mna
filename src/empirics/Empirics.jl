@@ -14,5 +14,6 @@ include("windows.jl")
 include("registrations.jl")
 include("demographics.jl")
 include("mahalanobis.jl")
+include("event_study.jl")
 
 end

@@ -1,8 +1,17 @@
 import glob
+import pandas as pd
 
 julia_src = glob.glob("src/**/*.jl")
 julia_dealers = glob.glob("src/dealers/**/*.jl")
 julia_empirics = glob.glob("src/empirics/**/*.jl")
+
+
+rule show_python_version:
+    run:
+        import sys
+
+        print(sys.executable)
+        print(sys.version)
 
 
 rule dealers_init:
@@ -47,36 +56,31 @@ rule transactions_for_analysis:
 
 checkpoint transaction_uids:
     input:
-        *julia_src,
         "scripts/transaction_uids.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
     output:
-        "data/transaction_uids.txt",
+        "data/transaction_uids.csv",
     log:
         "logs/transaction_uids.log",
     run:
         julia("scripts/transaction_uids.jl", input=input, output=output, log=log)
 
 
-def get_treated_and_control_registrations(wildcards):
-    # Get the output file from the checkpoint at runtime
-    checkpoint_output = checkpoints.transaction_uids.get().output[0]
-    with open(checkpoint_output) as f:
-        uids = f.read().splitlines()
-    return expand(
-        [
-            "data/treated_registrations/last_registrations_before_{uid}.arrow",
-            "data/treated_registrations/first_registrations_after_{uid}.arrow",
-            "data/control_registrations/last_registrations_before_{uid}.arrow",
-            "data/control_registrations/first_registrations_after_{uid}.arrow",
-        ],
-        uid=uids,
-    )
+checkpoint statistics:
+    input:
+        "scripts/statistics.jl",
+        "src/empirics/event_study.jl",
+    output:
+        "data/statistics.txt",
+    log:
+        "logs/statistics.log",
+    run:
+        julia("scripts/statistics.jl", output=output, log=log)
 
 
 rule treated_registrations:
     input:
-        *julia_src,
+        "src/empirics/registrations.jl",
         "scripts/treated_registrations.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         dealers_init="data/dealers_init.jld2",
@@ -98,7 +102,7 @@ rule treated_registrations:
 
 rule control_registrations:
     input:
-        *julia_src,
+        "src/empirics/registrations.jl",
         "scripts/control_registrations.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         dealers_init="data/dealers_init.jld2",
@@ -118,11 +122,6 @@ rule control_registrations:
         )
 
 
-rule analysis_sample:
-    input:
-        get_treated_and_control_registrations,
-
-
 rule dealer_demographics:
     input:
         *julia_src,
@@ -134,6 +133,45 @@ rule dealer_demographics:
         "logs/dealer_demographics.log",
     run:
         julia("scripts/dealer_demographics.jl", input=input, output=output, log=log)
+
+
+rule treatment_effects:
+    input:
+        *julia_src,
+        "scripts/treatment_effects.jl",
+        treated_before="data/treated_registrations/last_registrations_before_{transaction_uid}.arrow",
+        treated_after="data/treated_registrations/first_registrations_after_{transaction_uid}.arrow",
+        control_before="data/control_registrations/last_registrations_before_{transaction_uid}.arrow",
+        control_after="data/control_registrations/first_registrations_after_{transaction_uid}.arrow",
+        dealer_demographics="data/dealer_demographics.arrow",
+        dealers_init="data/dealers_init.jld2",
+    output:
+        "data/treatment_effects/{transaction_uid}/{dealer_uid}.arrow",
+    log:
+        "logs/treatment_effects_{transaction_uid}_{dealer_uid}.log",
+    run:
+        julia(
+            "scripts/treatment_effects.jl",
+            input=input,
+            output=output,
+            log=log,
+            wildcards=wildcards,
+        )
+
+
+def get_treatment_effects(wildcards):
+    # Get the output file from the checkpoint at runtime
+    checkpoint_output = checkpoints.transaction_uids.get().output[0]
+    uids = pd.read_csv(checkpoint_output)
+    return [
+        f"data/treatment_effects/{x.transaction_uid}/{x.dealer_uid}.arrow"
+        for x in uids.itertuples()
+    ]
+
+
+rule treatment_effects_summary:
+    input:
+        get_treatment_effects,
 
 
 ### UTILS: running julia
