@@ -6,6 +6,13 @@ julia_dealers = glob.glob("src/dealers/**/*.jl")
 julia_empirics = glob.glob("src/empirics/**/*.jl")
 
 
+wildcard_constraints:
+    transaction_uid="[0-9a-f\\-]+",
+    dealer_uid="[0-9a-f\\-]+",
+    statistic="[a-z_]+",
+    cut="[a-z_]+",
+
+
 rule show_python_version:
     run:
         import sys
@@ -42,6 +49,7 @@ rule transactions_for_analysis:
     input:
         *julia_dealers,
         *julia_empirics,
+        "src/empirics/Empirics.jl",
         "scripts/transactions_for_analysis.jl",
         dealers_init="data/dealers_init.jld2",
     output:
@@ -58,6 +66,7 @@ checkpoint transaction_uids:
     input:
         "scripts/transaction_uids.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
+        dealers_init="data/dealers_init.jld2",
     output:
         "data/transaction_uids.csv",
     log:
@@ -81,6 +90,7 @@ checkpoint statistics:
 rule treated_registrations:
     input:
         "src/empirics/registrations.jl",
+        "src/empirics/Empirics.jl",
         "scripts/treated_registrations.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         dealers_init="data/dealers_init.jld2",
@@ -103,6 +113,7 @@ rule treated_registrations:
 rule control_registrations:
     input:
         "src/empirics/registrations.jl",
+        "src/empirics/Empirics.jl",
         "scripts/control_registrations.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         dealers_init="data/dealers_init.jld2",
@@ -187,6 +198,17 @@ checkpoint nonempty_treatment_effects:
         )
 
 
+def get_nonempty_treatment_effects(wildcards):
+    # Get the output file from the checkpoint at runtime
+    transaction_uids = pd.read_csv(
+        checkpoints.nonempty_treatment_effects.get().output[0]
+    )
+    return [
+        f"data/treatment_effects/{x.transaction_uid}/{x.dealer_uid}.arrow"
+        for x in transaction_uids.itertuples()
+    ]
+
+
 rule event_study_plot:
     input:
         "data/treatment_effects/{transaction_uid}/{dealer_uid}.arrow",
@@ -224,6 +246,41 @@ rule event_study_plots:
         "data/statistics.txt",
         "data/nonempty_treatment_effects.csv",
         get_event_study_plots,
+
+
+rule event_study_cut_plot:
+    input:
+        "scripts/event_study_plot.jl",
+        treatment_effects=get_nonempty_treatment_effects,
+    output:
+        "data/event_study_plot/{statistic}/{cut}.png",
+    log:
+        "logs/event_study_cut_plot_{statistic}_{cut}.log",
+    run:
+        julia(
+            "scripts/event_study_plot.jl",
+            input=input,
+            output=output,
+            log=log,
+            wildcards=wildcards,
+        )
+
+
+def get_event_study_cuts(wildcards):
+    # Get the output file from the checkpoint at runtime
+    with open(checkpoints.statistics.get().output[0], "r") as f:
+        statistics = f.read().splitlines()
+    return expand(
+        "data/event_study_plot/{statistic}/{cut}.png",
+        statistic=statistics,
+        cut=["grand_mean"],
+    )
+
+
+rule event_study_cut_plots:
+    input:
+        "data/statistics.txt",
+        get_event_study_cuts,
 
 
 ### UTILS: running julia

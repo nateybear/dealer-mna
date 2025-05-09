@@ -1,6 +1,6 @@
 using StatsBase: mean, weights as w, median
 using Distributions: Normal, pdf
-using Dates: Day
+using Dates: Day, Quarter, Month
 using Lazy: @>
 using DataFrames
 using PartialFunctions
@@ -16,10 +16,17 @@ const STATISTICS = (
 
 const BOOTSTRAP_REPLICAS = 250
 
-month_counter(d1) = d2 -> floor(Int, (d2 - d1) / Day(30))
+# Julia days won't let you convert months/quarter to days, do it yourself
+daylength(t::Day) = t.value
+daylength(t::Month) = t.value * 30.25
+daylength(t::Quarter) = t.value * 91
+period_counter(d1) = d2 -> let
+    diff_days = d2 - d1
+    floor(Int, diff_days.value / daylength(PERIOD_LENGTH))
+end
 create_time_col(df, date) = @> df begin
-    transform(:regeffdate => ByRow(month_counter(date)) => :T)
-    subset(:T => ByRow(in(-6:5)))
+    transform(:regeffdate => ByRow(period_counter(date)) => :T)
+    subset(:T => ByRow(in(VALID_PERIODS)))
 end
 
 function partial_out(df, outcome_col, by_col)
@@ -43,7 +50,8 @@ function event_study(
     distance = make_distance_fn(dealer_demographics)
     treated_uid = only(unique(treated_before.dealer_uid))
     treated_demographics = only(eachrow(subset(dealer_demographics, :uid => ByRow(==(treated_uid)))))
-    control_demographics = semijoin(dealer_demographics, control_before, on=:uid => :dealer_uid)
+    control_uids = unique(control_before.dealer_uid) ∪ unique(control_after.dealer_uid)
+    control_demographics = subset(dealer_demographics, :uid => ByRow(in(control_uids)))
     control_distances = [distance(treated_demographics, d) for d in eachrow(control_demographics)]
 
     control_weights = DataFrame(
