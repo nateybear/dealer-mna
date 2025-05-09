@@ -6,6 +6,7 @@ using DataFrames
 
 function (@main)(_)
     with_logging() do
+        Dealers.load_from_disk!(snakemake.input["dealers_init"])
         transactions = JLD2.load_object(snakemake.input["transactions_for_analysis"])
         out = DataFrame(
             transaction_uid=[t.uid for t in transactions],
