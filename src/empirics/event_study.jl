@@ -12,6 +12,7 @@ const STATISTICS = (
     median_markup=:price_normed => median,
     total_sales=:vehsalesprice => sum,
     total_units=:vehsalesprice => length,
+    mean_price=:vehsalesprice => mean,
 )
 
 const BOOTSTRAP_REPLICAS = 250
