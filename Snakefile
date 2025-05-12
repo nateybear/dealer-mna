@@ -214,7 +214,7 @@ rule event_study_plot:
         "data/treatment_effects/{transaction_uid}/{dealer_uid}.arrow",
         "scripts/event_study_plot.jl",
     output:
-        "data/event_study_plot/{statistic}/{transaction_uid}_{dealer_uid}.png",
+        "plots/event_study/{statistic}/{transaction_uid}_{dealer_uid}.png",
     log:
         "logs/event_study_plot_{statistic}_{transaction_uid}_{dealer_uid}.log",
     run:
@@ -235,7 +235,7 @@ def get_event_study_plots(wildcards):
     with open(checkpoints.statistics.get().output[0], "r") as f:
         statistics = f.read().splitlines()
     return [
-        f"data/event_study_plot/{statistic}/{x.transaction_uid}_{x.dealer_uid}.png"
+        f"plots/event_study/{statistic}/{x.transaction_uid}_{x.dealer_uid}.png"
         for x in transaction_uids.itertuples()
         for statistic in statistics
     ]
@@ -252,8 +252,9 @@ rule event_study_cut_plot:
     input:
         "scripts/event_study_plot.jl",
         treatment_effects=get_nonempty_treatment_effects,
+        dealer_demographics="data/dealer_demographics.arrow",
     output:
-        "data/event_study_plot/{statistic}/{cut}.png",
+        "plots/event_study/{statistic}/{cut}.png",
     log:
         "logs/event_study_cut_plot_{statistic}_{cut}.log",
     run:
@@ -271,9 +272,15 @@ def get_event_study_cuts(wildcards):
     with open(checkpoints.statistics.get().output[0], "r") as f:
         statistics = f.read().splitlines()
     return expand(
-        "data/event_study_plot/{statistic}/{cut}.png",
+        "plots/event_study/{statistic}/{cut}.png",
         statistic=statistics,
-        cut=["grand_mean"],
+        cut=[
+            "grand_mean",
+            "share_urban",
+            "share_black",
+            "share_hispanic",
+            "median_income",
+        ],
     )
 
 
