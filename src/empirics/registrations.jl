@@ -14,7 +14,7 @@ make_filter(make::Set{String}) = make_filter(collect(make))
 function last_registrations_before(t::Transaction, make=nothing)
     ismissing(last_period_before(t)) && return missing
 
-    timetravel(t) do
+    out = timetravel(t) do
         @> registrations() begin
             subset(
                 :regeffdate => ByRow(in(last_period_before(t))),
@@ -23,14 +23,20 @@ function last_registrations_before(t::Transaction, make=nothing)
             )
             normalize_price
             add_distance
+            create_time_col(t.last_seller_regeffdate + Day(1))
         end
     end
+
+    # make sure registrations have all time periods
+    # before the transaction, or else return missing
+    before_periods = Set(p for p in VALID_PERIODS if p < 0)
+    before_periods ⊆ out.T ? out : missing
 end
 
 function first_registrations_after(t::Transaction, make=nothing)
     ismissing(first_period_after(t)) && return missing
 
-    timetravel(t, before=false) do
+    out = timetravel(t, before=false) do
         @> registrations() begin
             subset(
                 :regeffdate => ByRow(in(first_period_after(t))),
@@ -39,8 +45,14 @@ function first_registrations_after(t::Transaction, make=nothing)
             )
             normalize_price
             add_distance
+            create_time_col(t.first_buyer_regeffdate - Day(1))
         end
     end
+
+    # make sure registrations have all time periods
+    # after the transaction, or else return missing
+    after_periods = Set(p for p in VALID_PERIODS if p ≥ 0)
+    after_periods ⊆ out.T ? out : missing
 end
 
 function control_dealers(t)
@@ -64,6 +76,7 @@ end
 
 function control_registrations_before(t)
     gdns = reduce(union, control_dealers(t).gdns)
+    before_periods = Set(p for p in VALID_PERIODS if p < 0)
     timetravel(t) do
         @> registrations() begin
             subset(
@@ -76,12 +89,16 @@ function control_registrations_before(t)
             )
             normalize_price
             add_distance
+            create_time_col(t.last_seller_regeffdate + Day(1))
+            groupby(:dealer_uid)
+            subset(:T => ⊇(before_periods))
         end
     end
 end
 
 function control_registrations_after(t)
     gdns = reduce(union, control_dealers(t).gdns)
+    after_periods = Set(p for p in VALID_PERIODS if p ≥ 0)
     timetravel(t, before=false) do
         @> registrations() begin
             subset(
@@ -94,6 +111,9 @@ function control_registrations_after(t)
             )
             normalize_price
             add_distance
+            create_time_col(t.first_buyer_regeffdate - Day(1))
+            groupby(:dealer_uid)
+            subset(:T => ⊇(after_periods))
         end
     end
 end

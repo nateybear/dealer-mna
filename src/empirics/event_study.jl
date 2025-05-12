@@ -1,6 +1,6 @@
 using StatsBase: mean, weights as w, median
 using Distributions: Normal, pdf
-using Dates: Day, Quarter, Month
+using Dates: Day
 using Lazy: @>
 using DataFrames
 using PartialFunctions
@@ -16,19 +16,6 @@ const STATISTICS = (
 )
 
 const BOOTSTRAP_REPLICAS = 250
-
-# Julia days won't let you convert months/quarter to days, do it yourself
-daylength(t::Day) = t.value
-daylength(t::Month) = t.value * 30.25
-daylength(t::Quarter) = t.value * 91
-period_counter(d1) = d2 -> let
-    diff_days = d2 - d1
-    floor(Int, diff_days.value / daylength(PERIOD_LENGTH))
-end
-create_time_col(df, date) = @> df begin
-    transform(:regeffdate => ByRow(period_counter(date)) => :T)
-    subset(:T => ByRow(in(VALID_PERIODS)))
-end
 
 function partial_out(df, outcome_col, by_col)
     weight_sum = @> df groupby(:T) combine(:weight => sum ∘ skipmissing => :weight_sum)
@@ -59,14 +46,6 @@ function event_study(
         dealer_uid=control_demographics.uid,
         weight=pdf.(Normal(), control_distances)
     )
-
-    last_seller_regeffdate = maximum(treated_before.regeffdate)
-    first_buyer_regeffdate = minimum(treated_after.regeffdate)
-
-    treated_before = create_time_col(treated_before, last_seller_regeffdate + Day(1))
-    treated_after = create_time_col(treated_after, first_buyer_regeffdate - Day(1))
-    control_before = create_time_col(control_before, last_seller_regeffdate + Day(1))
-    control_after = create_time_col(control_after, first_buyer_regeffdate - Day(1))
 
     all_registrations = vcat(
         treated_before,

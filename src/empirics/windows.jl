@@ -1,4 +1,5 @@
 import ..Dealers: Entry, Exit, Transaction
+using Dates: Day, Quarter, Month
 
 blackout_period(::Missing, ::Date) = missing
 blackout_period(::Date, ::Missing) = missing
@@ -15,3 +16,16 @@ last_period_before(t::Transaction) = ismissing(blackout_period(t)) ?
 first_period_after(t::Transaction) = ismissing(blackout_period(t)) ?
                                      missing :
                                      t.first_buyer_regeffdate:(t.first_buyer_regeffdate+BLACKOUT_LENGTH)
+
+# Julia days won't let you convert months/quarter to days, do it yourself
+daylength(t::Day) = t.value
+daylength(t::Month) = t.value * 30.25
+daylength(t::Quarter) = t.value * 91
+period_counter(d1) = d2 -> let
+    diff_days = d2 - d1
+    floor(Int, diff_days.value / daylength(PERIOD_LENGTH))
+end
+create_time_col(df, date) = @> df begin
+    transform(:regeffdate => ByRow(period_counter(date)) => :T)
+    subset(:T => ByRow(in(VALID_PERIODS)))
+end
