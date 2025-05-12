@@ -84,7 +84,7 @@ function (@main)(_)
 
             elseif cut in names(dealer_demographics)
                 mid = median(dealer_demographics[!, cut])
-                cut_name = titlecase(replace(cut_name(cut), r"_" => " "))
+                cut_name = titlecase(replace(cut, r"_" => " "))
                 event_study_df = @> event_study_df begin
                     innerjoin(dealer_demographics, on=:dealer_uid => :uid)
                     transform(cut => ByRow(>(mid)) => :group)
