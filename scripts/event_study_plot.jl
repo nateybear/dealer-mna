@@ -72,7 +72,7 @@ function (@main)(_)
                 sample_estimate = @> event_study_df subset(:B => ByRow(ismissing)) select(:T, statistic) groupby(:T) combine(statistic => mean ∘ skipmissing => statistic)
 
 
-                bootstrap_estimates = @> event_study_df subset(:B => ByRow(!ismissing)) groupby([:B, :T]) combine(statistic => mean ∘ resample ∘ skipmissing => statistic)
+                bootstrap_estimates = @> event_study_df subset(:B => ByRow(!ismissing)) groupby([:B, :T]) combine(statistic => mean ∘ skipmissing => statistic)
                 bootstrap_ses = @> bootstrap_estimates begin
                     groupby(:T)
                     combine(statistic => std ∘ skipmissing => :se)
@@ -92,13 +92,15 @@ function (@main)(_)
                 end
                 sample_estimate = @> event_study_df subset(:B => ByRow(ismissing)) select(:T, :group, statistic) groupby([:T, :group]) combine(statistic => mean ∘ skipmissing => statistic)
 
-                bootstrap_estimates = @> event_study_df subset(:B => ByRow(!ismissing)) groupby([:B, :T, :group]) combine(statistic => mean ∘ resample ∘ skipmissing => statistic)
+                bootstrap_estimates = @> event_study_df subset(:B => ByRow(!ismissing)) groupby([:B, :T, :group]) combine(statistic => mean ∘ skipmissing => statistic)
                 bootstrap_ses = @> bootstrap_estimates begin
                     groupby([:T, :group])
                     combine(statistic => std ∘ skipmissing => :se)
                 end
 
                 plot_df = dropmissing(innerjoin(sample_estimate, bootstrap_ses, on=[:T, :group]))
+
+                event_study_plot!(plot_df, statistic)
             end
 
         else # this is just plotting one dealership
