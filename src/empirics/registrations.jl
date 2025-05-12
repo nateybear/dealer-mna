@@ -23,9 +23,12 @@ function last_registrations_before(t::Transaction, make=nothing)
             )
             normalize_price
             add_distance
-            create_time_col(t.last_seller_regeffdate + Day(1))
         end
     end
+
+    ismissing(out) || isempty(out) && return missing
+
+    out = create_time_col(out, t.last_seller_regeffdate + Day(1))
 
     # make sure registrations have all time periods
     # before the transaction, or else return missing
@@ -45,9 +48,11 @@ function first_registrations_after(t::Transaction, make=nothing)
             )
             normalize_price
             add_distance
-            create_time_col(t.first_buyer_regeffdate - Day(1))
         end
     end
+
+    ismissing(out) || isempty(out) && return missing
+    out = create_time_col(out, t.first_buyer_regeffdate - Day(1))
 
     # make sure registrations have all time periods
     # after the transaction, or else return missing
