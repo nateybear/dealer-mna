@@ -1,4 +1,4 @@
-import ..Dealers: Entry, Exit, Transaction, add_distance, seller_gdns, buyer_gdns, timetravel, affected_gdns, State, dealer_idxs
+import ..Dealers: Entry, Exit, Transaction, add_distance, seller_gdns, buyer_gdns, timetravel, affected_gdns, State, dealer_idxs, Events
 import ..Registrations: registrations, normalize_price, add_zips
 import ..Geometry: distance
 import ..snakemake
@@ -61,10 +61,9 @@ function first_registrations_after(t::Transaction, make=nothing)
 end
 
 function control_dealers(t)
-    transactions_for_analysis = JLD2.load_object(snakemake.input["transactions_for_analysis"])
     timetravel(t) do
-        # you are "tainted" if you are undergoing a transaction that overlaps with the blackout period of another transaction
-        tainted_gdns = reduce(union, (affected_gdns(t2) for t2 in transactions_for_analysis if t2.uid != t.uid), init=Set{String}())
+        # you are "tainted" if you have things happening to you, or you are closer than the radius
+        tainted_gdns = reduce(union, (affected_gdns(t2) for t2 in Events if t2.uid != t.uid), init=Set{String}())
         treated_dealerships = State.df[dealer_idxs(t), :]
 
         return subset(State.df,
