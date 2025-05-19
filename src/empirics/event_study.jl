@@ -13,6 +13,7 @@ const STATISTICS = (
     total_sales=:vehsalesprice => sum,
     total_units=:vehsalesprice => length,
     mean_price=:vehsalesprice => mean,
+    trim_rank=:trim_rank => mean,
 )
 
 const BOOTSTRAP_REPLICAS = 250

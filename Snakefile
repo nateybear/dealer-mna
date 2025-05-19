@@ -38,7 +38,7 @@ rule price_table:
     input:
         "scripts/price_table.jl",
     output:
-        "data/price_table.jld2",
+        "data/price_table.arrow",
     log:
         "logs/price_table.log",
     run:
@@ -94,7 +94,7 @@ rule treated_registrations:
         "scripts/treated_registrations.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         dealers_init="data/dealers_init.jld2",
-        price_table="data/price_table.jld2",
+        price_table="data/price_table.arrow",
     output:
         before="data/treated_registrations/last_registrations_before_{uid}.arrow",
         after="data/treated_registrations/first_registrations_after_{uid}.arrow",
@@ -117,7 +117,7 @@ rule control_registrations:
         "scripts/control_registrations.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         dealers_init="data/dealers_init.jld2",
-        price_table="data/price_table.jld2",
+        price_table="data/price_table.arrow",
     output:
         before="data/control_registrations/last_registrations_before_{uid}.arrow",
         after="data/control_registrations/first_registrations_after_{uid}.arrow",
@@ -214,7 +214,7 @@ rule event_study_plot:
         "data/treatment_effects/{transaction_uid}/{dealer_uid}.arrow",
         "scripts/event_study_plot.jl",
     output:
-        "plots/event_study/{statistic}/{transaction_uid}_{dealer_uid}.png",
+        "plots/event_study/{statistic}/treated_dealers/{transaction_uid}_{dealer_uid}.png",
     log:
         "logs/event_study_plot_{statistic}_{transaction_uid}_{dealer_uid}.log",
     run:
@@ -235,7 +235,7 @@ def get_event_study_plots(wildcards):
     with open(checkpoints.statistics.get().output[0], "r") as f:
         statistics = f.read().splitlines()
     return [
-        f"plots/event_study/{statistic}/{x.transaction_uid}_{x.dealer_uid}.png"
+        f"plots/event_study/{statistic}/treated_dealers/{x.transaction_uid}_{x.dealer_uid}.png"
         for x in transaction_uids.itertuples()
         for statistic in statistics
     ]
@@ -254,7 +254,7 @@ rule event_study_cut_plot:
         treatment_effects=get_nonempty_treatment_effects,
         dealer_demographics="data/dealer_demographics.arrow",
     output:
-        "plots/event_study/{statistic}/{cut}.png",
+        "plots/event_study/{statistic}/cuts/{cut}.png",
     log:
         "logs/event_study_cut_plot_{statistic}_{cut}.log",
     run:
@@ -272,7 +272,7 @@ def get_event_study_cuts(wildcards):
     with open(checkpoints.statistics.get().output[0], "r") as f:
         statistics = f.read().splitlines()
     return expand(
-        "plots/event_study/{statistic}/{cut}.png",
+        "plots/event_study/{statistic}/cuts/{cut}.png",
         statistic=statistics,
         cut=[
             "grand_mean",
