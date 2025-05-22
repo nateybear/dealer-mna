@@ -290,6 +290,23 @@ rule event_study_cut_plots:
         get_event_study_cuts,
 
 
+rule dealer_group_size_histogram:
+    input:
+        "scripts/dealer_group_size_histogram.jl",
+        dealers_init="data/dealers_init.jld2",
+    output:
+        "plots/dealer_group_size_histogram.png",
+    log:
+        "logs/dealer_group_size_histogram.log",
+    run:
+        julia(
+            "scripts/dealer_group_size_histogram.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 ### UTILS: running julia
 from snakemake.shell import shell
 import tempfile
