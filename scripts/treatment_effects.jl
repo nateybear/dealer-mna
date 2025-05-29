@@ -37,6 +37,8 @@ function (@main)(_)
             subset(:make => ByRow(in(franchises)))
         end
 
+        @info "tables" treated_before treated_after control_before control_after
+
         dealer_demographics = DataFrame(Arrow.Table(snakemake.input["dealer_demographics"]))
 
         if any(isempty, (treated_before, treated_after, control_before, control_after))

@@ -19,6 +19,7 @@ function (@main)(_)
                    !ismissing(first_registrations) &&
                    !isempty(last_registrations) &&
                    !isempty(first_registrations)
+                    @info "Transaction $(t.uid) has registrations before and after"
                     push!(out, t)
                 end
             end

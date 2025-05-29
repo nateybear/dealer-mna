@@ -1,5 +1,6 @@
 import glob
 import pandas as pd
+from itertools import chain
 
 julia_src = glob.glob("src/**/*.jl")
 julia_dealers = glob.glob("src/dealers/**/*.jl")
@@ -11,6 +12,16 @@ wildcard_constraints:
     dealer_uid="[0-9a-f\\-]+",
     statistic="[a-z_]+",
     cut="[a-z_]+",
+    folder="[a-z_]+",
+    buy_sell="[a-z]+",
+    i="[0-9]+",
+
+
+# rule all:
+#     input:
+#         event_study_plots,
+#         event_study_cut_plots,
+#         dealer_group_size_histogram,
 
 
 rule show_python_version:
@@ -52,6 +63,7 @@ rule transactions_for_analysis:
         "src/empirics/Empirics.jl",
         "scripts/transactions_for_analysis.jl",
         dealers_init="data/dealers_init.jld2",
+        price_table="data/price_table.arrow",
     output:
         "data/transactions_for_analysis.jld2",
     log:
@@ -96,10 +108,10 @@ rule treated_registrations:
         dealers_init="data/dealers_init.jld2",
         price_table="data/price_table.arrow",
     output:
-        before="data/treated_registrations/last_registrations_before_{uid}.arrow",
-        after="data/treated_registrations/first_registrations_after_{uid}.arrow",
+        before="data/treated/{folder}/last_registrations_before_{transaction_uid}_{dealer_uid}.arrow",
+        after="data/treated/{folder}/first_registrations_after_{transaction_uid}_{dealer_uid}.arrow",
     log:
-        "logs/treated_registrations_{uid}.log",
+        "logs/{folder}_{transaction_uid}_{dealer_uid}.log",
     run:
         julia(
             "scripts/treated_registrations.jl",
@@ -119,10 +131,10 @@ rule control_registrations:
         dealers_init="data/dealers_init.jld2",
         price_table="data/price_table.arrow",
     output:
-        before="data/control_registrations/last_registrations_before_{uid}.arrow",
-        after="data/control_registrations/first_registrations_after_{uid}.arrow",
+        before="data/control/{folder}/last_registrations_before_{transaction_uid}_{dealer_uid}.arrow",
+        after="data/control/{folder}/first_registrations_after_{transaction_uid}_{dealer_uid}.arrow",
     log:
-        "logs/control_registrations_{uid}.log",
+        "logs/{folder}_{transaction_uid}_{dealer_uid}.log",
     run:
         julia(
             "scripts/control_registrations.jl",
@@ -150,16 +162,16 @@ rule treatment_effects:
     input:
         *julia_src,
         "scripts/treatment_effects.jl",
-        treated_before="data/treated_registrations/last_registrations_before_{transaction_uid}.arrow",
-        treated_after="data/treated_registrations/first_registrations_after_{transaction_uid}.arrow",
-        control_before="data/control_registrations/last_registrations_before_{transaction_uid}.arrow",
-        control_after="data/control_registrations/first_registrations_after_{transaction_uid}.arrow",
+        treated_before="data/treated/{folder}/last_registrations_before_{transaction_uid}_{dealer_uid}.arrow",
+        treated_after="data/treated/{folder}/first_registrations_after_{transaction_uid}_{dealer_uid}.arrow",
+        control_before="data/control/{folder}/last_registrations_before_{transaction_uid}_{dealer_uid}.arrow",
+        control_after="data/control/{folder}/first_registrations_after_{transaction_uid}_{dealer_uid}.arrow",
         dealer_demographics="data/dealer_demographics.arrow",
         dealers_init="data/dealers_init.jld2",
     output:
-        "data/treatment_effects/{transaction_uid}/{dealer_uid}.arrow",
+        "data/treatment_effects/{folder}/{transaction_uid}/{dealer_uid}.arrow",
     log:
-        "logs/treatment_effects_{transaction_uid}_{dealer_uid}.log",
+        "logs/treatment_effects_{folder}_{transaction_uid}_{dealer_uid}.log",
     run:
         julia(
             "scripts/treatment_effects.jl",
@@ -170,27 +182,21 @@ rule treatment_effects:
         )
 
 
-def get_treatment_effects(wildcards):
-    # Get the output file from the checkpoint at runtime
-    checkpoint_output = checkpoints.transaction_uids.get().output[0]
-    uids = pd.read_csv(checkpoint_output)
-    return [
-        f"data/treatment_effects/{x.transaction_uid}/{x.dealer_uid}.arrow"
-        for x in uids.itertuples()
-    ]
-
-
-checkpoint nonempty_treatment_effects:
+# these generate sets of uids for each transaction
+checkpoint affiliated_dealerships:
     input:
-        get_treatment_effects,
-        "scripts/nonempty_treatment_effects.jl",
+        "data/transaction_uids.csv",
+        "scripts/affiliated_dealerships.jl",
+        transactions="data/transactions_for_analysis.jld2",
+        dealers_init="data/dealers_init.jld2",
     output:
-        "data/nonempty_treatment_effects.csv",
+        buyer_group="data/affiliated_dealerships/buyer_group_{transaction_uid}.txt",
+        seller_group="data/affiliated_dealerships/seller_group_{transaction_uid}.txt",
     log:
-        "logs/nonempty_treatment_effects.log",
+        "logs/affiliated_dealerships_{transaction_uid}.log",
     run:
         julia(
-            "scripts/nonempty_treatment_effects.jl",
+            "scripts/affiliated_dealerships.jl",
             input=input,
             output=output,
             log=log,
@@ -198,25 +204,104 @@ checkpoint nonempty_treatment_effects:
         )
 
 
-def get_nonempty_treatment_effects(wildcards):
-    # Get the output file from the checkpoint at runtime
-    transaction_uids = pd.read_csv(
-        checkpoints.nonempty_treatment_effects.get().output[0]
-    )
-    return [
-        f"data/treatment_effects/{x.transaction_uid}/{x.dealer_uid}.arrow"
-        for x in transaction_uids.itertuples()
-    ]
-
-
-rule event_study_plot:
+# get three closest dealerships for each transaction
+checkpoint closest_dealerships:
     input:
-        "data/treatment_effects/{transaction_uid}/{dealer_uid}.arrow",
+        "data/transaction_uids.csv",
+        "scripts/closest_dealerships.jl",
+        dealers_init="data/dealers_init.jld2",
+        transactions="data/transactions_for_analysis.jld2",
+    output:
+        "data/closest_dealerships/{transaction_uid}_{dealer_uid}.txt",
+    log:
+        "logs/closest_dealerships_{transaction_uid}_{dealer_uid}.log",
+    run:
+        julia(
+            "scripts/closest_dealerships.jl",
+            input=input,
+            output=output,
+            log=log,
+            wildcards=wildcards,
+        )
+
+
+def get_related_dealerships(wildcards):
+    transaction_uids = pd.read_csv(checkpoints.transaction_uids.get().output[0])
+    out = set()
+    for t in transaction_uids.itertuples():
+        out.add(f"data/closest_dealerships/{t.transaction_uid}_{t.dealer_uid}.txt")
+        out.add(f"data/affiliated_dealerships/buyer_group_{t.transaction_uid}.txt")
+        out.add(f"data/affiliated_dealerships/seller_group_{t.transaction_uid}.txt")
+
+    return list(out)
+
+
+# used to force the checkpoints to run
+checkpoint related_dealerships:
+    input:
+        "data/transaction_uids.csv",
+        get_related_dealerships,
+    output:
+        "data/related_dealerships.txt",
+    shell:
+        "touch {output}"
+
+
+def get_treatment_effects(wildcards):
+    # Get the output file from the checkpoint at runtime
+    return glob.glob(f"data/treatment_effects/{wildcards.folder}/**/*.arrow")
+
+
+rule treated_event_study_plot:
+    input:
+        "data/treatment_effects/treated_dealers/{transaction_uid}/{dealer_uid}.arrow",
         "scripts/event_study_plot.jl",
     output:
         "plots/event_study/{statistic}/treated_dealers/{transaction_uid}_{dealer_uid}.png",
     log:
-        "logs/event_study_plot_{statistic}_{transaction_uid}_{dealer_uid}.log",
+        "logs/event_study_plot_treated_{statistic}_{transaction_uid}_{dealer_uid}.log",
+    run:
+        julia(
+            "scripts/event_study_plot.jl",
+            input=input,
+            output=output,
+            log=log,
+            wildcards=wildcards,
+        )
+
+
+rule affiliated_event_study_plot:
+    input:
+        "data/treatment_effects/{buy_sell}/{transaction_uid}/{dealer_uid}.arrow",
+        "scripts/event_study_plot.jl",
+        lambda w: checkpoints.affiliated_dealerships.get(
+            transaction_uid=w.transaction_uid
+        ).output[f"{w.buy_sell}_group"],
+    output:
+        "plots/event_study/{statistic}/{buy_sell}/{transaction_uid}_{dealer_uid}.png",
+    log:
+        "logs/event_study_plot_{buy_sell}_{statistic}_{transaction_uid}_{dealer_uid}.log",
+    run:
+        julia(
+            "scripts/event_study_plot.jl",
+            input=input,
+            output=output,
+            log=log,
+            wildcards=wildcards,
+        )
+
+
+rule closest_dealer_event_study_plot:
+    input:
+        "data/treatment_effects/closest_dealers/{transaction_uid}/{dealer_uid}.arrow",
+        "scripts/event_study_plot.jl",
+        lambda w: checkpoints.closest_dealerships.get(
+            transaction_uid=w.transaction_uid, dealer_uid=w.dealer_uid
+        ).output[0],
+    output:
+        "plots/event_study/{statistic}/closest_dealers/{transaction_uid}_{i}_{dealer_uid}.png",
+    log:
+        "logs/event_study_plot_closest_{statistic}_{transaction_uid}_{i}_{dealer_uid}.log",
     run:
         julia(
             "scripts/event_study_plot.jl",
@@ -229,34 +314,69 @@ rule event_study_plot:
 
 def get_event_study_plots(wildcards):
     # Get the output file from the checkpoint at runtime
-    transaction_uids = pd.read_csv(
-        checkpoints.nonempty_treatment_effects.get().output[0]
-    )
+    transaction_uids = pd.read_csv(checkpoints.transaction_uids.get().output[0])
     with open(checkpoints.statistics.get().output[0], "r") as f:
         statistics = f.read().splitlines()
-    return [
-        f"plots/event_study/{statistic}/treated_dealers/{x.transaction_uid}_{x.dealer_uid}.png"
-        for x in transaction_uids.itertuples()
-        for statistic in statistics
-    ]
+
+    # force the checkpoints to run
+    related_files = checkpoints.related_dealerships.get().output
+    out = set()
+    for t in transaction_uids.itertuples():
+        for statistic in statistics:
+            out.add(
+                f"plots/event_study/{statistic}/treated_dealers/{t.transaction_uid}_{t.dealer_uid}.png"
+            )
+            closest_dealers_file = checkpoints.closest_dealerships.get(
+                transaction_uid=t.transaction_uid, dealer_uid=t.dealer_uid
+            ).output[0]
+            with open(closest_dealers_file, "r") as f:
+                closest_dealers = f.read().splitlines()
+            for i, d in enumerate(closest_dealers):
+                out.add(
+                    f"plots/event_study/{statistic}/closest_dealers/{t.transaction_uid}_{i+1}_{d}.png"
+                )
+
+            buyer_group_file = checkpoints.affiliated_dealerships.get(
+                transaction_uid=t.transaction_uid
+            ).output["buyer_group"]
+            with open(buyer_group_file, "r") as f:
+                buyer_group = f.read().splitlines()
+            for d in buyer_group:
+                out.add(
+                    f"plots/event_study/{statistic}/buyer/{t.transaction_uid}_{d}.png"
+                )
+
+            seller_group_file = checkpoints.affiliated_dealerships.get(
+                transaction_uid=t.transaction_uid
+            ).output["seller_group"]
+            with open(seller_group_file, "r") as f:
+                seller_group = f.read().splitlines()
+            for d in seller_group:
+                out.add(
+                    f"plots/event_study/{statistic}/seller/{t.transaction_uid}_{d}.png"
+                )
+
+    return list(out)
 
 
 rule event_study_plots:
     input:
         "data/statistics.txt",
-        "data/nonempty_treatment_effects.csv",
+        "data/transaction_uids.csv",
+        "data/related_dealerships.txt",
         get_event_study_plots,
 
 
 rule event_study_cut_plot:
     input:
         "scripts/event_study_plot.jl",
-        treatment_effects=get_nonempty_treatment_effects,
+        get_event_study_plots,  # make sure all the plots are made before making cuts, since it relies on glob
+        treatment_effects=get_treatment_effects,
         dealer_demographics="data/dealer_demographics.arrow",
     output:
-        "plots/event_study/{statistic}/cuts/{cut}.png",
+        "plots/event_study/{statistic}/{folder}/cuts/{cut}.png",
     log:
-        "logs/event_study_cut_plot_{statistic}_{cut}.log",
+        "logs/event_study_{folder}_cut_plot_{statistic}_{cut}.log",
     run:
         julia(
             "scripts/event_study_plot.jl",
@@ -272,7 +392,7 @@ def get_event_study_cuts(wildcards):
     with open(checkpoints.statistics.get().output[0], "r") as f:
         statistics = f.read().splitlines()
     return expand(
-        "plots/event_study/{statistic}/cuts/{cut}.png",
+        "plots/event_study/{folder}/{statistic}/cuts/{cut}.png",
         statistic=statistics,
         cut=[
             "grand_mean",
@@ -281,12 +401,20 @@ def get_event_study_cuts(wildcards):
             "share_hispanic",
             "median_income",
         ],
+        folder=[
+            "treated_dealers",
+            "closest_dealers",
+            "buyer",
+            "seller",
+        ],
     )
 
 
 rule event_study_cut_plots:
     input:
         "data/statistics.txt",
+        "data/transaction_uids.csv",
+        "data/related_dealerships.txt",
         get_event_study_cuts,
 
 

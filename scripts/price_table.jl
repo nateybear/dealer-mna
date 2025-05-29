@@ -1,9 +1,9 @@
 using DealerMnA
-import JLD2
+using Arrow
 
 function (@main)(_)
     with_logging() do
-        JLD2.save_object(
+        Arrow.write(
             snakemake.output[1],
             Registrations.price_table(),
         )

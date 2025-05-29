@@ -29,18 +29,26 @@ end
 function add_distance(r)
     r = add_zips(r)
     isempty(r) && return missing
+    r.uid = [uuid4() for _ in 1:nrow(r)]
     flat_dealers = @> State.df begin
-        select(:geometry => :dealer_geometry, :gdns => :dlrgdn, :uid => :dealer_uid)
+        select(
+            :geometry => :dealer_geometry,
+            :gdns => :dlrgdn,
+            :uid => :dealer_uid,
+            :franchises => :make
+        )
         flatten(:dlrgdn)
-        groupby(:dlrgdn)
-        combine([:dealer_geometry, :dealer_uid] .=> Ref{Vector}, renamecols=false)
+        flatten(:make)
     end
-    r = innerjoin(r, flat_dealers, on=:dlrgdn, matchmissing=:notequal)
-    transform(groupby(r, :dlrgdn)) do gdf
-        dealers = first(gdf.dealer_geometry)
-        @> gdf begin
-            transform([:geometry, :make] => ByRow(normed_distance$dealers) => AsTable)
-            transform([:dealer_uid, :i_shortest] => ByRow((x, y) -> x[y]) => :dealer_uid)
+    r = innerjoin(r, flat_dealers, on=[:dlrgdn, :make], matchmissing=:notequal)
+    isempty(r) && return missing
+    combine(groupby(r, :uid), keepkeys=false) do gdf
+        dealers = gdf.dealer_geometry
+        geometry = first(gdf.geometry)
+        make = first(gdf.make)
+        dist_info = normed_distance(dealers, geometry, make)
+        @> gdf[[dist_info.i_shortest], :] begin
+            hcat(DataFrame(; dist_info...))
             select(Not(:dealer_geometry, :i_shortest))
         end
     end
