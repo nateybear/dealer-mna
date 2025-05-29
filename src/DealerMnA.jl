@@ -15,15 +15,17 @@ using DrWatson
 import JLD2
 import Arrow
 using DataFrames
-import ..Dealers, ..Empirics
+import ..Dealers, ..Empirics, ..Registrations, ..nonmissing
 
 @setup_workload begin
     if isfile(datadir("transactions_for_analysis.jld2")) && isfile(datadir("dealers_init.jld2"))
         @compile_workload begin
             Dealers.load_from_disk!(datadir("dealers_init.jld2"))
             t = JLD2.load_object(datadir("transactions_for_analysis.jld2"))[1]
-            df = Empirics.last_registrations_before(t)
-            df = subset(df, :make => ByRow(==("FORD")))
+            control_dealers = Dealers.timetravel(t) do
+                reduce(union, Empirics.control_dealers(t).gdns)
+            end
+            df = subset(Registrations.registrations(), :dlrgdn => ByRow(nonmissing(in(control_dealers))))
             df = transform(df, :vehsalesprice => ByRow(x -> x / 1000) => :vehsalesprice)
             Arrow.write("temp.arrow", df)
             rm("temp.arrow")
