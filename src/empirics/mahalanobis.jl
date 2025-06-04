@@ -6,6 +6,9 @@ const mahalanobis_cols = [
     :share_urban,
     :share_black,
     :share_hispanic,
+    :closest_first,
+    :closest_second,
+    :closest_third,
 ]
 
 function make_distance_fn(dealer_demographics)
