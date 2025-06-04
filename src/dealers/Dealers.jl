@@ -1,6 +1,5 @@
 module Dealers
 
-
 import ArchGDAL as AG
 using DataFrames
 using DataStructures: DefaultDict
@@ -14,9 +13,7 @@ using StructArrays
 using StaticArrays
 using UUIDs
 
-
 import ..Geometry
-import ..Registrations: registrations
 
 include("loading.jl")
 include("types.jl")
@@ -65,7 +62,9 @@ function init_dealers!()
         if !isnothing(idx_same_gdns)
             # license number is the same
             old = State.df[idx_same_gdns]
-            @info "Merging by adjacency" old new = NamedTuple(d) distance = Geometry.distance(geometry, old.geometry)
+            @info "Merging by adjacency" old new = NamedTuple(d) distance = Geometry.distance(
+                geometry, old.geometry
+            )
             State.df.dbas[idx_same_gdns] = union(old.dbas, dbas)
             State.df.franchises[idx_same_gdns] = union(old.franchises, franchises)
             continue
@@ -77,7 +76,9 @@ function init_dealers!()
         end
         if !isnothing(idx_same_dba)
             old = State.df[idx_same_dba]
-            @info "Merging by dba" old new = NamedTuple(d) distance = Geometry.distance(geometry, old.geometry)
+            @info "Merging by dba" old new = NamedTuple(d) distance = Geometry.distance(
+                geometry, old.geometry
+            )
             State.df.dbas[idx_same_dba] = union(old.dbas, dbas)
             State.df.franchises[idx_same_dba] = union(old.franchises, franchises)
             continue
@@ -92,7 +93,9 @@ function init_dealers!()
         end
         if !isnothing(idx_same_group)
             old = State.df[idx_same_group]
-            @info "Merging by group" old new = NamedTuple(d) distance = Geometry.distance(geometry, old.geometry)
+            @info "Merging by group" old new = NamedTuple(d) distance = Geometry.distance(
+                geometry, old.geometry
+            )
             State.df.dbas[idx_same_group] = union(old.dbas, dbas)
             State.df.gdns[idx_same_group] = union(old.gdns, gdns)
             continue
@@ -100,7 +103,19 @@ function init_dealers!()
 
         # else this is a new dealership
         @info "New dealership" NamedTuple(d)
-        push!(State.df, Dealership(; dbas, address, geometry, d.msa, gdns, franchises, gid=d.group_id, entity=d.business_name_normed))
+        push!(
+            State.df,
+            Dealership(;
+                dbas,
+                address,
+                geometry,
+                d.msa,
+                gdns,
+                franchises,
+                gid = d.group_id,
+                entity = d.business_name_normed,
+            ),
+        )
     end
 end
 
@@ -122,13 +137,12 @@ function compute_franchise_network!()
         begin
             dealer_idx = findall(∋(franchise), State.df.franchises)
             geoms_df = DataFrame(
-                idx=dealer_idx,
-                longitude=first.(State.df.geometry[dealer_idx]),
-                latitude=last.(State.df.geometry[dealer_idx])
+                idx = dealer_idx,
+                longitude = first.(State.df.geometry[dealer_idx]),
+                latitude = last.(State.df.geometry[dealer_idx]),
             )
             network = Geometry.catchment_area(geoms_df)
             N = nrow(network)
-
 
             franchise => FranchiseNetwork(
                 SVector{N}(network.idx), SVector{N}(network.geometry)
@@ -141,7 +155,7 @@ end
 
 function compute_group_map!()
     State.dealer_groups =
-        let out = DefaultDict{UUID,Set{Int64}}(Set{Int64})
+        let out = DefaultDict{UUID, Set{Int64}}(Set{Int64})
             for (i, d) in enumerate(eachrow(State.df))
                 out[d.gid] = union(out[d.gid], i)
             end
@@ -150,13 +164,12 @@ function compute_group_map!()
     return nothing
 end
 
-
 #### transactions
 
 function init_transactions!()
     franchise_transactions = @> transactions() begin
         #in date range
-        transform(:transaction_dt => ByRow(Date), renamecols=false)
+        transform(:transaction_dt => ByRow(Date), renamecols = false)
         subset(:transaction_dt => ByRow(in(DEALER_DATE_RANGE)))
         dropmissing(r"business_name$")
 
@@ -169,7 +182,9 @@ function init_transactions!()
         rename(:group_id => :buyer_group_id)
 
         # add franchises
-        add_franchises([:buyer_dbaname, :seller_dbaname, :buyer_business_name, :seller_business_name])
+        add_franchises([
+            :buyer_dbaname, :seller_dbaname, :buyer_business_name, :seller_business_name
+        ])
         subset(:franchises => ByRow(!isempty))
 
         # return a grouped df
@@ -193,7 +208,7 @@ function init_transactions!()
                 :buyer_gdn,
                 :seller_gdn,
                 :buyer_dbaname_normed => :buyer_dba,
-                :seller_dbaname_normed => :seller_dba
+                :seller_dbaname_normed => :seller_dba,
             )
             unique
         end
@@ -208,8 +223,12 @@ function init_transactions!()
             end
         end
 
-        first_buyer_regeffdate = t.first_buyer_regeffdate |> skipmissing |> emptymissing(minimum)
-        last_seller_regeffdate = t.last_seller_regeffdate |> skipmissing |> emptymissing(maximum)
+        first_buyer_regeffdate = emptymissing(minimum)(
+            skipmissing(t.first_buyer_regeffdate)
+        )
+        last_seller_regeffdate = emptymissing(maximum)(
+            skipmissing(t.last_seller_regeffdate)
+        )
 
         # if another in the same week between the same parties, merge
         i = findfirst(Events) do e
@@ -219,18 +238,21 @@ function init_transactions!()
         end
 
         if isnothing(i)
-            push!(Events, Transaction(;
-                buyer_name,
-                seller_name,
-                buyer_gid,
-                seller_gid,
-                app_name,
-                gdn_dba_map,
-                first_buyer_regeffdate,
-                last_seller_regeffdate,
-                when,
-                franchises
-            ))
+            push!(
+                Events,
+                Transaction(;
+                    buyer_name,
+                    seller_name,
+                    buyer_gid,
+                    seller_gid,
+                    app_name,
+                    gdn_dba_map,
+                    first_buyer_regeffdate,
+                    last_seller_regeffdate,
+                    when,
+                    franchises,
+                ),
+            )
         else
             # merge the transactions
             old = Events[i]
@@ -241,22 +263,33 @@ function init_transactions!()
                 buyer_gid,
                 seller_gid,
                 app_name,
-                gdn_dba_map=unique(vcat(old.gdn_dba_map, gdn_dba_map)),
-                first_buyer_regeffdate=(old.first_buyer_regeffdate, first_buyer_regeffdate) |> skipmissing |> emptymissing(minimum),
-                last_seller_regeffdate=(old.last_seller_regeffdate, last_seller_regeffdate) |> skipmissing |> emptymissing(maximum),
+                gdn_dba_map = unique(vcat(old.gdn_dba_map, gdn_dba_map)),
+                first_buyer_regeffdate = (
+                                             old.first_buyer_regeffdate,
+                                             first_buyer_regeffdate,
+                                         ) |>
+                                         skipmissing |>
+                                         emptymissing(minimum),
+                last_seller_regeffdate = (
+                                             old.last_seller_regeffdate,
+                                             last_seller_regeffdate,
+                                         ) |>
+                                         skipmissing |>
+                                         emptymissing(maximum),
                 when,
-                franchises=union(old.franchises, franchises)
+                franchises = union(old.franchises, franchises),
             )
         end
     end
 end
 
-Base.setdiff(df1::DataFrame, df2::DataFrame) =
+function Base.setdiff(df1::DataFrame, df2::DataFrame)
     if names(df1) == names(df2)
-        antijoin(df1, df2, on=names(df1), matchmissing=:equal)
+        antijoin(df1, df2, on = names(df1), matchmissing = :equal)
     else
         error("DataFrames have different column names")
     end
+end
 
 function init_entry_exit!()
     franchise_entrants = @> entrants() begin
@@ -264,7 +297,7 @@ function init_entry_exit!()
         add_groups
         subset(
             :franchises => ByRow(!isempty),
-            :approved_dt => ByRow(in(DEALER_DATE_RANGE))
+            :approved_dt => ByRow(in(DEALER_DATE_RANGE)),
         )
     end
     franchise_exits = @> exits() begin
@@ -272,34 +305,55 @@ function init_entry_exit!()
         add_groups
         subset(
             :franchises => ByRow(!isempty),
-            :gdnclosed_dt => ByRow(in(DEALER_DATE_RANGE))
+            :gdnclosed_dt => ByRow(in(DEALER_DATE_RANGE)),
         )
     end
 
     # special cases of entry
-    relocations = subset(franchise_entrants, :reason => ByRow(contains(r"(moving)|(relocation)"i)))
+    relocations = subset(
+        franchise_entrants,
+        :reason => ByRow(contains(r"(moving)|(relocation)"i)),
+    )
     franchise_entrants = Base.setdiff(franchise_entrants, relocations)
 
     sunsetted_gdns = subset(relocations, [:approved_dt, :first_regeffdate] => ByRow(<)) # most "relocations" actually just used their old GDNs. These have to be matched back to a row in franchise_exit
-    matched_sunsetted_exits = semijoin(franchise_exits, sunsetted_gdns, on=[:business_name_normed, :franchises]) # this match is okay (have to check by hand)
+    matched_sunsetted_exits = semijoin(
+        franchise_exits,
+        sunsetted_gdns,
+        on = [:business_name_normed, :franchises],
+    ) # this match is okay (have to check by hand)
     franchise_exits = Base.setdiff(franchise_exits, matched_sunsetted_exits)
 
     # these entity changes kept same ownership and GDN, so just remove them as entries and exits
-    entrants_entity_change = subset(franchise_entrants, :reason => ByRow(contains(r"entity change"i)))
-    matched_exits_entity_change = semijoin(franchise_exits, entrants_entity_change, on=:dbaname_normed, matchmissing=:notequal)
-    exits_entity_change = subset(franchise_exits, :reason => ByRow(contains(r"entity change"i)))
+    entrants_entity_change = subset(
+        franchise_entrants,
+        :reason => ByRow(contains(r"entity change"i)),
+    )
+    matched_exits_entity_change = semijoin(
+        franchise_exits,
+        entrants_entity_change,
+        on = :dbaname_normed,
+        matchmissing = :notequal,
+    )
+    exits_entity_change = subset(
+        franchise_exits,
+        :reason => ByRow(contains(r"entity change"i)),
+    )
     franchise_entrants = Base.setdiff(franchise_entrants, entrants_entity_change)
-    franchise_exits = @> franchise_exits Base.setdiff(matched_exits_entity_change) Base.setdiff(exits_entity_change)
+    franchise_exits = @> franchise_exits begin
+        Base.setdiff(matched_exits_entity_change)
+        Base.setdiff(exits_entity_change)
+    end
 
     # what's left are actual entries and exits
     for e in eachrow(franchise_entrants)
         push!(Events,
             Entry(;
                 e.reason, e.app_name, e.first_regeffdate, e.gdn, e.franchises,
-                when=e.approved_dt,
-                business_name=e.business_name_normed,
-                gid=e.group_id,
-                dba=e.dbaname_normed
+                when = e.approved_dt,
+                business_name = e.business_name_normed,
+                gid = e.group_id,
+                dba = e.dbaname_normed,
             ))
     end
 
@@ -307,12 +361,11 @@ function init_entry_exit!()
         push!(Events,
             Exit(;
                 e.reason, e.franchises, e.gdn, e.last_regeffdate,
-                when=e.gdnclosed_dt,
-                business_name=e.business_name_normed,
-                gid=e.group_id,
-                dba=e.dbaname_normed
+                when = e.gdnclosed_dt,
+                business_name = e.business_name_normed,
+                gid = e.group_id,
+                dba = e.dbaname_normed,
             ))
-
     end
 
     # TODO: repair duplicate license numbers (there's so few that I'm skipping for now)

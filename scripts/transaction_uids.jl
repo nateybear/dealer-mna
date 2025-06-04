@@ -15,7 +15,7 @@ function (@main)(_)
             after = Empirics.first_registrations_after(t)
             uids = intersect(before.dealer_uid, after.dealer_uid)
             @info "Added $(length(uids)) dealers"
-            append!(out, DataFrame(transaction_uid=t.uid, dealer_uid=sort(uids)))
+            append!(out, DataFrame(transaction_uid = t.uid, dealer_uid = sort(uids)))
         end
         CSV.write(snakemake.output[1], out)
     end

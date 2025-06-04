@@ -6,7 +6,7 @@ using UUIDs
 
 function (@main)(_)
     with_logging() do
-        out = DataFrame(transaction_uid=String[], dealer_uid=String[])
+        out = DataFrame(transaction_uid = String[], dealer_uid = String[])
         for i in snakemake.input
             @info "Processing $(i)"
             df = DataFrame(Arrow.Table(i))
@@ -22,4 +22,5 @@ function (@main)(_)
         CSV.write(snakemake.output[1], out)
         return nothing
     end
+    return nothing
 end

@@ -16,7 +16,10 @@ function (@main)(_)
         dealer = only(eachrow(subset(Dealers.State.df, :uid => ByRow(==(dealer_uid)))))
         @info "Dealer under consideration" dealer
         intersects = !isempty ∘ intersect
-        relevant_dealers = subset(Dealers.State.df, :franchises => ByRow(intersects$dealer.franchises))
+        relevant_dealers = subset(
+            Dealers.State.df,
+            :franchises => ByRow(intersects$dealer.franchises),
+        )
         distances = Geometry.distance.(relevant_dealers.geometry, Ref(dealer.geometry))
         order = sortperm(distances)[2:end]
         open(snakemake.output[1], "w") do io
@@ -29,9 +32,9 @@ function (@main)(_)
                 last_registrations = Empirics.last_registrations_before(t; dealer_uid)
                 first_registrations = Empirics.first_registrations_after(t; dealer_uid)
                 if !ismissing(last_registrations) &&
-                   !ismissing(first_registrations) &&
-                   !isempty(last_registrations) &&
-                   !isempty(first_registrations)
+                    !ismissing(first_registrations) &&
+                    !isempty(last_registrations) &&
+                    !isempty(first_registrations)
                     count += 1
                     @info "Writing $(count)th closest dealership $(relevant_dealers.uid[i])" distance = distances[i]
                     println(io, dealer_uid)

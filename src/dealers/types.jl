@@ -1,5 +1,5 @@
 #### MSA type
-const MSA = Union{String,Missing,Nothing}
+const MSA = Union{String, Missing, Nothing}
 
 # Dealership represents a single LOCATION
 @kwdef struct Dealership
@@ -7,24 +7,24 @@ const MSA = Union{String,Missing,Nothing}
     active::Bool = true
     gid::UUID
     gdns::Set{String}
-    dbas::Set{Union{String,Missing}}
+    dbas::Set{Union{String, Missing}}
     entity::String
     address::String
-    geometry::Tuple{Float64,Float64}
+    geometry::Tuple{Float64, Float64}
     msa::MSA = nothing
     franchises::Set{String}
 end
 
-struct FranchiseNetwork{N,G<:AG.IGeometry}
-    dealers::SVector{N,Int64}
-    catchment_areas::SVector{N,G}
+struct FranchiseNetwork{N, G <: AG.IGeometry}
+    dealers::SVector{N, Int64}
+    catchment_areas::SVector{N, G}
 end
 
 @kwdef mutable struct _State
-    df::Union{DataFrame,StructVector{Dealership}} = StructVector(Dealership[])
+    df::Union{DataFrame, StructVector{Dealership}} = StructVector(Dealership[])
     when::Date = today()
-    franchise_network::Dict{String,FranchiseNetwork} = Dict{String,FranchiseNetwork}()
-    dealer_groups::Dict{UUID,Set{Int64}} = Dict{UUID,Set{Int64}}()
+    franchise_network::Dict{String, FranchiseNetwork} = Dict{String, FranchiseNetwork}()
+    dealer_groups::Dict{UUID, Set{Int64}} = Dict{UUID, Set{Int64}}()
 end
 
 State = _State()
@@ -42,8 +42,8 @@ abstract type AbstractEvent end
     franchises::Set{String}
     # ↓ map of buyer gdns/dbas to seller gdns/dbas (remember, we roll backwards)
     gdn_dba_map::DataFrame
-    first_buyer_regeffdate::Union{Date,Missing} = missing
-    last_seller_regeffdate::Union{Date,Missing} = missing
+    first_buyer_regeffdate::Union{Date, Missing} = missing
+    last_seller_regeffdate::Union{Date, Missing} = missing
 end
 
 seller_gdns(t::Transaction) = Set(t.gdn_dba_map.seller_gdn)
@@ -64,8 +64,8 @@ buyer_dbas(d::DataFrame) = Set(d.buyer_dba)
     gid::UUID
     franchises::Set{String}
     gdn::String
-    dba::Union{String,Missing}
-    first_regeffdate::Union{Date,Missing} = missing
+    dba::Union{String, Missing}
+    first_regeffdate::Union{Date, Missing} = missing
 end
 
 @kwdef struct Exit <: AbstractEvent
@@ -76,11 +76,11 @@ end
     gid::UUID
     franchises::Set{String}
     gdn::String
-    dba::Union{String,Missing}
-    last_regeffdate::Union{Date,Missing} = missing
+    dba::Union{String, Missing}
+    last_regeffdate::Union{Date, Missing} = missing
 end
 
 Events = AbstractEvent[]
 
-affected_gdns(e::Union{Entry,Exit}) = Set([e.gdn])
+affected_gdns(e::Union{Entry, Exit}) = Set([e.gdn])
 affected_gdns(t::Transaction) = seller_gdns(t) ∪ buyer_gdns(t)

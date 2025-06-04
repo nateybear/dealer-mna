@@ -20,35 +20,35 @@ function event_study_plot!(plot_df, statistic)
     plot(
         first_group.T,
         first_group[!, statistic],
-        yerr=1.96first_group.se,
-        msc=1,
-        label=first_label,
-        color=1
+        yerr = 1.96first_group.se,
+        msc = 1,
+        label = first_label,
+        color = 1,
     )
-    scatter!(first_group.T, first_group[!, statistic], label=nothing, color=1)
+    scatter!(first_group.T, first_group[!, statistic], label = nothing, color = 1)
 
     for (i, next_group) in enumerate(rest)
         label = only(unique(next_group.group))
         plot!(
             next_group.T,
             next_group[!, statistic],
-            yerr=1.96next_group.se,
-            msc=i + 1,
-            label=label,
-            color=i + 1
+            yerr = 1.96next_group.se,
+            msc = i + 1,
+            label = label,
+            color = i + 1,
         )
-        scatter!(next_group.T, next_group[!, statistic], label=nothing, color=i + 1)
+        scatter!(next_group.T, next_group[!, statistic], label = nothing, color = i + 1)
     end
 
     ylims!(
         1.05minimum(plot_df[!, statistic] .- 1.96plot_df.se),
-        1.05maximum(plot_df[!, statistic] .+ 1.96plot_df.se)
+        1.05maximum(plot_df[!, statistic] .+ 1.96plot_df.se),
     )
     xticks!(Empirics.VALID_PERIODS)
-    hline!([0], color=:black, label=nothing)
-    vline!([-0.5], color=:black, label=nothing)
+    hline!([0], color = :black, label = nothing)
+    vline!([-0.5], color = :black, label = nothing)
 
-    png(snakemake.output[1])
+    return png(snakemake.output[1])
 end
 
 function (@main)(_)
@@ -65,20 +65,30 @@ function (@main)(_)
                 df
             end
 
-            dealer_demographics = DataFrame(Arrow.Table(snakemake.input["dealer_demographics"]))
+            dealer_demographics = DataFrame(
+                Arrow.Table(snakemake.input["dealer_demographics"])
+            )
 
             if cut == "grand_mean"
+                sample_estimate = @> event_study_df begin
+                    subset(:B => ByRow(ismissing))
+                    select(:T, statistic)
+                    groupby(:T)
+                    combine(statistic => mean ∘ skipmissing => statistic)
+                end
 
-                sample_estimate = @> event_study_df subset(:B => ByRow(ismissing)) select(:T, statistic) groupby(:T) combine(statistic => mean ∘ skipmissing => statistic)
+                bootstrap_estimates = @> event_study_df begin
+                    subset(:B => ByRow(!ismissing))
+                    groupby([:B, :T])
+                    combine(statistic => mean ∘ skipmissing => statistic)
+                end
 
-
-                bootstrap_estimates = @> event_study_df subset(:B => ByRow(!ismissing)) groupby([:B, :T]) combine(statistic => mean ∘ skipmissing => statistic)
                 bootstrap_ses = @> bootstrap_estimates begin
                     groupby(:T)
                     combine(statistic => std ∘ skipmissing => :se)
                 end
 
-                plot_df = dropmissing(innerjoin(sample_estimate, bootstrap_ses, on=:T))
+                plot_df = dropmissing(innerjoin(sample_estimate, bootstrap_ses, on = :T))
 
                 event_study_plot!(plot_df, statistic)
 
@@ -86,19 +96,37 @@ function (@main)(_)
                 mid = median(dealer_demographics[!, cut])
                 cut_name = titlecase(replace(cut, r"_" => " "))
                 event_study_df = @> event_study_df begin
-                    innerjoin(dealer_demographics, on=:dealer_uid => :uid)
+                    innerjoin(dealer_demographics, on = :dealer_uid => :uid)
                     transform(cut => ByRow(>(mid)) => :group)
-                    transform(:group => ByRow(x -> x ? "Higher $cut_name" : "Lower $cut_name") => :group)
+                    transform(
+                        :group =>
+                            ByRow() do x
+                                x ? "Higher $cut_name" : "Lower $cut_name"
+                            end =>
+                                :group,
+                    )
                 end
-                sample_estimate = @> event_study_df subset(:B => ByRow(ismissing)) select(:T, :group, statistic) groupby([:T, :group]) combine(statistic => mean ∘ skipmissing => statistic)
+                sample_estimate = @> event_study_df begin
+                    subset(:B => ByRow(ismissing))
+                    select(:T, :group, statistic)
+                    groupby([:T, :group])
+                    combine(statistic => mean ∘ skipmissing => statistic)
+                end
 
-                bootstrap_estimates = @> event_study_df subset(:B => ByRow(!ismissing)) groupby([:B, :T, :group]) combine(statistic => mean ∘ skipmissing => statistic)
+                bootstrap_estimates = @> event_study_df begin
+                    subset(:B => ByRow(!ismissing))
+                    groupby([:B, :T, :group])
+                    combine(statistic => mean ∘ skipmissing => statistic)
+                end
+
                 bootstrap_ses = @> bootstrap_estimates begin
                     groupby([:T, :group])
                     combine(statistic => std ∘ skipmissing => :se)
                 end
 
-                plot_df = dropmissing(innerjoin(sample_estimate, bootstrap_ses, on=[:T, :group]))
+                plot_df = dropmissing(
+                    innerjoin(sample_estimate, bootstrap_ses, on = [:T, :group])
+                )
 
                 event_study_plot!(plot_df, statistic)
             end
@@ -106,7 +134,10 @@ function (@main)(_)
         else # this is just plotting one dealership
             event_study_df = DataFrame(Arrow.Table(snakemake.input[1]))
 
-            sample_estimate = @> event_study_df subset(:B => ByRow(ismissing)) select(:T, statistic)
+            sample_estimate = @> event_study_df begin
+                subset(:B => ByRow(ismissing))
+                select(:T, statistic)
+            end
 
             bootstrap_estimates = subset(event_study_df, :B => ByRow(!ismissing))
             bootstrap_ses = @> bootstrap_estimates begin
@@ -114,7 +145,7 @@ function (@main)(_)
                 combine(statistic => std ∘ skipmissing => :se)
             end
 
-            plot_df = dropmissing(innerjoin(sample_estimate, bootstrap_ses, on=:T))
+            plot_df = dropmissing(innerjoin(sample_estimate, bootstrap_ses, on = :T))
 
             event_study_plot!(plot_df, statistic)
         end

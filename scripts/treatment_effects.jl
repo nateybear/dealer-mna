@@ -11,7 +11,9 @@ function (@main)(_)
 
         dealer_uid = UUID(snakemake.wildcards["dealer_uid"])
 
-        franchises = Dealers.State.df.franchises[findfirst(==(dealer_uid), Dealers.State.df.uid)]
+        franchises = Dealers.State.df.franchises[findfirst(
+            ==(dealer_uid), Dealers.State.df.uid
+        )]
 
         treated_before = @> snakemake.input["treated_before"] begin
             Arrow.Table
@@ -55,7 +57,7 @@ function (@main)(_)
                 control_before,
                 control_after,
                 dealer_demographics,
-            )
+            ),
         )
     end
     return nothing

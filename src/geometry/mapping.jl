@@ -1,6 +1,6 @@
 using Tyler
 using WGLMakie
-WGLMakie.activate!(resize_to=:body)
+WGLMakie.activate!(resize_to = :body)
 using ColorSchemes
 using TileProviders
 using Extents
@@ -13,14 +13,14 @@ import GeoInterface as GI
 
 to_maps_crs(x) = Geom.reproject!(AG.clone(x), detect_crs(x), maps_crs)
 
-const CURRENT_MAP = Ref{Union{Tyler.Map,Nothing}}()
+const CURRENT_MAP = Ref{Union{Tyler.Map, Nothing}}()
 
 function init_map(window::Extent)
     rm(Tyler.CACHE_PATH[]) # force re-download, this is broken
 
-    m = Tyler.Map(window, fetching_scheme=Tyler.SimpleTiling())
+    m = Tyler.Map(window, fetching_scheme = Tyler.SimpleTiling())
 
-    wait(m, timeout=5)
+    wait(m, timeout = 5)
     display(m)
 
     hidedecorations!(m.axis)
@@ -63,5 +63,5 @@ function image_scatter!(point, resolution, img_path; kwargs...)
         resolution[1] * xunit / 2, resolution[2] * yunit / 2
     end
 
-    image!((x - Δx, x + Δx), (y - Δy, y + Δy), image; kwargs...)
+    return image!((x - Δx, x + Δx), (y - Δy, y + Δy), image; kwargs...)
 end

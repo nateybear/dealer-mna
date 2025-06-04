@@ -1,4 +1,4 @@
-struct FieldDiff{F,T}
+struct FieldDiff{F, T}
     i::Int64
     before::T
     after::T
@@ -52,14 +52,14 @@ function apply!(t::Transaction)
         for (gdn, idxs) in matched_gdn_buyer
             m = subset(t.gdn_dba_map, :buyer_gdn => ByRow(==(gdn)))
             # need to modify gid, gdns, dba, entity
-            gid = map(i -> FieldDiff{:gid,UUID}(i, t.seller_gid, t.buyer_gid), idxs)
+            gid = map(i -> FieldDiff{:gid, UUID}(i, t.seller_gid, t.buyer_gid), idxs)
             gdns = map(idxs) do i
                 after_gdns = @> State.df.gdns[i] setdiff(seller_gdns(m))
                 before_gdns = @> after_gdns begin
                     setdiff(buyer_gdns(m))
                     union(seller_gdns(m))
                 end
-                FieldDiff{:gdns,Set{String}}(i, before_gdns, after_gdns)
+                FieldDiff{:gdns, Set{String}}(i, before_gdns, after_gdns)
             end
             dbas = map(idxs) do i
                 after_dbas = @> State.df.dbas[i] setdiff(seller_dbas(m))
@@ -67,9 +67,11 @@ function apply!(t::Transaction)
                     setdiff(buyer_dbas(m))
                     union(seller_dbas(m))
                 end
-                FieldDiff{:dbas,Set{Union{String,Missing}}}(i, before_dbas, after_dbas)
+                FieldDiff{:dbas, Set{Union{String, Missing}}}(i, before_dbas, after_dbas)
             end
-            entity = map(i -> FieldDiff{:entity,String}(i, t.seller_name, t.buyer_name), idxs)
+            entity = map(idxs) do i
+                FieldDiff{:entity, String}(i, t.seller_name, t.buyer_name)
+            end
             append!(out, vcat(gid, gdns, dbas, entity))
         end
     end
@@ -77,14 +79,14 @@ function apply!(t::Transaction)
         for (gdn, idxs) in matched_gdn_seller
             m = subset(t.gdn_dba_map, :seller_gdn => ByRow(==(gdn)))
             # need to modify gid, gdns, dba, entity
-            gid = map(i -> FieldDiff{:gid,UUID}(i, t.buyer_gid, t.seller_gid), idxs)
+            gid = map(i -> FieldDiff{:gid, UUID}(i, t.buyer_gid, t.seller_gid), idxs)
             gdns = map(idxs) do i
                 before_gdns = @> State.df.gdns[i] setdiff(buyer_gdns(m))
                 after_gdns = @> before_gdns begin
                     setdiff(seller_gdns(m))
                     union(buyer_gdns(m))
                 end
-                FieldDiff{:gdns,Set{String}}(i, before_gdns, after_gdns)
+                FieldDiff{:gdns, Set{String}}(i, before_gdns, after_gdns)
             end
             dbas = map(idxs) do i
                 before_dbas = @> State.df.dbas[i] setdiff(buyer_dbas(m))
@@ -92,9 +94,11 @@ function apply!(t::Transaction)
                     setdiff(seller_dbas(m))
                     union(buyer_dbas(m))
                 end
-                FieldDiff{:dbas,Set{Union{String,Missing}}}(i, before_dbas, after_dbas)
+                FieldDiff{:dbas, Set{Union{String, Missing}}}(i, before_dbas, after_dbas)
             end
-            entity = map(i -> FieldDiff{:entity,String}(i, t.buyer_name, t.seller_name), idxs)
+            entity = map(idxs) do i
+                FieldDiff{:entity, String}(i, t.buyer_name, t.seller_name)
+            end
             append!(out, vcat(gid, gdns, dbas, entity))
         end
     end
@@ -115,7 +119,7 @@ function apply!(e::Entry)
 
     isempty(idxs) && @error "No matching GDNs" idxs e
 
-    out = Diff([FieldDiff{:active,Bool}(i, false, true) for i in idxs])
+    out = Diff([FieldDiff{:active, Bool}(i, false, true) for i in idxs])
     @show out
     apply!(out)
     return out
@@ -130,7 +134,7 @@ function apply!(e::Exit)
         return Diff([])
     end
 
-    out = Diff([FieldDiff{:active,Bool}(i, true, false) for i in idxs])
+    out = Diff([FieldDiff{:active, Bool}(i, true, false) for i in idxs])
     @show out
     apply!(out)
     return out
@@ -140,7 +144,7 @@ end
 Diffs = Diff[]
 
 function compile_diffs!()
-    sort!(Events, by=e -> e.when, rev=true) # most recent event is first
+    sort!(Events, by = e -> e.when, rev = true) # most recent event is first
     diffs = map(apply!, Events)
     foreach(unapply!, reverse(diffs)) # back out from our diffs
     global Diffs = diffs
@@ -154,10 +158,12 @@ dealer_idxs(e::AbstractEvent) = begin
     return dealer_idxs(idx) # get the dealer indexes for that event
 end
 
-function timetravel(f, e::Union{AbstractEvent,DataFrameRow}; before=true)
-    idx_last_event = before ?
-                     searchsortedlast(Events, e, by=e -> e.when, rev=true) :
-                     searchsortedfirst(Events, e, by=e -> e.when, rev=true) - 1
+function timetravel(f, e::Union{AbstractEvent, DataFrameRow}; before = true)
+    idx_last_event = if before
+        searchsortedlast(Events, e, by = e -> e.when, rev = true)
+    else
+        searchsortedfirst(Events, e, by = e -> e.when, rev = true) - 1
+    end
 
     for i in 1:idx_last_event
         apply!(Diffs[i])
@@ -178,6 +184,6 @@ function timetravel(f, e::Union{AbstractEvent,DataFrameRow}; before=true)
 end
 
 function timetravel(f, d::Date)
-    i = searchsortedlast([e.when for e in Events], d, rev=true)
-    timetravel(f, Events[i], before=true)
+    i = searchsortedlast([e.when for e in Events], d, rev = true)
+    return timetravel(f, Events[i], before = true)
 end

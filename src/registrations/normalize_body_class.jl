@@ -1,4 +1,4 @@
-function normalize_body_class(raw_body_class)
+function _normalize_body_class(raw_body_class)
     out = @> raw_body_class split("/") first
     if contains(out, r"SUV")
         "SUV/Crossover"
@@ -9,4 +9,13 @@ function normalize_body_class(raw_body_class)
     else
         out
     end
+end
+
+function normalize_body_class(df::DataFrame)
+    normalization = (convert$Union{String, Missing}) ∘ passmissing(_normalize_body_class)
+    return transform(
+        df,
+        :body_class => ByRow(normalization),
+        renamecols = false,
+    )
 end

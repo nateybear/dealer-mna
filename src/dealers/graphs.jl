@@ -8,13 +8,13 @@ abstract type Node end
 
 mutable struct DealerNode <: Node
     name::String
-    id::Union{UUID,Nothing}
+    id::Union{UUID, Nothing}
     DealerNode(name) = new(name, nothing)
 end
 
 mutable struct PersonNode <: Node
     name::String
-    id::Union{UUID,Nothing}
+    id::Union{UUID, Nothing}
     PersonNode(name) = new(name, nothing)
 end
 
@@ -22,7 +22,7 @@ new_dealer_graph() = MetaGraph(
     Graph(),
     String, # label type
     Node, # vertex type
-    Vector{String} # edge type
+    Vector{String}, # edge type
 )
 
 const DealerGraph = typeof(new_dealer_graph())
@@ -52,7 +52,7 @@ function move!(g, from_label, to_label)
             g[neighbor, to_label] = g[from_label, neighbor]
         end
     end
-    delete!(g, from_label)
+    return delete!(g, from_label)
 end
 
 function next_uncolored(g)
@@ -65,7 +65,7 @@ function next_uncolored(g)
     return nothing
 end
 
-function color!(g, node, uuid=uuid4())
+function color!(g, node, uuid = uuid4())
     node.id = uuid
     for neighbor in neighbor_labels(g, node.name)
         neighbor_node = g[neighbor]
@@ -73,16 +73,14 @@ function color!(g, node, uuid=uuid4())
     end
 end
 
-function color!(g)
+color!(g) =
     while true
         node = next_uncolored(g)
         isnothing(node) && break
         color!(g, node)
     end
-end
 
-function reset!(g)
+reset!(g) =
     for l in labels(g)
         g[l].id = nothing
     end
-end

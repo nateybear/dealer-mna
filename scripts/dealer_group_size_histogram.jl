@@ -10,8 +10,8 @@ function (@main)(_)
         counts = @> Dealers.State.df groupby(:gid) combine(nrow)
         histogram(
             counts.nrow,
-            label=nothing,
-            size=(600, 400),
+            label = nothing,
+            size = (600, 400),
         )
         png(snakemake.output[1])
     end

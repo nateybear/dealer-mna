@@ -32,7 +32,6 @@ distance(a::AG.IGeometry, b::AG.IGeometry) = AG.distance(a, b)m # distance betwe
 distance(a::AG.IGeometry, b) = distance(a, AG.createpoint(b)) # distance between a geometry and a point
 distance(a, b) = norm(a .- b)m # distance between two points
 
-
 #### reading function that asserts the correct CRS
 function gdf(filename, args...; kwargs...)
     out = GDF.read(filename, args...; kwargs...)

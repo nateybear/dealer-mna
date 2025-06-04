@@ -3,11 +3,11 @@ import ..Registrations: add_zips
 
 @memoize shortest_distance(geometry, make) = minimum(
     x -> distance(geometry, x.geometry),
-    eachrow(subset(State.df, :franchises => ByRow(∋(make))))
+    eachrow(subset(State.df, :franchises => ByRow(∋(make)))),
 )
 
-getgeom(dealer::Union{Dealership,DataFrameRow}) = dealer.geometry
-getgeom(dealer::Tuple{Float64,Float64}) = dealer
+getgeom(dealer::Union{Dealership, DataFrameRow}) = dealer.geometry
+getgeom(dealer::Tuple{Float64, Float64}) = dealer
 
 using Unitful
 function normed_distance(dealers, geometry, make)
@@ -15,10 +15,10 @@ function normed_distance(dealers, geometry, make)
     shortest = shortest_distance(geometry, make)
     miles(x) = ustrip(uconvert(u"mi", x))
     return (;
-        actual_distance=miles(actual),
-        shortest_distance=miles(shortest),
-        normed_distance=actual / shortest,
-        i_shortest=i_shortest,
+        actual_distance = miles(actual),
+        shortest_distance = miles(shortest),
+        normed_distance = actual / shortest,
+        i_shortest = i_shortest,
     )
 end
 
@@ -35,14 +35,14 @@ function add_distance(r)
             :geometry => :dealer_geometry,
             :gdns => :dlrgdn,
             :uid => :dealer_uid,
-            :franchises => :make
+            :franchises => :make,
         )
         flatten(:dlrgdn)
         flatten(:make)
     end
-    r = innerjoin(r, flat_dealers, on=[:dlrgdn, :make], matchmissing=:notequal)
+    r = innerjoin(r, flat_dealers, on = [:dlrgdn, :make], matchmissing = :notequal)
     isempty(r) && return missing
-    combine(groupby(r, :uid), keepkeys=false) do gdf
+    combine(groupby(r, :uid), keepkeys = false) do gdf
         dealers = gdf.dealer_geometry
         geometry = first(gdf.geometry)
         make = first(gdf.make)
