@@ -5,6 +5,7 @@ using Lazy: @>
 using DataFrames
 using PartialFunctions
 using Missings
+using FixedEffectModels
 
 const STATISTICS = (
     mean_baseprice = :mean_price => mean,
@@ -15,25 +16,6 @@ const STATISTICS = (
     mean_price = :vehsalesprice => mean,
     trim_rank = :trim_rank => mean,
 )
-
-const BOOTSTRAP_REPLICAS = 250
-
-function partial_out(df, outcome_col, by_col)
-    weight_sum = @> df groupby(:T) combine(:weight => sum ∘ skipmissing => :weight_sum)
-    df = @> df begin
-        innerjoin(weight_sum, on = :T)
-        transform(
-            [:weight, :weight_sum] => ((x, y) -> coalesce.(x ./ y, 1)) => :weight_temp
-        )
-    end
-    @> df begin
-        groupby(by_col)
-        transform(
-            [outcome_col, :weight_temp] => ((x, y) -> x .- mean(x, w(y))) => outcome_col
-        )
-        select(Not(:weight_temp, :weight_sum))
-    end
-end
 
 function event_study(
     treated_before,
@@ -59,6 +41,10 @@ function event_study(
         weight = pdf.(Normal(), control_distances),
     )
 
+    control_weights.weight = control_weights.weight ./ sum(control_weights.weight)
+
+    weights = vcat(control_weights, DataFrame(dealer_uid = treated_uid, weight = 1))
+
     all_registrations = vcat(
         treated_before,
         treated_after,
@@ -69,6 +55,22 @@ function event_study(
     make_panel((outcol, (incol, f))) = @> all_registrations begin
         groupby([:T, :dealer_uid])
         combine(incol => f => outcol)
+    end
+
+    dt(dealer_uid, T, critical_T) = (dealer_uid == treated_uid) * (T == critical_T)
+
+    function ev_term(critical_T)
+        return FunctionTerm(
+            dt,
+            [Term(:dealer_uid), Term(:T), ConstantTerm(critical_T)],
+            :(dt(dealer_uid, T, $critical_T)),
+        )
+    end
+
+    function ev_formula(outcol)
+        ev_terms = sum(ev_term.(setdiff(VALID_PERIODS, [0]))) # drop period just before
+        rhs = ev_terms + fe(:T) + fe(:dealer_uid)
+        return Term(outcol) ~ rhs
     end
 
     function shuffle(panel)
@@ -88,45 +90,18 @@ function event_study(
     end
 
     function te_estimate(panel, (outcol, _))
-        panel = @> panel begin
-            leftjoin(control_weights, on = :dealer_uid)
-            partial_out(outcol, :T)
-            partial_out(outcol, :dealer_uid)
-        end
-        combine(groupby(panel, :T)) do gdf
-            if !any(gdf.dealer_uid .== treated_uid)
-                return (; outcol => missing)
-            end
-            treated_outcome = only(gdf[gdf.dealer_uid .== treated_uid, outcol])
-            control_outcomes = subset(gdf, :dealer_uid => ByRow(!=(treated_uid)))
-            synthetic_control_outcome = mean(
-                control_outcomes[!, outcol],
-                w(disallowmissing(control_outcomes.weight)),
-            )
-
-            (; outcol => (treated_outcome - synthetic_control_outcome))
-        end
+        panel = innerjoin(panel, weights, on = :dealer_uid)
+        reg_result = reg(panel, ev_formula(outcol), Vcov.robust(), weights = :weight)
+        table = DataFrame(coeftable(reg_result))
+        extract_T(Name) = parse(Int64, match(r"^.*, ([-\d]+)\)$", Name).captures[1])
+        table.T = extract_T.(table.Name)
+        return select(
+            table, :T, :Estimate => outcol, Symbol("Std. Error") => Symbol("$(outcol)_se")
+        )
     end
 
-    sample_estimate = mapreduce(innerjoin$(on = :T,), pairs(STATISTICS)) do s
+    return mapreduce(innerjoin$(on = :T,), pairs(STATISTICS)) do s
         panel = make_panel(s)
         te_estimate(panel, s)
     end
-
-    # B is the bootstrap number (missing means in-sample estimate)
-    sample_estimate.B .= missing
-
-    out = sample_estimate
-
-    for i in Base.OneTo(BOOTSTRAP_REPLICAS)
-        @info "Bootstrap iteration $(i)"
-        estimate = mapreduce(innerjoin$(on = :T,), pairs(STATISTICS)) do s
-            panel = make_panel(s)
-            te_estimate(shuffle(panel), s)
-        end
-        estimate.B .= i
-        out = vcat(out, estimate)
-    end
-
-    return out
 end
