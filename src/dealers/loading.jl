@@ -20,7 +20,7 @@ import Unicode
 import ..snakemake
 
 @memoize all_registrations() = DataFrame(
-    Arrow.Table(get(snakemake.input, "registrations", "data/arrow/registrations.arrow"))
+    Arrow.Table(get(snakemake.input, "unmatched_registrations", "data/arrow/unmatched_registrations.arrow"))
 )
 
 function normed(y)

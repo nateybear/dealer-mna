@@ -72,7 +72,7 @@ rule dealers_init:
         *julia_dealers,
         "src/dealers/Dealers.jl",
         "scripts/dealers_init.jl",
-        registrations="data/arrow/registrations.arrow",
+        unmatched_registrations="data/arrow/unmatched_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
     output:
         "data/dealers_init.jld2",
@@ -530,6 +530,34 @@ rule dealer_group_size_histogram:
             output=output,
             log=log,
         )
+
+
+rule table_body_make_count:
+    input:
+        "scripts/table_body_make_count.jl",
+        new_registrations="data/arrow/new_registrations.arrow",
+    output:
+        "tables/body_make_count.tex",
+    log:
+        "logs/table_body_make_count.log",
+    run:
+        julia("scripts/table_body_make_count.jl", input=input, output=output, log=log)
+
+
+rule facts:
+    input:
+        "scripts/facts.jl",
+        *julia_src,
+        new_registrations="data/arrow/new_registrations.arrow",
+        price_table="data/arrow/price_table.arrow",
+        popular_models="data/arrow/popular_models.arrow",
+        dealers_init="data/dealers_init.jld2",
+    output:
+        "facts.tex",
+    log:
+        "logs/facts.log",
+    run:
+        julia("scripts/facts.jl", input=input, output=output, log=log)
 
 
 ### UTILS: running julia
