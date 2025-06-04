@@ -24,7 +24,7 @@ wildcard_constraints:
 #         dealer_group_size_histogram,
 
 
-rule show_python_version:
+rule show_python_info:
     run:
         import sys
 
@@ -32,28 +32,107 @@ rule show_python_version:
         print(sys.version)
 
 
+rule vins_decoded:
+    input:
+        "data/vins_decoded.csv",
+        "scripts/vins_decoded.jl",
+    output:
+        "data/arrow/vins_decoded.arrow",
+    log:
+        "logs/vins_decoded.log",
+    run:
+        julia(
+            "scripts/vins_decoded.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule registrations:
+    input:
+        "scripts/registrations.jl",
+        registration_files=glob.glob("data/Sales/*.csv"),
+        vins_decoded="data/arrow/vins_decoded.arrow",
+    output:
+        registrations="data/arrow/registrations.arrow",
+    log:
+        "logs/registrations.log",
+    run:
+        julia(
+            "scripts/registrations.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 rule dealers_init:
     input:
         *julia_dealers,
         "src/dealers/Dealers.jl",
         "scripts/dealers_init.jl",
+        registrations="data/arrow/registrations.arrow",
+        popular_models="data/arrow/popular_models.arrow",
     output:
         "data/dealers_init.jld2",
     log:
         "logs/dealers_init.log",
     run:
-        julia("scripts/dealers_init.jl", output=output, log=log)
+        julia("scripts/dealers_init.jl", input=input, output=output, log=log)
+
+
+# a "halfway" step that's necessary to avoid a cyclic dependency with dealers_init
+# (dealers_init needs to know popular models, which depends on count of new_registrations,
+# but new_registrations needs to match against dealers. Count popular_models from
+# not-necessary-matched new registrations)
+rule unmatched_registrations:
+    input:
+        "scripts/unmatched_registrations.jl",
+        registrations="data/arrow/registrations.arrow",
+    output:
+        unmatched_registrations="data/arrow/unmatched_registrations.arrow",
+        popular_models="data/arrow/popular_models.arrow",
+    log:
+        "logs/unmatched_registrations.log",
+    run:
+        julia(
+            "scripts/unmatched_registrations.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule new_registrations:
+    input:
+        "scripts/new_registrations.jl",
+        unmatched_registrations="data/arrow/unmatched_registrations.arrow",
+        dealers_init="data/dealers_init.jld2",
+    output:
+        new_registrations="data/arrow/new_registrations.arrow",
+    log:
+        "logs/new_registrations.log",
+    run:
+        julia(
+            "scripts/new_registrations.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
 
 
 rule price_table:
     input:
         "scripts/price_table.jl",
+        new_registrations="data/arrow/new_registrations.arrow",
+        popular_models="data/arrow/popular_models.arrow",
     output:
         "data/price_table.arrow",
     log:
         "logs/price_table.log",
     run:
-        julia("scripts/price_table.jl", output=output, log=log)
+        julia("scripts/price_table.jl", input=input, output=output, log=log)
 
 
 rule transactions_for_analysis:
@@ -64,6 +143,8 @@ rule transactions_for_analysis:
         "scripts/transactions_for_analysis.jl",
         dealers_init="data/dealers_init.jld2",
         price_table="data/price_table.arrow",
+        new_registrations="data/arrow/new_registrations.arrow",
+        popular_models="data/arrow/popular_models.arrow",
     output:
         "data/transactions_for_analysis.jld2",
     log:
@@ -78,6 +159,8 @@ checkpoint transaction_uids:
     input:
         "scripts/transaction_uids.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
+        new_registrations="data/arrow/new_registrations.arrow",
+        popular_models="data/arrow/popular_models.arrow",
         dealers_init="data/dealers_init.jld2",
     output:
         "data/transaction_uids.csv",
@@ -107,6 +190,8 @@ rule treated_registrations:
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         dealers_init="data/dealers_init.jld2",
         price_table="data/price_table.arrow",
+        new_registrations="data/arrow/new_registrations.arrow",
+        popular_models="data/arrow/popular_models.arrow",
     output:
         before="data/treated/{folder}/last_registrations_before_{transaction_uid}_{dealer_uid}.arrow",
         after="data/treated/{folder}/first_registrations_after_{transaction_uid}_{dealer_uid}.arrow",
@@ -130,6 +215,8 @@ rule control_registrations:
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         dealers_init="data/dealers_init.jld2",
         price_table="data/price_table.arrow",
+        new_registrations="data/arrow/new_registrations.arrow",
+        popular_models="data/arrow/popular_models.arrow",
     output:
         before="data/control/{folder}/last_registrations_before_{transaction_uid}_{dealer_uid}.arrow",
         after="data/control/{folder}/first_registrations_after_{transaction_uid}_{dealer_uid}.arrow",
@@ -168,6 +255,8 @@ rule treatment_effects:
         control_after="data/control/{folder}/first_registrations_after_{transaction_uid}_{dealer_uid}.arrow",
         dealer_demographics="data/dealer_demographics.arrow",
         dealers_init="data/dealers_init.jld2",
+        new_registrations="data/arrow/new_registrations.arrow",
+        popular_models="data/arrow/popular_models.arrow",
     output:
         "data/treatment_effects/{folder}/{transaction_uid}/{dealer_uid}.arrow",
     log:
@@ -189,6 +278,8 @@ checkpoint affiliated_dealerships:
         "scripts/affiliated_dealerships.jl",
         transactions="data/transactions_for_analysis.jld2",
         dealers_init="data/dealers_init.jld2",
+        new_registrations="data/arrow/new_registrations.arrow",
+        popular_models="data/arrow/popular_models.arrow",
     output:
         buyer_group="data/affiliated_dealerships/buyer_group_{transaction_uid}.txt",
         seller_group="data/affiliated_dealerships/seller_group_{transaction_uid}.txt",
@@ -211,6 +302,8 @@ checkpoint closest_dealerships:
         "scripts/closest_dealerships.jl",
         dealers_init="data/dealers_init.jld2",
         transactions="data/transactions_for_analysis.jld2",
+        new_registrations="data/arrow/new_registrations.arrow",
+        popular_models="data/arrow/popular_models.arrow",
     output:
         "data/closest_dealerships/{transaction_uid}_{dealer_uid}.txt",
     log:
@@ -241,6 +334,8 @@ checkpoint related_dealerships:
     input:
         "data/transaction_uids.csv",
         get_related_dealerships,
+        new_registrations="data/arrow/new_registrations.arrow",
+        popular_models="data/arrow/popular_models.arrow",
     output:
         "data/related_dealerships.txt",
     shell:
@@ -392,7 +487,7 @@ def get_event_study_cuts(wildcards):
     with open(checkpoints.statistics.get().output[0], "r") as f:
         statistics = f.read().splitlines()
     return expand(
-        "plots/event_study/{folder}/{statistic}/cuts/{cut}.png",
+        "plots/event_study/{statistic}/{folder}/cuts/{cut}.png",
         statistic=statistics,
         cut=[
             "grand_mean",
@@ -422,6 +517,8 @@ rule dealer_group_size_histogram:
     input:
         "scripts/dealer_group_size_histogram.jl",
         dealers_init="data/dealers_init.jld2",
+        new_registrations="data/arrow/new_registrations.arrow",
+        popular_models="data/arrow/popular_models.arrow",
     output:
         "plots/dealer_group_size_histogram.png",
     log:

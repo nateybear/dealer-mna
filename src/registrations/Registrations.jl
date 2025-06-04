@@ -26,5 +26,6 @@ import ..snakemake
 include("zips.jl")
 include("normalize_price.jl")
 include("normalize_body_class.jl")
+include("loading.jl")
 
 end
