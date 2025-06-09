@@ -233,6 +233,7 @@ function init_transactions!()
         # if another in the same week between the same parties, merge
         i = findfirst(Events) do e
             abs(e.when - when) < Week(1) &&
+                e isa Transaction &&
                 e.buyer_name == buyer_name &&
                 e.seller_name == seller_name
         end

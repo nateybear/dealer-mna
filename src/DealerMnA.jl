@@ -1,5 +1,7 @@
 module DealerMnA
 
+# to force it to recompile :)
+
 using Reexport
 
 @reexport begin
@@ -14,7 +16,9 @@ using Reexport
     using Cleaner
 end
 
-export Geometry, Registrations, Dealers, Empirics, snakemake, with_logging, nonmissing
+export Geometry,
+    Registrations, Dealers, Empirics, snakemake, snakemake!, with_logging, nonmissing,
+    read_csv
 
 include("utils.jl")
 include("geometry/Geometry.jl")
@@ -47,11 +51,10 @@ module Startup
                         :dlrgdn => ByRow(nonmissing(in(control_dealers))),
                     )
                     df = transform(df,
-                        :vehsalesprice => ByRow(x -> x / 1000) => :vehsalesprice,
+                        :vehsalesprice => ByRow(x -> x / 100) => :vehsalesprice,
                     )
                     Arrow.write("temp.arrow", df)
                     rm("temp.arrow")
-                    empty!(Memoize.memoize_cache(Registrations.registrations)) # force each julia process to mmap their own registrations
                 catch
                     @warn "Loading registrations failed, skipping precompilation"
                 end

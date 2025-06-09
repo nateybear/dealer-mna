@@ -7,6 +7,8 @@ using UUIDs
 using Lazy: @>
 import StatsBase: std, mean, sample, median
 
+!isempty(ARGS) && snakemake!(ARGS[1])
+
 resample(x) =
     let x = collect(x)
         sample(x, length(x))
@@ -57,9 +59,8 @@ function event_study_plot!(plot_df, statistic)
     return png(snakemake.output[1])
 end
 
-function (@main)(_)
-    with_logging() do
-        statistic = Symbol(snakemake.wildcards["statistic"])
+with_logging() do
+    statistic = Symbol(snakemake.wildcards["statistic"])
 
         if haskey(snakemake.wildcards, "cut") # this is plotting an aggregate
             cut = snakemake.wildcards["cut"]
@@ -122,5 +123,4 @@ function (@main)(_)
             event_study_plot!(plot_df, statistic)
         end
     end
-    return nothing
 end

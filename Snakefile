@@ -590,7 +590,13 @@ def julia(scriptfile, **rule):
         f.flush()
         # make sure to close the file
         f.close()
-        # run the script with the temp file as input
-        shell(f"julia --project=. --threads=auto {scriptfile} < '{f.name}'")
+        daemon_mode = config.get("daemon-mode", "no") == "yes"
+        if daemon_mode:
+            shell(
+                f"julia --project=. -e 'using DaemonMode; runargs()' {scriptfile} '{f.name}'"
+            )
+        else:
+            # run the script with the temp file as input
+            shell(f"julia --project=. --threads=auto {scriptfile} < '{f.name}'")
         # delete the temp file
         os.remove(f.name)

@@ -6,41 +6,40 @@ using UUIDs
 using Unitful
 using PartialFunctions
 
-function (@main)(_)
-    with_logging() do
-        Dealers.load_from_disk!(snakemake.input["dealers_init"])
-        dealer_uid = UUID(snakemake.wildcards["dealer_uid"])
-        transaction_uid = UUID(snakemake.wildcards["transaction_uid"])
-        transactions = JLD2.load_object(snakemake.input["transactions"])
-        t = first(t for t in transactions if t.uid == transaction_uid)
-        dealer = only(eachrow(subset(Dealers.State.df, :uid => ByRow(==(dealer_uid)))))
-        @info "Dealer under consideration" dealer
-        intersects = !isempty ∘ intersect
-        relevant_dealers = subset(
-            Dealers.State.df,
-            :franchises => ByRow(intersects$dealer.franchises),
-        )
-        distances = Geometry.distance.(relevant_dealers.geometry, Ref(dealer.geometry))
-        order = sortperm(distances)[2:end]
-        open(snakemake.output[1], "w") do io
-            count = 0
-            for i in order
-                if count == 3
-                    break
-                end
-                dealer_uid = relevant_dealers.uid[i]
-                last_registrations = Empirics.last_registrations_before(t; dealer_uid)
-                first_registrations = Empirics.first_registrations_after(t; dealer_uid)
-                if !ismissing(last_registrations) &&
-                    !ismissing(first_registrations) &&
-                    !isempty(last_registrations) &&
-                    !isempty(first_registrations)
-                    count += 1
-                    @info "Writing $(count)th closest dealership $(relevant_dealers.uid[i])" distance = distances[i]
-                    println(io, dealer_uid)
-                end
+!isempty(ARGS) && snakemake!(ARGS[1])
+
+with_logging() do
+    Dealers.load_from_disk!(snakemake.input["dealers_init"])
+    dealer_uid = UUID(snakemake.wildcards["dealer_uid"])
+    transaction_uid = UUID(snakemake.wildcards["transaction_uid"])
+    transactions = JLD2.load_object(snakemake.input["transactions"])
+    t = first(t for t in transactions if t.uid == transaction_uid)
+    dealer = only(eachrow(subset(Dealers.State.df, :uid => ByRow(==(dealer_uid)))))
+    @info "Dealer under consideration" dealer
+    intersects = !isempty ∘ intersect
+    relevant_dealers = subset(
+        Dealers.State.df,
+        :franchises => ByRow(intersects$dealer.franchises),
+    )
+    distances = Geometry.distance.(relevant_dealers.geometry, Ref(dealer.geometry))
+    order = sortperm(distances)[2:end]
+    open(snakemake.output[1], "w") do io
+        count = 0
+        for i in order
+            if count == 3
+                break
+            end
+            dealer_uid = relevant_dealers.uid[i]
+            last_registrations = Empirics.last_registrations_before(t; dealer_uid)
+            first_registrations = Empirics.first_registrations_after(t; dealer_uid)
+            if !ismissing(last_registrations) &&
+                !ismissing(first_registrations) &&
+                !isempty(last_registrations) &&
+                !isempty(first_registrations)
+                count += 1
+                @info "Writing $(count)th closest dealership $(relevant_dealers.uid[i])" distance = distances[i]
+                println(io, dealer_uid)
             end
         end
     end
-    return nothing
 end

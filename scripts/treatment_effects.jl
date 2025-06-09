@@ -5,9 +5,10 @@ using DataFrames
 import Lazy: @>
 using UUIDs
 
-function (@main)(_)
-    with_logging() do
-        Dealers.load_from_disk!(snakemake.input["dealers_init"])
+!isempty(ARGS) && snakemake!(ARGS[1])
+
+with_logging() do
+    Dealers.load_from_disk!(snakemake.input["dealers_init"])
 
         dealer_uid = UUID(snakemake.wildcards["dealer_uid"])
 

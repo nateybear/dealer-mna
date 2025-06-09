@@ -12,12 +12,14 @@ end
 
 snakemake = nothing
 
-function __init__()
-    global snakemake
-    in_dict = Base.isinteractive() ? Dict() : JSON3.read(stdin, Dict)
-    snakemake = Snakemake(; (Symbol(k) => v for (k, v) in in_dict)...)
+function snakemake!(infile = stdin)
+    in_dict = infile == stdin && Base.isinteractive() ? Dict() : JSON3.read(infile, Dict)
+    snek = Snakemake(; (Symbol(k) => v for (k, v) in in_dict)...)
+    setproperty!(@__MODULE__, :snakemake, snek)
     return nothing
 end
+
+__init__() = snakemake!()
 
 #### wrap logging
 import LoggingExtras
@@ -40,3 +42,6 @@ end
 nonmissing(f) = NonMissing(f)
 (::NonMissing)(::Missing) = false
 ((; f)::NonMissing)(x) = f(x)
+
+### read_csv helper
+read_csv = @$ CSV.read(_, DataFrame)
