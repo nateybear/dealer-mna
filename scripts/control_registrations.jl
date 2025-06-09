@@ -20,6 +20,11 @@ with_logging() do
     before_registrations = Empirics.control_registrations_before(t; dealer_uid)
     after_registrations = Empirics.control_registrations_after(t; dealer_uid)
 
+    constant_dealers = before_registrations.dealer_uid ∩ after_registrations.dealer_uid
+
+    subset!(before_registrations, :dealer_uid => ByRow(in(constant_dealers)))
+    subset!(after_registrations, :dealer_uid => ByRow(in(constant_dealers)))
+
     Arrow.write(
         snakemake.output["before"],
         before_registrations,
