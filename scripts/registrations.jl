@@ -18,26 +18,25 @@ function makeunique(df, hashset)
     return df[mask, :]
 end
 
-function (@main)(_)
-    with_logging() do
-        rm(snakemake.output["registrations"], force = true)
-        open(Arrow.Writer, snakemake.output["registrations"]) do out_writer
-            hashset = new_hashset()
+!isempty(ARGS) && snakemake!(ARGS[1])
 
-            # "implicit" filtering since vins are only decoded for registrations with odometer < 250
-            vins = select(
-                DataFrame(Arrow.Table(snakemake.input["vins_decoded"])),
-                Not(r"displacement"),
-            )
-            for fname in shuffle(snakemake.input["registration_files"])
-                @info "Processing registration file: $fname"
-                for registrations in Registrations.load_registration_file_chunked(fname)
-                    registrations = makeunique(registrations, hashset)
-                    registrations = innerjoin(registrations, vins, on = :vin)
-                    Arrow.write(out_writer, registrations)
-                end
+with_logging() do
+    rm(snakemake.output["registrations"], force = true)
+    open(Arrow.Writer, snakemake.output["registrations"]) do out_writer
+        hashset = new_hashset()
+
+        # "implicit" filtering since vins are only decoded for registrations with odometer < 250
+        vins = select(
+            DataFrame(Arrow.Table(snakemake.input["vins_decoded"])),
+            Not(r"displacement"),
+        )
+        for fname in shuffle(snakemake.input["registration_files"])
+            @info "Processing registration file: $fname"
+            for registrations in Registrations.load_registration_file_chunked(fname)
+                registrations = makeunique(registrations, hashset)
+                registrations = innerjoin(registrations, vins, on = :vin)
+                Arrow.write(out_writer, registrations)
             end
         end
     end
-    return nothing
 end
