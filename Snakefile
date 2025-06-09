@@ -258,7 +258,8 @@ rule treatment_effects:
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
     output:
-        "data/treatment_effects/{folder}/{transaction_uid}/{dealer_uid}.arrow",
+        treatment_effects="data/treatment_effects/{folder}/{transaction_uid}/{dealer_uid}.arrow",
+        extra_stats="data/treatment_effects/{folder}/{transaction_uid}/{dealer_uid}_extras.jld2",
     log:
         "logs/treatment_effects_{folder}_{transaction_uid}_{dealer_uid}.log",
     run:
@@ -342,15 +343,21 @@ checkpoint related_dealerships:
         "touch {output}"
 
 
-def get_treatment_effects(wildcards):
-    # Get the output file from the checkpoint at runtime
-    return glob.glob(f"data/treatment_effects/{wildcards.folder}/**/*.arrow")
+get_treatment_effects = lambda wildcards: sorted(
+    glob.glob(f"data/treatment_effects/{wildcards.folder}/**/*.arrow")
+)
+
+
+get_extras = lambda wildcards: sorted(
+    glob.glob(f"data/treatment_effects/{wildcards.folder}/**/*_extras.jld2")
+)
 
 
 rule treated_event_study_plot:
     input:
-        "data/treatment_effects/treated_dealers/{transaction_uid}/{dealer_uid}.arrow",
         "scripts/event_study_plot.jl",
+        treatment_effects="data/treatment_effects/treated_dealers/{transaction_uid}/{dealer_uid}.arrow",
+        extra_stats="data/treatment_effects/treated_dealers/{transaction_uid}/{dealer_uid}_extras.jld2",
     output:
         "plots/event_study/{statistic}/treated_dealers/{transaction_uid}_{dealer_uid}.png",
     log:
@@ -367,11 +374,12 @@ rule treated_event_study_plot:
 
 rule affiliated_event_study_plot:
     input:
-        "data/treatment_effects/{buy_sell}/{transaction_uid}/{dealer_uid}.arrow",
         "scripts/event_study_plot.jl",
         lambda w: checkpoints.affiliated_dealerships.get(
             transaction_uid=w.transaction_uid
         ).output[f"{w.buy_sell}_group"],
+        treatment_effects="data/treatment_effects/{buy_sell}/{transaction_uid}/{dealer_uid}.arrow",
+        extra_stats="data/treatment_effects/{buy_sell}/{transaction_uid}/{dealer_uid}_extras.jld2",
     output:
         "plots/event_study/{statistic}/{buy_sell}/{transaction_uid}_{dealer_uid}.png",
     log:
@@ -388,11 +396,12 @@ rule affiliated_event_study_plot:
 
 rule closest_dealer_event_study_plot:
     input:
-        "data/treatment_effects/closest_dealers/{transaction_uid}/{dealer_uid}.arrow",
         "scripts/event_study_plot.jl",
         lambda w: checkpoints.closest_dealerships.get(
             transaction_uid=w.transaction_uid, dealer_uid=w.dealer_uid
         ).output[0],
+        treatment_effects="data/treatment_effects/closest_dealers/{transaction_uid}/{dealer_uid}.arrow",
+        extra_stats="data/treatment_effects/closest_dealers/{transaction_uid}/{dealer_uid}_extras.jld2",
     output:
         "plots/event_study/{statistic}/closest_dealers/{transaction_uid}_{i}_{dealer_uid}.png",
     log:
@@ -467,6 +476,7 @@ rule event_study_cut_plot:
         "scripts/event_study_plot.jl",
         get_event_study_plots,  # make sure all the plots are made before making cuts, since it relies on glob
         treatment_effects=get_treatment_effects,
+        extras=get_extras,
         dealer_demographics="data/dealer_demographics.arrow",
     output:
         "plots/event_study/{statistic}/{folder}/cuts/{cut}.png",
