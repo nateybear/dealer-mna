@@ -20,7 +20,13 @@ import Unicode
 import ..snakemake
 
 @memoize all_registrations() = DataFrame(
-    Arrow.Table(get(snakemake.input, "unmatched_registrations", "data/arrow/unmatched_registrations.arrow"))
+    Arrow.Table(
+        get(
+            snakemake.input,
+            "unmatched_registrations",
+            "data/arrow/unmatched_registrations.arrow",
+        ),
+    ),
 )
 
 function normed(y)
@@ -309,7 +315,8 @@ function add_geocoding(dealers)
         )
         rename(:lon => :longitude, :lat => :latitude) # my bad...
         transform(
-            [:longitude, :latitude] => ByRow(passmissing(AG.createpoint)) => :geometry
+            [:longitude, :latitude] =>
+                ByRow(passmissing(Geometry.assert_crs! ∘ AG.createpoint)) => :geometry,
         )
     end
 end
@@ -323,7 +330,9 @@ function add_msas(dealers)
             :geometry =>
                 (ByRow ∘ passmissing)() do g
                     dealer_msas = subset(msas(), :geometry => ByRow(AG.within$g))
-                    isempty(dealer_msas) ? nothing : first(dealer_msas).name
+                    isempty(dealer_msas) && return nothing
+                    msa = first(dealer_msas).name
+                    @> msa split("-") first replace(", TX" => "")
                 end => :msa,
         )
     end
