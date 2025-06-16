@@ -17,5 +17,8 @@ include("registrations.jl")
 include("demographics.jl")
 include("mahalanobis.jl")
 include("event_study.jl")
+include("treatment_effect.jl")
+include("combine_std_error.jl")
+include("synthetic_comparison.jl")
 
 end

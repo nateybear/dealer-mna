@@ -353,6 +353,22 @@ get_extras = lambda wildcards: sorted(
 )
 
 
+def get_all_treatment_effects(wildcards):
+    # Get the output file from the checkpoint at runtime
+    transaction_uids = pd.read_csv(checkpoints.transaction_uids.get().output[0])
+    with open(checkpoints.statistics.get().output[0], "r") as f:
+        statistics = f.read().splitlines()
+
+    out = set()
+    for t in transaction_uids.itertuples():
+        for statistic in statistics:
+            out.add(
+                f"data/treatment_effects/treated_dealers/{t.transaction_uid}/{t.dealer_uid}.arrow"
+            )
+
+    return list(out)
+
+
 rule treated_event_study_plot:
     input:
         "scripts/event_study_plot.jl",
@@ -554,6 +570,19 @@ rule table_body_make_count:
         julia("scripts/table_body_make_count.jl", input=input, output=output, log=log)
 
 
+rule table_te_crosstabs:
+    input:
+        "scripts/table_te_crosstabs.jl",
+        treatment_effects=get_all_treatment_effects,
+        transaction_uids="data/transaction_uids.csv",
+    output:
+        "tables/te_crosstabs.tex",
+    log:
+        "logs/table_te_crosstabs.log",
+    run:
+        julia("scripts/table_te_crosstabs.jl", input=input, output=output, log=log)
+
+
 rule facts:
     input:
         "scripts/facts.jl",
@@ -568,6 +597,14 @@ rule facts:
         "logs/facts.log",
     run:
         julia("scripts/facts.jl", input=input, output=output, log=log)
+
+
+rule clean:
+    run:
+        touched_files = "data/dealers_init.jld2 data/treatment_effects data/treated data/control data/transaction_uids.csv data/affiliated_dealerships data/closest_dealerships data/related_dealerships.txt data/relat plots/event_study tables/*.tex facts.tex logs data/dealer_demographics.arrow data/price_table.arrow data/statistics.txt".split()
+
+        for f in touched_files:
+            shell(f"rm -rf {f}")
 
 
 ### UTILS: running julia
