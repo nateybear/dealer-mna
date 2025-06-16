@@ -20,5 +20,6 @@ include("event_study.jl")
 include("treatment_effect.jl")
 include("combine_std_error.jl")
 include("synthetic_comparison.jl")
+include("market_share.jl")
 
 end
