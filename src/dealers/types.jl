@@ -1,9 +1,12 @@
 #### MSA type
 const MSA = Union{String, Missing, Nothing}
 
+using Random
+_rng = Xoshiro(78704)
+
 # Dealership represents a single LOCATION
 @kwdef struct Dealership
-    uid::UUID = uuid4()
+    uid::UUID = uuid4(_rng)
     active::Bool = true
     gid::UUID
     gdns::Set{String}
@@ -32,7 +35,7 @@ State = _State()
 abstract type AbstractEvent end
 
 @kwdef struct Transaction <: AbstractEvent
-    uid::UUID = uuid4()
+    uid::UUID = uuid4(_rng)
     buyer_name::String
     seller_name::String
     buyer_gid::UUID
@@ -56,7 +59,7 @@ buyer_dbas(t::Transaction) = Set(t.gdn_dba_map.buyer_dba)
 buyer_dbas(d::DataFrame) = Set(d.buyer_dba)
 
 @kwdef struct Entry <: AbstractEvent
-    uid::UUID = uuid4()
+    uid::UUID = uuid4(_rng)
     reason::String = ""
     when::Date
     app_name::String
@@ -69,7 +72,7 @@ buyer_dbas(d::DataFrame) = Set(d.buyer_dba)
 end
 
 @kwdef struct Exit <: AbstractEvent
-    uid::UUID = uuid4()
+    uid::UUID = uuid4(_rng)
     reason::String = ""
     when::Date
     business_name::String
