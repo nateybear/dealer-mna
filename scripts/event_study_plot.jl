@@ -80,16 +80,14 @@ with_logging() do
         ) do (tes, extras)
             df = DataFrame(Arrow.Table(tes))
             ### extract transaction_uid and dealer_uid from the pathname
-            df.transaction_uid .= UUID(basename(dirname(fname)))
-            df.dealer_uid .= UUID(replace(basename(fname), r"\.arrow$" => ""))
+            df.transaction_uid .= UUID(basename(dirname(tes)))
+            df.dealer_uid .= UUID(replace(basename(tes), r"\.arrow$" => ""))
             extras = JLD2.load_object(extras)
             extras.delta = extras.fe_treated .- extras.fe_synthetic
             extras = @> extras select(:stat, :delta) unstack(:stat, :delta)
             rename!(col -> "$(col)_adjustment", extras)
-            @> df begin
-                subset(Symbol("$(statistic)_se") => ByRow(!isnan)) # that pesky underperforming dealer
-                hcat(extras)
-            end
+            df = subset(df, Symbol("$(statistic)_se") => ByRow(!isnan)) # that pesky underperforming dealer
+            return hcat(df, repeat(extras, nrow(df)))
         end
 
         dealer_demographics = DataFrame(
