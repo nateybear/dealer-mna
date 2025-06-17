@@ -1,0 +1,6 @@
+{
+    "julia.additionalArgs": [
+        "--threads",
+        "auto"
+    ]
+}
