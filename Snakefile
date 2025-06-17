@@ -158,6 +158,7 @@ rule transactions_for_analysis:
 checkpoint transaction_uids:
     input:
         "scripts/transaction_uids.jl",
+        "data/statistics.txt",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
@@ -581,6 +582,29 @@ rule table_te_crosstabs:
         "logs/table_te_crosstabs.log",
     run:
         julia("scripts/table_te_crosstabs.jl", input=input, output=output, log=log)
+
+
+rule group_market_share_changes:
+    input:
+        "scripts/group_market_share_changes.jl",
+        "data/statistics.txt",
+        "data/transaction_uids.csv",
+        "data/related_dealerships.txt",
+        get_event_study_plots,
+        dealer_init="data/dealers_init.jld2",
+        transaction_uids="data/transaction_uids.csv",
+        transactions_for_analysis="data/transactions_for_analysis.jld2",
+    output:
+        "data/group_market_share_changes.arrow",
+    log:
+        "logs/group_market_share_changes.log",
+    run:
+        julia(
+            "scripts/group_market_share_changes.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
 
 
 rule facts:

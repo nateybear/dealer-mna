@@ -2,20 +2,40 @@ import ..Dealers: timetravel, State, add_distance
 using ..Geometry: distance
 import ..Registrations: registrations as all_registrations
 
+using DataStructures: DefaultDict
+
+# if group_remap is not provided, calc a straight market share
+# if group_remap is provided, calculate change in market share
 function market_share(
     registrations,
     period,
+    group_remap = Dict();
     weight = LinearWeight(100mi),
 )
     # ensure registrations are in the right period
     our_registrations = subset(registrations, :regeffdate => ByRow(in(period)))
     focal_uid = first(our_registrations.dealer_uid)
     focal_geometry = State.df.geometry[findfirst(==(focal_uid), State.df.uid)]
-    our_registrations.weight .= 1.0
-    body_classes = unique(our_registrations.body_class)
-    body_class_counts = @> our_registrations groupby(:body_class) combine(nrow)
 
-    other_registrations = DataFrame()
+    # calc market share within each body class, then weight by
+    # how important that body class is to the focal dealer
+    body_class_weights = @> our_registrations begin
+        groupby(:body_class)
+        combine(nrow)
+        transform(:nrow => (x -> x ./ sum(x)) => :class_weight)
+    end
+
+    body_classes = body_class_weights.body_class
+
+    our_weights = DefaultDict{String, Float64}(0.0)
+    for row in eachrow(body_class_weights)
+        our_weights[row.body_class] = row.nrow
+    end
+
+    their_weights = DefaultDict{String, Float64}(0.0)
+
+    # these are the guys that are changing hands
+    contested_weights = DefaultDict{String, Float64}(0.0)
 
     # compile our group's and other groups' registrations
     timetravel(first(period)) do
@@ -42,38 +62,44 @@ function market_share(
 
             subset!(dealer_registrations, :dealer_uid => ByRow(==(dealer.uid)))
 
-            # calculate distance to focal dealer
-            dealer_registrations.distance .= d
+            dealer_registrations = @> dealer_registrations begin
+                groupby(:body_class)
+                combine(nrow)
+            end
 
-            # apply weight based on distance
-            dealer_registrations.weight .= weight(d)
+            w = weight(d)
 
-            # append to our/other registrations
-            append!(
-                dealer.gid == our_group_id ? our_registrations : other_registrations,
-                dealer_registrations,
-                cols = :union,
-            )
+            dict = if haskey(group_remap, dealer.uid)
+                contested_weights
+            elseif dealer.gid == our_group_id
+                our_weights
+            else
+                their_weights
+            end
+
+            for row in eachrow(dealer_registrations)
+                dict[row.body_class] += row.nrow * w
+            end
         end
     end
 
-    our_body_class_sum = @> our_registrations begin
-        groupby(:body_class)
-        combine(:weight => sum => :our_weight)
-    end
-    other_body_class_sum = @> other_registrations begin
-        groupby(:body_class)
-        combine(:weight => sum => :other_weight)
+    function class_share(body_class, include_contested = false)
+        class_weight = body_class_weights.class_weight[findfirst(
+            ==(body_class), body_class_weights.body_class
+        )]
+        numerator =
+            our_weights[body_class] + include_contested * contested_weights[body_class]
+        denominator =
+            our_weights[body_class] + their_weights[body_class] +
+            contested_weights[body_class]
+
+        return class_weight * numerator / denominator
     end
 
-    out = @> body_class_counts begin
-        innerjoin(our_body_class_sum, on = :body_class)
-        innerjoin(other_body_class_sum, on = :body_class)
-        transform(
-            :nrow => (x -> x ./ sum(x)) => :class_weight,
-            [:our_weight, :other_weight] => ByRow(/) => :market_share,
-        )
+    return if isempty(contested_weights)
+        sum(class_share(body_class) for body_class in body_classes)
+    else
+        sum(class_share(body_class, true) for body_class in body_classes) -
+        sum(class_share(body_class, false) for body_class in body_classes)
     end
-
-    return sum(out.market_share .* out.class_weight)
 end
