@@ -52,6 +52,7 @@ function market_share(
                     :regeffdate => ByRow(in(period)),
                     :dlrgdn => ByRow(in(dealer.gdns)),
                     :body_class => ByRow(in(body_classes)),
+                    view = true,
                 )
                 add_distance
             end
@@ -60,9 +61,8 @@ function market_share(
                 continue
             end
 
-            subset!(dealer_registrations, :dealer_uid => ByRow(==(dealer.uid)))
-
             dealer_registrations = @> dealer_registrations begin
+                subset(:dealer_uid => ByRow(==(dealer.uid)), view = true)
                 groupby(:body_class)
                 combine(nrow)
             end
