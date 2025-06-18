@@ -20,9 +20,9 @@ with_logging() do
         group = String[],
     )
 
-    for r in eachrow(transaction_uids)
-        transaction_uid = UUID(r.transaction_uid)
-        transacted_dealer_uid = UUID(r.dealer_uid)
+    for (key, transacted_group) in pairs(groupby(transaction_uids, :transaction_uid))
+        transaction_uid = UUID(key.transaction_uid)
+        transacted_dealers = UUID.(transacted_group.dealer_uid)
 
         t = first(
             t for t in transactions_for_analysis
@@ -63,8 +63,14 @@ with_logging() do
                 )
 
                 change_market_share = Empirics.market_share(
-                    registrations, period, Dict(dealer_uid => t.buyer_gid)
+                    registrations, period, Dict(transacted_dealers .=> t.buyer_gid)
                 )
+
+                # change in market share is always positive,
+                # but for sellers it should be < 0
+                if group == "seller"
+                    change_market_share *= -1
+                end
 
                 push!(
                     out,

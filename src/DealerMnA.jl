@@ -8,6 +8,7 @@ using Reexport
     using DataFrames
     using Arrow
     using CSV
+    using UUIDs
     using PartialFunctions
     using Lazy: @>
     import JLD2

@@ -591,7 +591,7 @@ rule group_market_share_changes:
         "data/transaction_uids.csv",
         "data/related_dealerships.txt",
         get_event_study_plots,
-        dealer_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init.jld2",
         transaction_uids="data/transaction_uids.csv",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
     output:

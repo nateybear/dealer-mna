@@ -38,7 +38,7 @@ function market_share(
     contested_weights = DefaultDict{String, Float64}(0.0)
 
     # compile our group's and other groups' registrations
-    timetravel(first(period)) do
+    timetravel(maximum(period)) do
         our_group_id = State.df.gid[findfirst(==(focal_uid), State.df.uid)]
         for dealer in eachrow(State.df)
             d = distance(dealer.geometry, focal_geometry)
