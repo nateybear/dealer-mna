@@ -81,7 +81,7 @@ function event_study(
             panel,
             ev_formula(outcol),
             Vcov.cluster(:dealer_uid),
-            weights = :weight,
+            # weights = :weight,
             save = :fe,
         )
         table = DataFrame(coeftable(reg_result))
