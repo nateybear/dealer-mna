@@ -606,6 +606,27 @@ rule group_market_share_changes:
             log=log,
         )
 
+rule plot_market_share_change_te:
+    input:
+        "scripts/plot_market_share_changes_tes.jl",
+        group_market_share_changes = "data/group_market_share_changes.arrow",
+    output:
+        "plots/market_share_change_te_{col}.png",
+    log:
+        "logs/plot_market_share_change_te_{col}.log",
+    run:
+        julia(
+            "scripts/plot_market_share_changes_tes.jl",
+            input = input,
+            output=output,
+            log=log,
+        )
+
+rule plot_market_share_changes_tes:
+    input:
+        expand("plots/market_share_change_te_{col}.png", col = ["mean_price", "median_markup", "mean_baseprice"])
+    
+
 
 rule facts:
     input:
