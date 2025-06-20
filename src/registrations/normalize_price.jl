@@ -59,6 +59,7 @@ trimnames(df) = names(df, r"^((trim)|(series))$")
     out = @> out begin
         groupby([:make, :model, :year])
         transform(
+            :mean_price => minimum => :base_price,
             :mean_price => (x -> x ./ minimum(x)) => :trim_relprice,
             :mean_price =>
                 (

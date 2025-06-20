@@ -7,14 +7,17 @@ using PartialFunctions
 using Missings
 using FixedEffectModels
 
+numunique(cols...) = cols |> splat(zip) |> unique |> length
+
 const STATISTICS = (
-    mean_baseprice = :mean_price => mean,
-    sales_baseprice = :mean_price => sum,
+    mean_baseprice = :base_price => mean,
+    sales_baseprice = :base_price => sum,
     median_markup = :price_normed => median,
     total_sales = :vehsalesprice => sum,
     total_units = :vehsalesprice => length,
     mean_price = :vehsalesprice => mean,
     trim_rank = :trim_rank => mean,
+    unique_trims = [:model, :extra] => numunique,
 )
 
 function event_study(
@@ -81,7 +84,7 @@ function event_study(
             panel,
             ev_formula(outcol),
             Vcov.cluster(:dealer_uid),
-            # weights = :weight,
+            weights = :weight,
             save = :fe,
         )
         table = DataFrame(coeftable(reg_result))
