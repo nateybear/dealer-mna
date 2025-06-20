@@ -21,28 +21,13 @@ end
 
 with_logging() do
     transactions = read_csv(snakemake.input["transaction_uids"])
-    transactions.p_comparison = map(eachrow(transactions)) do col
-        tes = DataFrame(
-            Arrow.Table(
-                "data/treatment_effects/treated_dealers/$(col.transaction_uid)/$(col.dealer_uid).arrow"
-            ),
-        )
-        extras = JLD2.load_object(
-            "data/treatment_effects/treated_dealers/$(col.transaction_uid)/$(col.dealer_uid)_extras.jld2"
-        )
-        compare(tes, extras, :mean_price, "P")
+    function comp_vector(col, outname)
+        map(eachrow(transactions)) do row
+            compare(col, outname; row.transaction_uid, row.dealer_uid)
+        end
     end
-    transactions.q_comparison = map(eachrow(transactions)) do col
-        tes = DataFrame(
-            Arrow.Table(
-                "data/treatment_effects/treated_dealers/$(col.transaction_uid)/$(col.dealer_uid).arrow"
-            ),
-        )
-        extras = JLD2.load_object(
-            "data/treatment_effects/treated_dealers/$(col.transaction_uid)/$(col.dealer_uid)_extras.jld2"
-        )
-        compare(tes, extras, :total_units, "Q")
-    end
+    transactions.p_comparison = comp_vector(:mean_price, "P")
+    transactions.q_comparison = comp_vector(:total_units, "Q")
 
     table = @> transactions begin
         groupby([:p_comparison, :q_comparison])
