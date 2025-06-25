@@ -116,7 +116,7 @@ with_logging() do
     open(snakemake.output["group_sizes"], "w") do io
         latex_tabular(
             io,
-            Tabular("l|" * "c"^length(names(table, Not([:p_comparison, :Total]))) ),
+            Tabular("l|" * "c"^length(names(table, Not(:p_comparison))) ),
             [
                 Rule(:top),
                 ["", names(table, Not(:p_comparison))...],
