@@ -584,6 +584,21 @@ rule table_te_crosstabs:
         julia("scripts/table_te_crosstabs.jl", input=input, output=output, log=log)
 
 
+rule table_te_drilldown:
+    input:
+        "scripts/table_te_drilldown.jl",
+        treatment_effects=get_all_treatment_effects,
+        transaction_uids="data/transaction_uids.csv",
+    output:
+        q_increased="tables/te_drilldown_q_increased.tex",
+        q_decreased="tables/te_drilldown_q_decreased.tex",
+        group_sizes="tables/te_drilldown_group_sizes.tex",
+    log:
+        "logs/table_te_drilldown.log",
+    run:
+        julia("scripts/table_te_drilldown.jl", input=input, output=output, log=log)
+
+
 rule group_market_share_changes:
     input:
         "scripts/group_market_share_changes.jl",
@@ -606,10 +621,11 @@ rule group_market_share_changes:
             log=log,
         )
 
+
 rule plot_market_share_change_te:
     input:
         "scripts/plot_market_share_changes_tes.jl",
-        group_market_share_changes = "data/group_market_share_changes.arrow",
+        group_market_share_changes="data/group_market_share_changes.arrow",
     output:
         "plots/market_share_change_te_{col}.png",
     log:
@@ -617,15 +633,19 @@ rule plot_market_share_change_te:
     run:
         julia(
             "scripts/plot_market_share_changes_tes.jl",
-            input = input,
+            input=input,
             output=output,
             log=log,
+            wildcards=wildcards,
         )
+
 
 rule plot_market_share_changes_tes:
     input:
-        expand("plots/market_share_change_te_{col}.png", col = ["mean_price", "median_markup", "mean_baseprice"])
-    
+        expand(
+            "plots/market_share_change_te_{col}.png",
+            col=["mean_price", "median_markup", "mean_baseprice", "total_units", "trim_rank"],
+        ),
 
 
 rule facts:
