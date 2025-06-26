@@ -34,6 +34,7 @@ function print_table(filename, df)
                     "Avg. Trim Rank",
                     "Num. Available Trims",
                     "Avg. Model Base Price",
+                    "Avg. Markup",
                 ],
                 Rule(:mid),
                 ["P < 0"],
