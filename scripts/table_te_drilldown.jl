@@ -53,7 +53,7 @@ function print_table(filename, df)
     return nothing
 end
 function make_count_table(df)
-    out = mapreduce(outerjoin$(on = :order,), (:trim_rank, :num_trims, :baseprice)) do col
+    out = mapreduce(outerjoin$(on = :order,), (:trim_rank, :num_trims, :baseprice, :markup)) do col
         counts = @> df groupby(col) combine(nrow) sort(col)
         counts[!, col] .= last.(counts[!, col], 3)
         return select(counts, col => :order, :nrow => col)
@@ -75,6 +75,7 @@ with_logging() do
     transactions.trim_rank = comp_vector(:trim_rank, "Avg. Trim")
     transactions.num_trims = comp_vector(:unique_trims, "Num. Available Trims")
     transactions.baseprice = comp_vector(:mean_baseprice, "Model Base Price")
+    transactions.markup = comp_vector(:median_markup, "Avg. Markup")
 
     goodies = subset(transactions, :q_comparison => ByRow(contains(">")))
     print_table(snakemake.output["q_increased"], goodies)
