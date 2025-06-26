@@ -27,7 +27,7 @@ function print_table(filename, df)
     open(filename, "w") do io
         latex_tabular(
             io,
-            Tabular("c"^4),
+            Tabular("c"^5),
             [Rule(:top),
                 [
                     "Effect",
