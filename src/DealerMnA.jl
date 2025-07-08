@@ -19,7 +19,7 @@ end
 
 export Geometry,
     Registrations, Dealers, Empirics, snakemake, snakemake!, with_logging, nonmissing,
-    read_csv
+    read_csv, start_daemon, stop_daemon
 
 include("utils.jl")
 include("geometry/Geometry.jl")

@@ -45,3 +45,37 @@ nonmissing(f) = NonMissing(f)
 
 ### read_csv helper
 read_csv = @$ CSV.read(_, DataFrame)
+
+#### run daemon inside of this REPL in the background (for shell commands)
+import DaemonMode
+daemon = nothing
+start_daemon() =
+    let daemon = getproperty(@__MODULE__, :daemon)
+        if isnothing(daemon) || istaskdone(daemon)
+            @info "Starting daemon"
+            daemon = @async begin
+                DaemonMode.serve(async = true)
+            end
+            setproperty!(@__MODULE__, :daemon, daemon)
+            sleep(0.5)  # give the daemon some time to start
+            istaskfailed(daemon) && error("Daemon failed to start")
+            return daemon
+        else
+            @info "Daemon already running"
+            return daemon
+        end
+    end
+
+function stop_daemon()
+    daemon = getproperty(@__MODULE__, :daemon)
+    if !isnothing(daemon) && !istaskdone(daemon)
+        @info "Stopping daemon"
+        istaskdone(daemon) || DaemonMode.sendExitCode()
+        sleep(0.5)  # give the daemon some time to stop
+        istaskdone(daemon) || error("Daemon did not stop properly")
+    else
+        @info "No daemon running"
+    end
+    setproperty!(@__MODULE__, :daemon, nothing)
+    return nothing
+end
