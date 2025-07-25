@@ -3,7 +3,6 @@ using OnlineStats: Mean, fit!, merge!
 using Base: Fix1, Fix2
 import ..snakemake
 import JLD2
-using Dates: year
 
 normalize_trim = ByRow() do x...
     trim_vars = reduce(skipmissing(x), init = [""]) do acc, trim
@@ -11,7 +10,7 @@ normalize_trim = ByRow() do x...
         union(acc, split_trim)
     end
 
-    @> trim_vars sort join(" ") strip
+    @> trim_vars sort join(" ") strip string
 end
 
 trimnames(df) = names(df, r"^((trim)|(series))$")
@@ -21,7 +20,7 @@ trimnames(df) = names(df, r"^((trim)|(series))$")
         return DataFrame(Arrow.Table(snakemake.input["price_table"]))
     end
 
-    out = DefaultDict{NTuple{4, String}, Mean}(Mean)
+    out = DefaultDict{Tuple{String, String, Int64, String}, Mean}(Mean)
     fitmean(v) = fit!(Mean(), v)
     for s in Arrow.Stream(
         get(snakemake.input,
@@ -29,35 +28,31 @@ trimnames(df) = names(df, r"^((trim)|(series))$")
             datadir("arrow/new_registrations.arrow")),
     )
         s = DataFrame(s)
-        transform!(
-            s,
-            trimnames(s) => normalize_trim => :extra,
-            :regeffdate => ByRow(passmissing(string ∘ year)) => :year,
-        )
+        transform!(s, trimnames(s) => normalize_trim => :extra)
 
         grouping = @> s begin
-            groupby([:make, :model, :year, :extra])
+            groupby([:make, :model, :model_year, :extra])
             combine(:vehsalesprice => (fitmean ∘ skipmissing) => :stat)
         end
         for r in eachrow(grouping)
-            merge!(out[(r.make, r.model, r.year, r.extra)], r.stat)
+            merge!(out[(r.make, r.model, r.model_year, r.extra)], r.stat)
         end
     end
 
     out = DataFrame(
         make = getindex.(keys(out), 1),
         model = getindex.(keys(out), 2),
-        year = getindex.(keys(out), 3),
+        model_year = getindex.(keys(out), 3),
         extra = getindex.(keys(out), 4),
         mean_price = getfield.(values(out), :μ),
         n = getfield.(values(out), :n),
     )
 
-    sort!(out, [:make, :model, :year, :mean_price])
+    sort!(out, [:make, :model, :model_year, :mean_price])
     subset!(out, :n => ByRow(>(5)))
 
     out = @> out begin
-        groupby([:make, :model, :year])
+        groupby([:make, :model, :model_year])
         transform(
             :mean_price => minimum => :base_price,
             :mean_price => (x -> x ./ minimum(x)) => :trim_relprice,
@@ -90,11 +85,10 @@ function normalize_price(df, col_in = :vehsalesprice, col_out = :price_normed)
         )
     else
         @> df begin
-            transform(
-                trimnames(df) => normalize_trim => :extra,
-                :regeffdate => ByRow(passmissing(string ∘ year)) => :year,
+            transform(trimnames(df) => normalize_trim => :extra)
+            innerjoin(
+                select(price_table(), Not(:n)), on = [:make, :model, :model_year, :extra]
             )
-            innerjoin(select(price_table(), Not(:n)), on = [:make, :model, :year, :extra])
             transform(
                 [col_in, :mean_price] => ByRow((p, bar) -> (p - bar) / bar) => col_out
             )
