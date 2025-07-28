@@ -135,6 +135,24 @@ rule price_table:
         julia("scripts/price_table.jl", input=input, output=output, log=log)
 
 
+checkpoint all_manufacturers:
+    input:
+        "scripts/all_manufacturers.jl",
+        price_table="data/price_table.arrow",
+    output:
+        "data/all_manufacturers.txt",
+    log:
+        "logs/all_manufacturers.log",
+    run:
+        julia("scripts/all_manufacturers.jl", input=input, output=output, log=log)
+
+
+def get_all_manufacturers(wildcards):
+    # Get the output file from the rule at runtime
+    with open(checkpoints.all_manufacturers.get().output[0], "r") as f:
+        return f.read().splitlines()
+
+
 rule transactions_for_analysis:
     input:
         *julia_dealers,
@@ -644,8 +662,100 @@ rule plot_market_share_changes_tes:
     input:
         expand(
             "plots/market_share_change_te_{col}.png",
-            col=["mean_price", "median_markup", "mean_baseprice", "total_units", "trim_rank"],
+            col=[
+                "mean_price",
+                "median_markup",
+                "mean_baseprice",
+                "total_units",
+                "trim_rank",
+            ],
         ),
+
+
+rule plot_trim_distn_manufacturer:
+    input:
+        "scripts/plot_trim_distn_manufacturer.jl",
+        price_table="data/price_table.arrow",
+    output:
+        rank="plots/trim_distn/{manufacturer}_rank.png",
+        relprice="plots/trim_distn/{manufacturer}_relprice.png",
+    log:
+        "logs/plot_trim_distn_{manufacturer}.log",
+    run:
+        julia(
+            "scripts/plot_trim_distn_manufacturer.jl",
+            input=input,
+            output=output,
+            log=log,
+            wildcards=wildcards,
+        )
+
+
+def get_plot_trim_distns(wildcards):
+    return (
+        expand(
+            "plots/trim_distn/{manufacturer}_{metric}.png",
+            manufacturer=get_all_manufacturers,
+            metric=["rank", "relprice"],
+        ),
+    )
+
+
+rule plot_hist_odometer:
+    input:
+        "scripts/plot_hist_odometer.jl",
+        registrations="data/arrow/registrations.arrow",
+    output:
+        "plots/hist_odometer.png",
+    log:
+        "logs/plot_hist_odometer.log",
+    run:
+        julia("scripts/plot_hist_odometer.jl", input=input, output=output, log=log)
+
+
+rule plot_registrations_spatial:
+    input:
+        "scripts/plot_registrations_spatial.jl",
+        new_registrations="data/arrow/new_registrations.arrow",
+        dealers_init="data/dealers_init.jld2",
+    output:
+        "plots/registrations_spatial.png",
+    log:
+        "logs/plot_registrations_spatial.log",
+    run:
+        julia(
+            "scripts/plot_registrations_spatial.jl", input=input, output=output, log=log
+        )
+
+
+rule plot_sales_prices_quarterly:
+    input:
+        "scripts/plot_sales_prices_quarterly.jl",
+        new_registrations="data/arrow/new_registrations.arrow",
+    output:
+        "plots/sales_prices_quarterly.png",
+    log:
+        "logs/plot_sales_prices_quarterly.log",
+    run:
+        julia(
+            "scripts/plot_sales_prices_quarterly.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule table_trim_variation:
+    input:
+        "scripts/table_trim_variation.jl",
+        price_table="data/price_table.arrow",
+        new_registrations="data/arrow/new_registrations.arrow",
+    output:
+        "tables/trim_variation.tex",
+    log:
+        "logs/table_trim_variation.log",
+    run:
+        julia("scripts/table_trim_variation.jl", input=input, output=output, log=log)
 
 
 rule facts:
