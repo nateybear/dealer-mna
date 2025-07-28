@@ -102,7 +102,7 @@ function init_dealers!()
         end
 
         # else this is a new dealership
-        @info "New dealership" NamedTuple(d)
+        @debug "New dealership" NamedTuple(d)
         push!(
             State.df,
             Dealership(;
@@ -182,9 +182,10 @@ function init_transactions!()
         rename(:group_id => :buyer_group_id)
 
         # add franchises
-        add_franchises([
-            :buyer_dbaname, :seller_dbaname, :buyer_business_name, :seller_business_name
-        ])
+        add_franchises(
+            [:buyer_dbaname, :seller_dbaname, :buyer_business_name, :seller_business_name],
+            gdn_col = :buyer_gdn,
+        )
         subset(:franchises => ByRow(!isempty))
 
         # return a grouped df
@@ -257,7 +258,7 @@ function init_transactions!()
         else
             # merge the transactions
             old = Events[i]
-            @warn "Merging transactions" old new = t
+            @info "Merging transactions" old new = t
             Events[i] = Transaction(;
                 buyer_name,
                 seller_name,
@@ -294,7 +295,7 @@ end
 
 function init_entry_exit!()
     franchise_entrants = @> entrants() begin
-        add_franchises
+        add_franchises(gdn_col = :gdn)
         add_groups
         subset(
             :franchises => ByRow(!isempty),
@@ -302,7 +303,7 @@ function init_entry_exit!()
         )
     end
     franchise_exits = @> exits() begin
-        add_franchises
+        add_franchises(gdn_col = :gdn)
         add_groups
         subset(
             :franchises => ByRow(!isempty),

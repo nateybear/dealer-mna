@@ -24,23 +24,23 @@ unapply!(diff::Diff) = foreach(unapply!, diff)
 # apply this transaction, and return the diff
 # N.B. the transaction might already be "applied" but we can fix that
 function apply!(t::Transaction)
-    @show t
+    @debug "transaction" t
     matched_gdn_buyer = Dict(
         gdn => findall(∋(gdn), State.df.gdns)
         for gdn in buyer_gdns(t)
     )
     matched_gdn_buyer = filter(!isempty ∘ last, matched_gdn_buyer)
-    @show matched_gdn_buyer
+    @debug "matched by buyer" matched_gdn_buyer
 
     matched_gdn_seller = Dict(
         gdn => findall(∋(gdn), State.df.gdns)
         for gdn in seller_gdns(t)
     )
     matched_gdn_seller = filter(!isempty ∘ last, matched_gdn_seller)
-    @show matched_gdn_seller
+    @debug "matched by seller" matched_gdn_seller
 
     if !isempty(matched_gdn_seller)
-        @warn "Transaction appears to have already been applied, attempting to reverse" matched_gdn_seller
+        @debug "Transaction appears to have already been applied, attempting to reverse" matched_gdn_seller
         if !isempty(matched_gdn_buyer)
             @warn "Both buyer and seller GDNs matched, possibly undefined behavior" matched_gdn_buyer matched_gdn_seller
         end
@@ -106,7 +106,7 @@ function apply!(t::Transaction)
         @error "Both buyer and seller indexes are empty" matched_gdn_seller matched_gdn_buyer t
     end
 
-    @show out
+    @debug "final diff" out
     out = Diff(out)
 
     apply!(out)
@@ -115,19 +115,19 @@ end
 
 function apply!(e::Entry)
     idxs = findall(∋(e.gdn), State.df.gdns)
-    @show e idxs
+    @debug "entry" e idxs
 
     isempty(idxs) && @error "No matching GDNs" idxs e
 
     out = Diff([FieldDiff{:active, Bool}(i, false, true) for i in idxs])
-    @show out
+    @debug "diff" out
     apply!(out)
     return out
 end
 
 function apply!(e::Exit)
     idxs = findall(∋(e.gdn), State.df.gdns)
-    @show e idxs
+    @debug "exit" e idxs
 
     if isempty(idxs)
         @error "No matching GDNs" idxs e
@@ -135,7 +135,7 @@ function apply!(e::Exit)
     end
 
     out = Diff([FieldDiff{:active, Bool}(i, true, false) for i in idxs])
-    @show out
+    @debug "diff" out
     apply!(out)
     return out
 end

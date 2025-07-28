@@ -10,7 +10,12 @@ with_logging() do
     uid = UUID(snakemake.wildcards["transaction_uid"])
     t = first(t for t in transactions if t.uid == uid)
     Dealers.timetravel(t, before = true) do
-        buyer_uids = subset(Dealers.State.df, :gid => ByRow(==(t.buyer_gid))).uid
+        buyer_uids =
+            subset(
+                Dealers.State.df,
+                :gid => ByRow(==(t.buyer_gid)),
+                :active => ByRow(identity),
+            ).uid
         @info "Found $(length(buyer_uids)) buyers for transaction $(t.uid)"
         open(snakemake.output["buyer_group"], "w") do f
             for dealer_uid in buyer_uids
@@ -26,7 +31,12 @@ with_logging() do
         end
     end
     Dealers.timetravel(t, before = false) do
-        seller_uids = subset(Dealers.State.df, :gid => ByRow(==(t.seller_gid))).uid
+        seller_uids =
+            subset(
+                Dealers.State.df,
+                :gid => ByRow(==(t.seller_gid)),
+                :active => ByRow(identity),
+            ).uid
         @info "Found $(length(seller_uids)) sellers for transaction $(t.uid)"
         open(snakemake.output["seller_group"], "w") do f
             for dealer_uid in seller_uids

@@ -79,3 +79,8 @@ function stop_daemon()
     setproperty!(@__MODULE__, :daemon, nothing)
     return nothing
 end
+
+function here(path...)
+    base_folder = dirname(Base.current_project())
+    return joinpath(base_folder, path...)
+end

@@ -16,8 +16,9 @@ using Lazy: @>
 using Memoize
 using PartialFunctions
 import Unicode
+import JSON3
 
-import ..snakemake
+import ..snakemake, ..here
 
 @memoize all_registrations() = DataFrame(
     Arrow.Table(
@@ -49,9 +50,9 @@ end
 
 @memoize all_makes() = unique(Arrow.Table(snakemake.input["popular_models"]).make)
 const make_aliases = [
-    (r"CDJRF?", "CHRYSLER"),
-    (r"CDJRF?", "DODGE"),
-    (r"CDJRF?", "JEEP"),
+    (r"CDJR?F?", "CHRYSLER"),
+    (r"CDJR?F?", "DODGE"),
+    (r"CDJR?F?", "JEEP"),
     (r"CDJRF?", "RAM"),
     ("CHEVY", "CHEVROLET"),
     ("DODGE", "RAM"),
@@ -63,21 +64,27 @@ const make_aliases = [
 ]
 const false_positives = DefaultDict(
     Vector{String},
-    "RAM" => ["RAM COUNTRY AUTOWORLD", "RAMTUFF AUTO GROUP", "RAM AUTO SALES"],
+    "RAM" => ["RAMTUFF AUTO GROUP", "RAM AUTO SALES"],
     "FORD" => ["BOBBY FORD CHRYSLER DODGE JEEP RAM"],
     "HONDA" => ["HONDA OF ORANGE", "HONDA OF HOUSTON"], # motorcycle dealers
 )
-const true_negatives = Dict(
-    "PIKE MOTORS OF PAMPA, LLC" => ["DODGE", "CHRYSLER", "JEEP"]
-)
+const true_negatives = open(JSON3.read, here("src/dealers/true_negatives.json"))
 
-function add_franchises(dealers, cols = [:dbaname, :business_name])
+function add_franchises(
+    dealers, cols = [:dbaname, :business_name]; gdn_col = :license_number
+)
     @> dealers transform(
-        cols =>
-            ByRow() do cols...
+        [gdn_col, cols...] =>
+            ByRow() do gdn, cols...
                 search_string = uppercase(coalesce(cols...))
-                haskey(true_negatives, search_string) &&
-                    return Set(true_negatives[search_string])
+                if haskey(true_negatives, search_string)
+                    dealer = true_negatives[Symbol(search_string)]
+                    if dealer isa AbstractVector{String}
+                        return Set(dealer)
+                    else
+                        return Set(get(dealer, Symbol(gdn), String[]))
+                    end
+                end
 
                 dealer_franchises = Set{String}()
 

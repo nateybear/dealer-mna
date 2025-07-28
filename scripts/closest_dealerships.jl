@@ -20,9 +20,11 @@ with_logging() do
     relevant_dealers = subset(
         Dealers.State.df,
         :franchises => ByRow(intersects$dealer.franchises),
+        :active => ByRow(identity),
+        :uid => ByRow(!=(dealer_uid)),
     )
     distances = Geometry.distance.(relevant_dealers.geometry, Ref(dealer.geometry))
-    order = sortperm(distances)[2:end]
+    order = sortperm(distances)
     open(snakemake.output[1], "w") do io
         count = 0
         for i in order

@@ -17,13 +17,6 @@ wildcard_constraints:
     i="[0-9]+",
 
 
-# rule all:
-#     input:
-#         event_study_plots,
-#         event_study_cut_plots,
-#         dealer_group_size_histogram,
-
-
 rule show_python_info:
     run:
         import sys
@@ -605,6 +598,7 @@ rule table_te_crosstabs:
 rule table_te_drilldown:
     input:
         "scripts/table_te_drilldown.jl",
+        get_related_dealerships,
         treatment_effects=get_all_treatment_effects,
         transaction_uids="data/transaction_uids.csv",
     output:
@@ -692,12 +686,10 @@ rule plot_trim_distn_manufacturer:
 
 
 def get_plot_trim_distns(wildcards):
-    return (
-        expand(
-            "plots/trim_distn/{manufacturer}_{metric}.png",
-            manufacturer=get_all_manufacturers,
-            metric=["rank", "relprice"],
-        ),
+    return expand(
+        "plots/trim_distn/{manufacturer}_{metric}.png",
+        manufacturer=get_all_manufacturers(wildcards),
+        metric=["rank", "relprice"],
     )
 
 
@@ -763,7 +755,7 @@ rule facts:
         "scripts/facts.jl",
         *julia_src,
         new_registrations="data/arrow/new_registrations.arrow",
-        price_table="data/arrow/price_table.arrow",
+        price_table="data/price_table.arrow",
         popular_models="data/arrow/popular_models.arrow",
         dealers_init="data/dealers_init.jld2",
     output:
@@ -780,6 +772,22 @@ rule clean:
 
         for f in touched_files:
             shell(f"rm -rf {f}")
+
+
+rule all:
+    input:
+        get_all_treatment_effects,
+        rules.dealer_group_size_histogram.output,
+        rules.table_body_make_count.output,
+        rules.table_te_crosstabs.output,
+        rules.table_te_drilldown.output,
+        rules.plot_market_share_changes_tes.output,
+        get_plot_trim_distns,
+        rules.plot_hist_odometer.output,
+        rules.plot_registrations_spatial.output,
+        rules.plot_sales_prices_quarterly.output,
+        rules.table_trim_variation.output,
+        rules.facts.output,
 
 
 ### UTILS: running julia
