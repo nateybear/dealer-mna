@@ -799,7 +799,7 @@ rule facts:
 
 rule clean:
     run:
-        touched_files = "data/dealers_init.jld2 data/treatment_effects data/treated data/control data/transaction_uids.csv data/affiliated_dealerships data/closest_dealerships data/related_dealerships.txt data/relat plots/event_study tables/*.tex facts.tex logs data/dealer_demographics.arrow data/price_table.arrow data/statistics.txt".split()
+        touched_files = "data/dealers_init.jld2 data/treatment_effects data/treated data/control data/transaction_uids.csv data/affiliated_dealerships data/closest_dealerships data/related_dealerships.txt data/relat plots/event_study tables/*.tex facts.tex logs data/dealer_demographics.arrow data/price_table.arrow data/statistics.txt plots/*.png plots/trim_distn data/arrow data/group_market_share_changes.arrow data/transactions_for_analysis.jld2".split()
 
         for f in touched_files:
             shell(f"rm -rf {f}")
