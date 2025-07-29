@@ -57,6 +57,7 @@ seller_dbas(t::Transaction) = Set(t.gdn_dba_map.seller_dba)
 seller_dbas(d::DataFrame) = Set(d.seller_dba)
 buyer_dbas(t::Transaction) = Set(t.gdn_dba_map.buyer_dba)
 buyer_dbas(d::DataFrame) = Set(d.buyer_dba)
+entities(t::Transaction) = Set([t.buyer_name, t.seller_name])
 
 @kwdef struct Entry <: AbstractEvent
     uid::UUID = uuid4(_rng)
@@ -87,3 +88,4 @@ Events = AbstractEvent[]
 
 affected_gdns(e::Union{Entry, Exit}) = Set([e.gdn])
 affected_gdns(t::Transaction) = seller_gdns(t) ∪ buyer_gdns(t)
+entities(e::Union{Entry, Exit}) = Set([e.business_name])

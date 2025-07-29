@@ -41,7 +41,6 @@ end
 # Types for the dealer group graph
 include("graphs.jl")
 function add_groups(dealers, col = :business_name)
-    Base.include(Main, srcdir("dealers/graphs.jl")) # our JLD2 file was saved with a different version of the graph
     graph = JLD2.load_object(datadir("dealer_groups_graph.jld2"))
     l = collect(labels(graph))
     group_ids = DataFrame(business_name = l, group_id = [graph[a].id for a in l])
