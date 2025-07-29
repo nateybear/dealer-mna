@@ -106,6 +106,7 @@ function control_dealers(t; dealer_uid = nothing)
             :gid => ByRow(!in([t.buyer_gid, t.seller_gid])),
             :gdns => ByRow(!in(tainted_gdns)),
             :franchises => ByRow(intersects$franchises),
+            :active => ByRow(identity),
         )
     end
 end

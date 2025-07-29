@@ -42,7 +42,7 @@ function market_share(
         our_group_id = State.df.gid[findfirst(==(focal_uid), State.df.uid)]
         for dealer in eachrow(State.df)
             d = distance(dealer.geometry, focal_geometry)
-            if dealer.uid == focal_uid || d > weight.max_distance
+            if dealer.uid == focal_uid || d > weight.max_distance || !dealer.active
                 continue
             end
 

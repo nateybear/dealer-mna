@@ -3,7 +3,7 @@ import ..Registrations: add_zips
 
 @memoize shortest_distance(geometry, make) = minimum(
     x -> distance(geometry, x.geometry),
-    eachrow(subset(State.df, :franchises => ByRow(∋(make)))),
+    eachrow(subset(State.df, :franchises => ByRow(∋(make)), :active => ByRow(identity))),
 )
 
 getgeom(dealer::Union{Dealership, DataFrameRow}) = dealer.geometry
@@ -31,6 +31,7 @@ function add_distance(r)
     isempty(r) && return missing
     r.uid = [uuid4() for _ in 1:nrow(r)]
     flat_dealers = @> State.df begin
+        subset(:active => ByRow(identity))
         select(
             :geometry => :dealer_geometry,
             :gdns => :dlrgdn,
