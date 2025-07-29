@@ -737,6 +737,24 @@ rule plot_sales_prices_quarterly:
         )
 
 
+rule plot_transaction_group_sizes:
+    input:
+        "scripts/plot_transaction_group_sizes.jl",
+        dealers_init="data/dealers_init.jld2",
+        transactions_for_analysis="data/transactions_for_analysis.jld2",
+    output:
+        "plots/transaction_group_sizes.png",
+    log:
+        "logs/plot_transaction_group_sizes.log",
+    run:
+        julia(
+            "scripts/plot_transaction_group_sizes.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 rule table_trim_variation:
     input:
         "scripts/table_trim_variation.jl",
@@ -748,6 +766,19 @@ rule table_trim_variation:
         "logs/table_trim_variation.log",
     run:
         julia("scripts/table_trim_variation.jl", input=input, output=output, log=log)
+
+
+rule table_msa_concentration:
+    input:
+        "scripts/table_msa_concentration.jl",
+        dealers_init="data/dealers_init.jld2",
+        transactions_for_analysis="data/transactions_for_analysis.jld2",
+    output:
+        "tables/msa_concentration.tex",
+    log:
+        "logs/table_msa_concentration.log",
+    run:
+        julia("scripts/table_msa_concentration.jl", input=input, output=output, log=log)
 
 
 rule facts:
@@ -788,6 +819,8 @@ rule all:
         rules.plot_sales_prices_quarterly.output,
         rules.table_trim_variation.output,
         rules.facts.output,
+        rules.plot_transaction_group_sizes.output,
+        rules.table_msa_concentration.output,
 
 
 ### UTILS: running julia
