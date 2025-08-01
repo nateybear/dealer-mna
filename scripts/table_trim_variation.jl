@@ -12,7 +12,7 @@ function format(row, digits = 2)
     # make, avg. price, num trims, std price within, std price across, std ratio
     fit_plus_std(x, y) =
         let x = round(x; digits), y = round(y; digits)
-            LaTeXString("\\makecell{$x \\\\ ($y)}")
+            LaTeXString("\\makecell{$x \\\\ ($y)\\\\[0.25em]}")
         end
     return [
         row.make,
@@ -72,7 +72,7 @@ with_logging() do
     open(snakemake.output[1], "w") do io
         latex_tabular(
             io,
-            Tabular("c"^6),
+            Tabular("l" * "c"^5),
             [Rule(:top),
                 [
                     "Make",
@@ -80,7 +80,7 @@ with_logging() do
                     "No. Trims",
                     "Std. Price Within",
                     "Std. Price Across",
-                    "Std. Ratio",
+                    "Across / Within",
                 ],
                 Rule(:mid),
                 format.(eachrow(make_stats))...,
