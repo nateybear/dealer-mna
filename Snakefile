@@ -149,7 +149,6 @@ def get_all_manufacturers(wildcards):
 rule transactions_for_analysis:
     input:
         *julia_dealers,
-        *julia_empirics,
         "src/empirics/Empirics.jl",
         "scripts/transactions_for_analysis.jl",
         dealers_init="data/dealers_init.jld2",
@@ -246,7 +245,6 @@ rule control_registrations:
 
 rule dealer_demographics:
     input:
-        *julia_src,
         "scripts/dealer_demographics.jl",
         dealers_init="data/dealers_init.jld2",
     output:
@@ -259,7 +257,7 @@ rule dealer_demographics:
 
 rule treatment_effects:
     input:
-        *julia_src,
+        "src/empirics/event_study.jl",
         "scripts/treatment_effects.jl",
         treated_before="data/treated/{folder}/last_registrations_before_{transaction_uid}_{dealer_uid}.arrow",
         treated_after="data/treated/{folder}/first_registrations_after_{transaction_uid}_{dealer_uid}.arrow",
@@ -366,17 +364,52 @@ get_extras = lambda wildcards: sorted(
 
 
 def get_all_treatment_effects(wildcards):
-    # Get the output file from the checkpoint at runtime
+    """
+    Get treatment effects for all related dealerships (treated, affiliated, and closest dealers).
+    This includes the side effect of generating affiliated and closest dealer treatment effects
+    without needing to generate plots.
+    """
+    # Get the output files from checkpoints at runtime
     transaction_uids = pd.read_csv(checkpoints.transaction_uids.get().output[0])
-    with open(checkpoints.statistics.get().output[0], "r") as f:
-        statistics = f.read().splitlines()
+
+    # Force the checkpoints to run to get related dealerships
+    related_files = checkpoints.related_dealerships.get().output
 
     out = set()
     for t in transaction_uids.itertuples():
-        for statistic in statistics:
+        # Add treated dealer treatment effects
+        out.add(
+            f"data/treatment_effects/treated_dealers/{t.transaction_uid}/{t.dealer_uid}.arrow"
+        )
+
+        # Add closest dealers treatment effects
+        closest_dealers_file = checkpoints.closest_dealerships.get(
+            transaction_uid=t.transaction_uid, dealer_uid=t.dealer_uid
+        ).output[0]
+        with open(closest_dealers_file, "r") as f:
+            closest_dealers = f.read().splitlines()
+        for d in closest_dealers:
             out.add(
-                f"data/treatment_effects/treated_dealers/{t.transaction_uid}/{t.dealer_uid}.arrow"
+                f"data/treatment_effects/closest_dealers/{t.transaction_uid}/{d}.arrow"
             )
+
+        # Add buyer group treatment effects
+        buyer_group_file = checkpoints.affiliated_dealerships.get(
+            transaction_uid=t.transaction_uid
+        ).output["buyer_group"]
+        with open(buyer_group_file, "r") as f:
+            buyer_group = f.read().splitlines()
+        for d in buyer_group:
+            out.add(f"data/treatment_effects/buyer/{t.transaction_uid}/{d}.arrow")
+
+        # Add seller group treatment effects
+        seller_group_file = checkpoints.affiliated_dealerships.get(
+            transaction_uid=t.transaction_uid
+        ).output["seller_group"]
+        with open(seller_group_file, "r") as f:
+            seller_group = f.read().splitlines()
+        for d in seller_group:
+            out.add(f"data/treatment_effects/seller/{t.transaction_uid}/{d}.arrow")
 
     return list(out)
 
@@ -611,16 +644,33 @@ rule table_te_drilldown:
         julia("scripts/table_te_drilldown.jl", input=input, output=output, log=log)
 
 
+rule table_effect_on_closest:
+    input:
+        "scripts/table_effect_on_closest.jl",
+        get_related_dealerships,
+        treatment_effects=get_all_treatment_effects,
+        transaction_uids="data/transaction_uids.csv",
+        dealers_init="data/dealers_init.jld2",
+    output:
+        "tables/effect_on_closest.tex",
+    log:
+        "logs/table_effect_on_closest.log",
+    run:
+        julia("scripts/table_effect_on_closest.jl", input=input, output=output, log=log)
+
+
 rule group_market_share_changes:
     input:
         "scripts/group_market_share_changes.jl",
         "data/statistics.txt",
         "data/transaction_uids.csv",
         "data/related_dealerships.txt",
-        get_event_study_plots,
+        "src/empirics/market_share.jl",
+        get_all_treatment_effects,
         dealers_init="data/dealers_init.jld2",
         transaction_uids="data/transaction_uids.csv",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
+        new_registrations="data/arrow/new_registrations.arrow",
     output:
         "data/group_market_share_changes.arrow",
     log:
@@ -652,18 +702,17 @@ rule plot_market_share_change_te:
         )
 
 
-rule plot_market_share_changes_tes:
-    input:
-        expand(
-            "plots/market_share_change_te_{col}.png",
-            col=[
-                "mean_price",
-                "median_markup",
-                "mean_baseprice",
-                "total_units",
-                "trim_rank",
-            ],
-        ),
+def get_plot_market_share_changes_tes(wildcards):
+    return expand(
+        "plots/market_share_change_te_{col}.png",
+        col=[
+            "mean_price",
+            "median_markup",
+            "mean_baseprice",
+            "total_units",
+            "trim_rank",
+        ],
+    )
 
 
 rule plot_trim_distn_manufacturer:
@@ -812,7 +861,7 @@ rule all:
         rules.table_body_make_count.output,
         rules.table_te_crosstabs.output,
         rules.table_te_drilldown.output,
-        rules.plot_market_share_changes_tes.output,
+        get_plot_market_share_changes_tes,
         get_plot_trim_distns,
         rules.plot_hist_odometer.output,
         rules.plot_registrations_spatial.output,
@@ -821,6 +870,7 @@ rule all:
         rules.facts.output,
         rules.plot_transaction_group_sizes.output,
         rules.table_msa_concentration.output,
+        rules.table_effect_on_closest.output,
 
 
 ### UTILS: running julia

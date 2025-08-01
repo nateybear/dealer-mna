@@ -3,14 +3,14 @@ using DataFrames
 using JLD2
 using Arrow
 
-function treatment_effect(column; transaction_uid, dealer_uid)
+function treatment_effect(column, group = "treated_dealers"; transaction_uid, dealer_uid)
     tes = DataFrame(
         Arrow.Table(
-            "data/treatment_effects/treated_dealers/$(transaction_uid)/$(dealer_uid).arrow"
+            "data/treatment_effects/$(group)/$(transaction_uid)/$(dealer_uid).arrow"
         ),
     )
     extras = JLD2.load_object(
-        "data/treatment_effects/treated_dealers/$(transaction_uid)/$(dealer_uid)_extras.jld2"
+        "data/treatment_effects/$(group)/$(transaction_uid)/$(dealer_uid)_extras.jld2"
     )
     return treatment_effect(tes, extras, column)
 end
