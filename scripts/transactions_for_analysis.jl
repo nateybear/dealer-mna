@@ -9,7 +9,8 @@ with_logging() do
         if t isa Dealers.Transaction &&
             !isempty(Dealers.Diffs[i]) &&
             !ismissing(Empirics.blackout_period(t)) &&
-            Empirics.blackout_period(t) ⊆ Empirics.ANALYSIS_DATES
+            Empirics.blackout_period(t) ⊆ Empirics.ANALYSIS_DATES &&
+            t.buyer_gid != t.seller_gid
             @info "Transaction $(t.uid) is in the analysis period"
             last_registrations = Empirics.last_registrations_before(t)
             first_registrations = Empirics.first_registrations_after(t)

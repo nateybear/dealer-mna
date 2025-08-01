@@ -53,6 +53,7 @@ function event_study(
         treated_after,
         control_before,
         control_after,
+        cols = :union
     )
 
     make_panel((outcol, (incol, f))) = @> all_registrations begin

@@ -19,16 +19,14 @@ import Unicode
 import JSON3
 
 import ..snakemake, ..here
+import ..Registrations: normalize_price
 
-@memoize all_registrations() = DataFrame(
-    Arrow.Table(
-        get(
-            snakemake.input,
-            "unmatched_registrations",
-            "data/arrow/unmatched_registrations.arrow",
-        ),
-    ),
-)
+@memoize all_registrations() = @> snakemake.input begin
+    get("unmatched_registrations", "data/arrow/unmatched_registrations.arrow")
+    Arrow.Table
+    DataFrame
+    select(:dlrgdn, :make, :regeffdate)
+end
 
 function normed(y)
     let f = (ByRow ∘ passmissing)() do x
@@ -170,45 +168,14 @@ end
         )
     end
 
-    out = vcat(with_seller_info, without_seller_info, cols = :union)
-
-    unique_sellers = unique(out.seller_gdn)
-    unique_buyers = unique(out.buyer_gdn)
-
-    seller_regeff_dates = @> DataFrame(seller_gdn = unique_sellers) begin
-        innerjoin(
-            select(all_registrations(), :dlrgdn => :seller_gdn, :regeffdate),
-            on = :seller_gdn,
-            matchmissing = :notequal,
-        )
-        dropmissing(:regeffdate)
-        groupby(:seller_gdn)
-        combine(:regeffdate => maximum => :last_seller_regeffdate)
-    end
-
-    buyer_regeff_dates = @> DataFrame(buyer_gdn = unique_buyers) begin
-        innerjoin(
-            select(all_registrations(), :dlrgdn => :buyer_gdn, :regeffdate),
-            on = :buyer_gdn,
-            matchmissing = :notequal,
-        )
-        dropmissing(:regeffdate)
-        groupby(:buyer_gdn)
-        combine(:regeffdate => minimum => :first_buyer_regeffdate)
-    end
-
-    @> out begin
-        leftjoin(seller_regeff_dates, on = :seller_gdn, matchmissing = :notequal)
-        leftjoin(buyer_regeff_dates, on = :buyer_gdn, matchmissing = :notequal)
-        select(
-            :app_name,
-            :transaction_dt,
-            r"gdn$",
-            r"business_name",
-            r"dbaname",
-            r"regeffdate$",
-        )
-    end
+    @> vcat(with_seller_info, without_seller_info, cols = :union) select(
+        :app_name,
+        :transaction_dt,
+        r"gdn$",
+        r"business_name",
+        r"dbaname",
+        r"regeffdate$",
+    )
 end
 
 @memoize function entrants()
@@ -234,22 +201,11 @@ end
 
     transform!(out, [:dbaname, names(out, r"business_name")...] .=> normed)
 
-    regeff_dates = @> DataFrame(gdn = unique(out.gdn)) begin
-        innerjoin(
-            select(all_registrations(), :dlrgdn => :gdn, :regeffdate),
-            on = :gdn,
-            matchmissing = :notequal,
-        )
-        dropmissing(:regeffdate)
-        groupby(:gdn)
-        combine(:regeffdate => minimum => :first_regeffdate)
-    end
-
-    @> out leftjoin(regeff_dates, on = :gdn, matchmissing = :notequal)
+    return out
 end
 
 @memoize function exits()
-    out = @> datadir("Dealers/Mergers_Entry_Exit.xlsx") begin
+    @> datadir("Dealers/Mergers_Entry_Exit.xlsx") begin
         XLSX.readtable(3, infer_eltypes = true)
         DataFrame
         polish_names_ROT
@@ -266,19 +222,6 @@ end
         antijoin(transactions(), on = :gdn => :seller_gdn, matchmissing = :notequal) # exclude exits as part of a sale
         semijoin(all_registrations(), on = :gdn => :dlrgdn, matchmissing = :notequal)
     end
-
-    regeff_dates = @> DataFrame(gdn = unique(out.gdn)) begin
-        innerjoin(
-            select(all_registrations(), :dlrgdn => :gdn, :regeffdate),
-            on = :gdn,
-            matchmissing = :notequal,
-        )
-        dropmissing(:regeffdate)
-        groupby(:gdn)
-        combine(:regeffdate => maximum => :last_regeffdate)
-    end
-
-    @> out leftjoin(regeff_dates, on = :gdn, matchmissing = :notequal)
 end
 
 """
@@ -303,6 +246,29 @@ Some transaction info was saved after a database change in comments, so try and 
             end => AsTable,
     )
     @> legacy select(:app_name, r"^seller") flatten(:seller_gdn)
+end
+
+function add_regeffdates(df, agg_fn, out_col, gdn_col = :gdn)
+    unique_gdn_franchises = @> df begin
+        DataFrames.flatten(:franchises)
+        select(gdn_col, :franchises => :franchise)
+        unique
+    end
+
+    regeff_dates = @> unique_gdn_franchises begin
+        innerjoin(
+            select(
+                all_registrations(), :dlrgdn => gdn_col, :make => :franchise, :regeffdate
+            ),
+            on = [gdn_col, :franchise],
+            matchmissing = :notequal,
+        )
+        dropmissing(:regeffdate)
+        groupby(gdn_col)
+        combine(:regeffdate => agg_fn => out_col)
+    end
+
+    return leftjoin(df, regeff_dates, on = gdn_col, matchmissing = :notequal)
 end
 
 @memoize geocoded_dealers() = CSV.read(

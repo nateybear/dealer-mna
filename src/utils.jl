@@ -158,3 +158,12 @@ function HTTP.post(limiter::RateLimiter, args...; kwargs...)
 end
 
 end
+
+##### support mapreduce with grouped dataframes
+import SplittablesBase
+
+function SplittablesBase.halve(gd::GroupedDataFrame)
+    let (one, two) = SplittablesBase.halve(keys(gd))
+        (gd[one], gd[two])
+    end
+end

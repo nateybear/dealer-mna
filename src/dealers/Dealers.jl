@@ -188,6 +188,9 @@ function init_transactions!()
         )
         subset(:franchises => ByRow(!isempty))
 
+        add_regeffdates(maximum, :last_seller_regeffdate, :seller_gdn)
+        add_regeffdates(minimum, :first_buyer_regeffdate, :buyer_gdn)
+
         # return a grouped df
         groupby(:app_name)
     end
@@ -296,6 +299,7 @@ end
 function init_entry_exit!()
     franchise_entrants = @> entrants() begin
         add_franchises(gdn_col = :gdn)
+        add_regeffdates(minimum, :first_regeffdate)
         add_groups
         subset(
             :franchises => ByRow(!isempty),
@@ -304,6 +308,7 @@ function init_entry_exit!()
     end
     franchise_exits = @> exits() begin
         add_franchises(gdn_col = :gdn)
+        add_regeffdates(maximum, :last_regeffdate)
         add_groups
         subset(
             :franchises => ByRow(!isempty),

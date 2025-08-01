@@ -31,6 +31,13 @@ with_logging() do
         plot_df,
         [:transaction_uid, :dealer_uid, :group] => ByRow(extract_tes$col) => AsTable,
     )
+    plot_df = subset(
+        plot_df,
+        names(plot_df, Regex(col)) .=> ByRow(!isnan),
+        :change_market_share => ByRow(!=(0)),
+        skipmissing = true,
+        view = true,
+    )
     scatter(
         plot_df.change_market_share,
         plot_df[!, "te_$col"],
@@ -62,7 +69,7 @@ with_logging() do
     )
 
     x_grid = range(extrema(plot_df.change_market_share)..., length = 500)
-    y_grid = predict(loess(plot_df.change_market_share, plot_df[!, "te_$col"]), x_grid)
+    y_grid = predict(loess(plot_df.change_market_share, plot_df[!, "te_$col"], degree = 1), x_grid)
     plot!(x_grid, y_grid, msc = 2, label = nothing, linestrokewidth = 4)
 
     png(snakemake.output[1])

@@ -3,6 +3,7 @@ using ..Geometry: distance
 import ..Registrations: registrations as all_registrations
 
 using DataStructures: DefaultDict
+using Base.Threads # let's speed this up
 
 # if group_remap is not provided, calc a straight market share
 # if group_remap is provided, calculate change in market share
@@ -36,11 +37,19 @@ function market_share(
 
     # these are the guys that are changing hands
     contested_weights = DefaultDict{String, Float64}(0.0)
+    local prior_group
+
+    weight_lock = ReentrantLock()
 
     # compile our group's and other groups' registrations
     timetravel(maximum(period)) do
         our_group_id = State.df.gid[findfirst(==(focal_uid), State.df.uid)]
-        for dealer in eachrow(State.df)
+        nearby = subset(
+            State.df,
+            :geometry => ByRow(x -> distance(x, focal_geometry) < weight.max_distance),
+            view = true,
+        )
+        @threads for dealer in eachrow(nearby)
             d = distance(dealer.geometry, focal_geometry)
             if dealer.uid == focal_uid || d > weight.max_distance || !dealer.active
                 continue
@@ -53,6 +62,7 @@ function market_share(
                     :dlrgdn => ByRow(in(dealer.gdns)),
                     :body_class => ByRow(in(body_classes)),
                     view = true,
+                    skipmissing = true,
                 )
                 add_distance
             end
@@ -69,16 +79,18 @@ function market_share(
 
             w = weight(d)
 
-            dict = if haskey(group_remap, dealer.uid)
-                contested_weights
-            elseif dealer.gid == our_group_id
-                our_weights
-            else
-                their_weights
-            end
+            lock(weight_lock) do
+                dict = if haskey(group_remap, dealer.uid)
+                    contested_weights
+                elseif dealer.gid == our_group_id
+                    our_weights
+                else
+                    their_weights
+                end
 
-            for row in eachrow(dealer_registrations)
-                dict[row.body_class] += row.nrow * w
+                for row in eachrow(dealer_registrations)
+                    dict[row.body_class] += row.nrow * w
+                end
             end
         end
     end
@@ -96,7 +108,7 @@ function market_share(
         return class_weight * numerator / denominator
     end
 
-    return if isempty(contested_weights)
+    return if isempty(group_remap)
         sum(class_share(body_class) for body_class in body_classes)
     else
         sum(class_share(body_class, true) for body_class in body_classes) -

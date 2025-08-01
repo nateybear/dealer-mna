@@ -1,6 +1,7 @@
 using DealerMnA
 using UUIDs
 using Plots
+import .Empirics: LinearWeight, mi
 
 !isempty(ARGS) && snakemake!(ARGS[1])
 
@@ -18,7 +19,10 @@ with_logging() do
         group = String[],
     )
 
-    for (key, transacted_group) in pairs(groupby(transaction_uids, :transaction_uid))
+    count = 1
+
+    all_groups = pairs(groupby(transaction_uids, :transaction_uid))
+    for (key, transacted_group) in all_groups
         transaction_uid = UUID(key.transaction_uid)
         transacted_dealers = UUID.(transacted_group.dealer_uid)
 
@@ -40,7 +44,8 @@ with_logging() do
         for (group, dealers) in buyer_seller_dealers
             for uid in dealers
                 dealer_uid = UUID(uid) # uid of *affiliated* dealer, not the transacted dealership
-                @info "Evaluating $(group) market share" transaction_uid dealer_uid
+                @info "$count Evaluating $(group) market share" transaction_uid dealer_uid
+                count += 1
 
                 registrations = DataFrame(
                     Arrow.Table(
@@ -49,7 +54,10 @@ with_logging() do
                 )
 
                 change_market_share = Empirics.market_share(
-                    registrations, period, Dict(transacted_dealers .=> t.buyer_gid)
+                    registrations,
+                    period,
+                    Dict(transacted_dealers .=> t.buyer_gid);
+                    weight = LinearWeight(50mi),
                 )
 
                 # change in market share is always positive,
