@@ -21,6 +21,7 @@ with_logging() do
                 subset(:ttlownrtypecd => ByRow(x -> ismissing(x) || x in ("IN", "EI")))
                 Registrations.filter_zips
                 Registrations.normalize_body_class
+                dropmissing(:body_class)
             end
             Arrow.write(out_writer, registrations)
         end

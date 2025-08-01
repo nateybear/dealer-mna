@@ -6,8 +6,10 @@ function _normalize_body_class(raw_body_class)
         "Van"
     elseif startswith(out, "Crossover") || startswith(out, "Hatchback")
         "SUV/Crossover"
-    else
+    elseif out in ("Sedan", "Coupe", "Pickup")
         out
+    else
+        missing # all others (incomplete* variants) are rubbish
     end
 end
 
