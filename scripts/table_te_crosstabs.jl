@@ -32,6 +32,7 @@ with_logging() do
     table = @> transactions begin
         groupby([:p_comparison, :q_comparison])
         combine(nrow)
+        fillcombinations([:p_comparison, :q_comparison], fill = 0)
         sort([:p_comparison, :q_comparison])
         unstack(:p_comparison, :q_comparison, :nrow)
     end

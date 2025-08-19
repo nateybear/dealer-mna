@@ -54,7 +54,9 @@ function print_table(filename, df)
     return nothing
 end
 function make_count_table(df)
-    out = mapreduce(outerjoin$(on = :order,), (:trim_rank, :num_trims, :baseprice, :markup)) do col
+    out = mapreduce(
+        outerjoin$(on = :order,), (:trim_rank, :num_trims, :baseprice, :markup)
+    ) do col
         counts = @> df groupby(col) combine(nrow) sort(col)
         counts[!, col] .= last.(counts[!, col], 3)
         return select(counts, col => :order, :nrow => col)
@@ -110,6 +112,7 @@ with_logging() do
             [:seller_group_avg_length, :buyer_group_avg_length] =>
                 ByRow((x, y) -> "$(round(x, digits=3)) -> $(round(y, digits=3))") => :out,
         )
+        fillcombinations([:p_comparison, :q_comparison])
         sort([:p_comparison, :q_comparison])
         select(r"comparison", :out)
         unstack(:p_comparison, :q_comparison, :out)
@@ -118,7 +121,7 @@ with_logging() do
     open(snakemake.output["group_sizes"], "w") do io
         latex_tabular(
             io,
-            Tabular("l|" * "c"^length(names(table, Not(:p_comparison))) ),
+            Tabular("l|" * "c"^length(names(table, Not(:p_comparison)))),
             [
                 Rule(:top),
                 ["", names(table, Not(:p_comparison))...],

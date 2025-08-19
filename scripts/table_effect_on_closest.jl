@@ -10,11 +10,20 @@ function miles(d1::UUID, d2::UUID)
     return ustrip(uconvert(u"mi", distance(dealers.geometry...)))
 end
 
-function same_group(tuid, d1, d2)
+function same_group(tuid, dealer_uid)
     t = first(t for t in Dealers.Events if t.uid == tuid)
     Dealers.timetravel(t) do
-        dealers = subset(Dealers.State.df, :uid => ByRow(in((d1, d2))), view = true)
-        return allequal(dealers.gid)
+        dealers = subset(Dealers.State.df, :uid => ByRow(==(dealer_uid)), view = true)
+        return !isempty(dealers.gid ∩ (t.buyer_gid, t.seller_gid))
+    end
+end
+
+function remove_control_line!()
+    lines = readlines(snakemake.output[1])
+    idx_control = findfirst(startswith("Controls"), lines)
+    lines = lines[Not([idx_control, idx_control + 1])]
+    open(snakemake.output[1], "w") do io
+        foreach(println$io, lines)
     end
 end
 
@@ -38,7 +47,7 @@ with_logging() do
     transform!(
         transaction_uids,
         [:dealer_uid, :closest_dealer_uid] => ByRow(miles) => :distance,
-        [:transaction_uid, :dealer_uid, :closest_dealer_uid] =>
+        [:transaction_uid, :closest_dealer_uid] =>
             ByRow(same_group) => :same_group,
     )
     subset!(transaction_uids, :same_group => ByRow(!))
@@ -65,5 +74,12 @@ with_logging() do
                 Term(:distance) & Term(Symbol("treated_$col"))
         reg(transaction_uids, form)
     end
-    regtable(models..., file = snakemake.output[1], drop = ["(Intercept)"])
+    regtable(
+        models...,
+        file = snakemake.output[1],
+        drop = ["(Intercept)"],
+        render = LatexTable(),
+        print_fe_section = false,
+    )
+    remove_control_line!()
 end

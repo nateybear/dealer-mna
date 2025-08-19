@@ -80,7 +80,7 @@ with_logging() do
                     "No. Trims",
                     "Std. Price Within",
                     "Std. Price Across",
-                    "Across / Within",
+                    "Within / Across",
                 ],
                 Rule(:mid),
                 format.(eachrow(make_stats))...,

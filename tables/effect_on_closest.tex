@@ -1,29 +1,27 @@
-
--------------------------------------------------------------------------------------------------------------------
-                                 closest_total_sales   closest_mean_price   closest_total_units   closest_trim_rank
-                                 -------------------   ------------------   -------------------   -----------------
-                                                 (1)                  (2)                   (3)                 (4)
--------------------------------------------------------------------------------------------------------------------
-treated_total_sales                            0.183                                                               
-                                             (0.379)                                                               
-distance & treated_total_sales                -0.006                                                               
-                                             (0.022)                                                               
-treated_mean_price                                                 -0.084                                          
-                                                                  (0.220)                                          
-distance & treated_mean_price                                      -0.002                                          
-                                                                  (0.011)                                          
-treated_total_units                                                                       0.173                    
-                                                                                        (0.315)                    
-distance & treated_total_units                                                           -0.003                    
-                                                                                        (0.019)                    
-treated_trim_rank                                                                                             0.489
-                                                                                                            (0.339)
-distance & treated_trim_rank                                                                                 -0.009
-                                                                                                            (0.011)
--------------------------------------------------------------------------------------------------------------------
-Controls                                         Yes                  Yes                   Yes                 Yes
--------------------------------------------------------------------------------------------------------------------
-N                                                 37                   37                    37                  37
-R2                                             0.010                0.031                 0.023               0.073
--------------------------------------------------------------------------------------------------------------------
-
+\begin{tabular}{lrrrr}
+\toprule
+                                        & \multicolumn{1}{c}{closest\_total\_sales} & \multicolumn{1}{c}{closest\_mean\_price} & \multicolumn{1}{c}{closest\_total\_units} & \multicolumn{1}{c}{closest\_trim\_rank} \\ 
+\cmidrule(lr){2-2} \cmidrule(lr){3-3} \cmidrule(lr){4-4} \cmidrule(lr){5-5} 
+                                        &                                       (1) &                                      (2) &                                       (3) &                                     (4) \\ 
+\midrule
+treated\_total\_sales                   &                                     0.183 &                                          &                                           &                                         \\ 
+                                        &                                   (0.379) &                                          &                                           &                                         \\ 
+distance $\times$ treated\_total\_sales &                                    -0.006 &                                          &                                           &                                         \\ 
+                                        &                                   (0.022) &                                          &                                           &                                         \\ 
+treated\_mean\_price                    &                                           &                                   -0.084 &                                           &                                         \\ 
+                                        &                                           &                                  (0.220) &                                           &                                         \\ 
+distance $\times$ treated\_mean\_price  &                                           &                                   -0.002 &                                           &                                         \\ 
+                                        &                                           &                                  (0.011) &                                           &                                         \\ 
+treated\_total\_units                   &                                           &                                          &                                     0.173 &                                         \\ 
+                                        &                                           &                                          &                                   (0.315) &                                         \\ 
+distance $\times$ treated\_total\_units &                                           &                                          &                                    -0.003 &                                         \\ 
+                                        &                                           &                                          &                                   (0.019) &                                         \\ 
+treated\_trim\_rank                     &                                           &                                          &                                           &                                   0.489 \\ 
+                                        &                                           &                                          &                                           &                                 (0.339) \\ 
+distance $\times$ treated\_trim\_rank   &                                           &                                          &                                           &                                  -0.009 \\ 
+                                        &                                           &                                          &                                           &                                 (0.011) \\ 
+\midrule
+$N$                                     &                                        37 &                                       37 &                                        37 &                                      37 \\ 
+$R^2$                                   &                                     0.010 &                                    0.031 &                                     0.023 &                                   0.073 \\ 
+\bottomrule
+\end{tabular}

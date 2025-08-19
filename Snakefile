@@ -118,6 +118,7 @@ rule new_registrations:
 rule price_table:
     input:
         "scripts/price_table.jl",
+        "src/registrations/normalize_price.jl",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
     output:
@@ -838,6 +839,7 @@ rule facts:
         price_table="data/price_table.arrow",
         popular_models="data/arrow/popular_models.arrow",
         dealers_init="data/dealers_init.jld2",
+        transaction_uids="data/transaction_uids.csv",
     output:
         "facts.tex",
     log:

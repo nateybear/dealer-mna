@@ -51,22 +51,18 @@ trimnames(df) = names(df, r"^((trim)|(series))$")
     sort!(out, [:make, :model, :model_year, :mean_price])
     subset!(out, :n => ByRow(>(5)))
 
+    function evenly_spaced(x)
+        let n = length(x)
+            range(0, 1, length = n + 1) |> (@$ Iterators.take(_, n)) |> collect
+        end
+    end
+
     out = @> out begin
         groupby([:make, :model, :model_year])
         transform(
             :mean_price => minimum => :base_price,
             :mean_price => (x -> x ./ minimum(x)) => :trim_relprice,
-            :mean_price =>
-                (
-                    x -> begin
-                        if length(x) == 1
-                            [0.0]
-                        else
-                            collect(range(0, 1, length = length(x)))
-                        end
-                    end
-                ) =>
-                    :trim_rank,
+            :mean_price => evenly_spaced => :trim_rank,
         )
     end
 

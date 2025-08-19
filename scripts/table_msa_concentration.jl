@@ -2,12 +2,13 @@ using DealerMnA
 using Base.Iterators: flatten
 using DataStructures: counter
 using LaTeXTabulars
+using Printf
 
 !isempty(ARGS) && snakemake!(ARGS[1])
 
 function cr4(gids)
     counts = gids |> counter |> values |> collect |> sort$(rev = true,) |> cumsum
-    return round(length(counts) > 4 ? counts[4] / counts[end] : 1.0, digits = 3)
+    return @sprintf("%.3f", length(counts) > 4 ? counts[4] / counts[end] : 1.0)
 end
 
 function count_overlap(transaction_uid_counter, uids)
