@@ -653,7 +653,8 @@ rule table_effect_on_closest:
         transaction_uids="data/transaction_uids.csv",
         dealers_init="data/dealers_init.jld2",
     output:
-        "tables/effect_on_closest.tex",
+        table_regression="tables/effect_on_closest.tex",
+        scatter_sales="plots/effect_on_closest_scatter.png",
     log:
         "logs/table_effect_on_closest.log",
     run:
@@ -805,6 +806,18 @@ rule plot_transaction_group_sizes:
         )
 
 
+rule plot_cr4_timeline:
+    input:
+        "scripts/plot_cr4_timeline.jl",
+        dealers_init="data/dealers_init.jld2",
+    output:
+        "plots/cr4_timeline.png",
+    log:
+        "logs/plot_cr4_timeline.log",
+    run:
+        julia("scripts/plot_cr4_timeline.jl", input=input, output=output, log=log)
+
+
 rule table_trim_variation:
     input:
         "scripts/table_trim_variation.jl",
@@ -868,6 +881,7 @@ rule all:
         rules.plot_hist_odometer.output,
         rules.plot_registrations_spatial.output,
         rules.plot_sales_prices_quarterly.output,
+        rules.plot_cr4_timeline.output,
         rules.table_trim_variation.output,
         rules.facts.output,
         rules.plot_transaction_group_sizes.output,

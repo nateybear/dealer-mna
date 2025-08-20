@@ -2,6 +2,9 @@ using DealerMnA
 using FixedEffectModels
 using RegressionTables
 using Unitful
+using Plots
+using Humanize: digitsep
+using Intervals
 
 import .Geometry: distance
 
@@ -19,10 +22,10 @@ function same_group(tuid, dealer_uid)
 end
 
 function remove_control_line!()
-    lines = readlines(snakemake.output[1])
+    lines = readlines(snakemake.output["table_regression"])
     idx_control = findfirst(startswith("Controls"), lines)
     lines = lines[Not([idx_control, idx_control + 1])]
-    open(snakemake.output[1], "w") do io
+    open(snakemake.output["table_regression"], "w") do io
         foreach(println$io, lines)
     end
 end
@@ -36,12 +39,18 @@ with_logging() do
         transaction_uids,
         [:transaction_uid, :dealer_uid] =>
             ByRow(
-                (tuid, duid) -> readline("data/closest_dealerships/$(tuid)_$(duid).txt")
+                (tuid, duid) ->
+                    readlines("data/closest_dealerships/$(tuid)_$(duid).txt") |>
+                    enumerate |>
+                    collect,
             ) => :closest_dealer_uid,
     )
+    transaction_uids = DataFrames.flatten(transaction_uids, :closest_dealer_uid)
+    transaction_uids.closest_dealer_index = first.(transaction_uids.closest_dealer_uid)
+    transaction_uids.closest_dealer_uid = last.(transaction_uids.closest_dealer_uid)
     transform!(
         transaction_uids,
-        names(transaction_uids) .=> ByRow(UUID),
+        names(transaction_uids, r"uid$") .=> ByRow(UUID),
         renamecols = false,
     )
     transform!(
@@ -76,10 +85,47 @@ with_logging() do
     end
     regtable(
         models...,
-        file = snakemake.output[1],
+        file = snakemake.output["table_regression"],
         drop = ["(Intercept)"],
         render = LatexTable(),
         print_fe_section = false,
     )
     remove_control_line!()
+
+    # draw scatter and best fit for sales
+    (b, m, _) = coef(models[1])
+    plot_df = subset(
+        transaction_uids, :treated_total_sales => ByRow(in(-2_500_000 .. 5_000_000))
+    )
+    p = scatter(
+        plot_df.treated_total_sales,
+        plot_df.closest_total_sales,
+        group = plot_df.closest_dealer_index,
+        palette = :Set2,
+        xlabel = "Δ Quarterly Sales, Treated",
+        ylabel = "Δ Quarterly Sales, Closest",
+        label = ["1st" "2nd" "3rd"] .* "-closest",
+        margin = 2Plots.mm,
+        legend = :topright,
+        size = (700, 525),
+    )
+
+    (breaks, _) = xticks(p)[1]
+    labels = map(breaks) do b
+        readable = digitsep(abs(round(Int64, b)))
+        b < 0 ? "(\$$readable)" : "\$$(readable)"
+    end
+    xticks!(p, (breaks, labels))
+
+    (breaks, _) = yticks(p)[1]
+    labels = map(breaks) do b
+        readable = digitsep(abs(round(Int64, b)))
+        b < 0 ? "(\$$readable)" : "\$$(readable)"
+    end
+    yticks!(p, (breaks, labels))
+
+    Plots.abline!(p, m, b, color = :black, linewidth = 2, label = "Best fit line")
+    hline!(p, [0.0], color = :black, label = nothing, linestyle = :dot)
+
+    png(snakemake.output["scatter_sales"])
 end
