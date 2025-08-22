@@ -2,17 +2,21 @@ using DealerMnA
 using Plots
 using StatsBase
 using Loess
+using Distributions
 
 !isempty(ARGS) && snakemake!(ARGS[1])
 
 function extract_tes(col, tuid, duid, group)
     tes = DataFrame(Arrow.Table("data/treatment_effects/$(group)/$(tuid)/$(duid).arrow"))
     extras = JLD2.load_object("data/treatment_effects/$(group)/$(tuid)/$(duid)_extras.jld2")
-    estimate, std_error = Empirics.treatment_effect(tes, extras, Symbol(col))
-    return (; Dict(
-        Symbol("te_$(col)") => estimate,
-        Symbol("te_$(col)_se") => std_error,
-    )...)
+    estimate, D_placebo = Empirics.treatment_effect(tes, extras, Symbol(col))
+    return (;
+        Dict(
+            Symbol("te_$(col)") => estimate,
+            Symbol("te_$(col)_placebo_mean") => mean(D_placebo),
+            Symbol("te_$(col)_se") => std(D_placebo),
+        )...
+    )
 end
 
 function corsample(df, col)
@@ -38,10 +42,16 @@ with_logging() do
         skipmissing = true,
         view = true,
     )
+    plot_df.placebo_upper =
+        plot_df[!, "te_$(col)_placebo_mean"] .+ 1.96plot_df[!, "te_$(col)_se"]
+    plot_df.placebo_lower =
+        plot_df[!, "te_$(col)_placebo_mean"] .- 1.96plot_df[!, "te_$(col)_se"]
+    plot_df.yerr_upper = min.(plot_df.placebo_upper - plot_df[!, "te_$col"], 0)
+    plot_df.yerr_lower = min.(plot_df.placebo_lower - plot_df[!, "te_$col"], 0)
     scatter(
         plot_df.change_market_share,
         plot_df[!, "te_$col"],
-        yerr = 1.96plot_df[!, "te_$(col)_se"],
+        yerr = (plot_df.yerr_lower, plot_df.yerr_upper),
         label = nothing,
         alpha = 0.5,
         size = (800, 600),
@@ -69,7 +79,9 @@ with_logging() do
     )
 
     x_grid = range(extrema(plot_df.change_market_share)..., length = 500)
-    y_grid = predict(loess(plot_df.change_market_share, plot_df[!, "te_$col"], degree = 1), x_grid)
+    y_grid = predict(
+        loess(plot_df.change_market_share, plot_df[!, "te_$col"], degree = 1), x_grid
+    )
     plot!(x_grid, y_grid, msc = 2, label = nothing, linestrokewidth = 4)
 
     png(snakemake.output[1])

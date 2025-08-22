@@ -3,17 +3,19 @@ using DealerMnA
 using LinearAlgebra
 using LaTeXTabulars
 using LaTeXStrings
+import Distributions: MvNormal, cdf
 
 !isempty(ARGS) && snakemake!(ARGS[1])
 
 function compare(column, outname = column; transaction_uid, dealer_uid)
     let
-        estimate, se = Empirics.treatment_effect(column; transaction_uid, dealer_uid)
-        if estimate > 0
-            estimate - 1.96se > 0 ? "$(outname) > 0" :
-            "$(outname) = 0"
+        estimate, D_placebo = Empirics.treatment_effect(column; transaction_uid, dealer_uid)
+        quantile = cdf(D_placebo, estimate)
+        if quantile < 0.05
+            "$(outname) < 0"
+        elseif quantile > 0.95
+            "$(outname) > 0"
         else
-            estimate + 1.96se < 0 ? "$(outname) < 0" :
             "$(outname) = 0"
         end
     end

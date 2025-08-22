@@ -8,7 +8,6 @@ function synthetic_comparison(
         eachrow(subset(extra, :stat => ByRow(==(column)), view = true))
     )
 
-    V = extra.V
     Δ = extra.fe_treated - extra.fe_synthetic
 
     periods == :all && (periods = VALID_PERIODS)
@@ -16,8 +15,7 @@ function synthetic_comparison(
     ∇ = (tes.T .∈ Ref(periods)) / N
 
     estimate = sum(∇ .* tes[!, column])
-    se = sqrt(dot(∇, V * ∇))
     estimate += Δ
 
-    return estimate, se
+    return estimate
 end

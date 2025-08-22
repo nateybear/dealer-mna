@@ -48,7 +48,7 @@ with_logging() do
                     extras = JLD2.load_object(
                         "data/treatment_effects/treated_dealers/$(transaction_uid)/$(dealer_uid)_extras.jld2"
                     )
-                    -first(Empirics.synthetic_comparison(tes, extras, :mean_price, -4:-3))
+                    -Empirics.synthetic_comparison(tes, extras, :mean_price, -4:-3)
                 end,
             ),
     )
