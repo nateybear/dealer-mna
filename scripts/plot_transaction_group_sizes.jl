@@ -29,8 +29,8 @@ with_logging() do
     hline([0.0], label = nothing)
     vline!([0.0], label = nothing)
     scatter!(
-        group_sizes.seller_size,
-        group_sizes.buyer_size,
+        group_sizes.seller_size + rand(nrow(group_sizes)) .* (group_sizes.seller_size .> 0),
+        group_sizes.buyer_size + rand(nrow(group_sizes)) .* (group_sizes.buyer_size .> 0),
         xlabel = "Seller Group Size",
         ylabel = "Buyer Group Size",
         label = nothing,
