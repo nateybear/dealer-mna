@@ -848,6 +848,7 @@ rule facts:
     input:
         "scripts/facts.jl",
         *julia_src,
+        get_all_treatment_effects,
         new_registrations="data/arrow/new_registrations.arrow",
         price_table="data/price_table.arrow",
         popular_models="data/arrow/popular_models.arrow",
@@ -861,11 +862,39 @@ rule facts:
         julia("scripts/facts.jl", input=input, output=output, log=log)
 
 
-rule clean:
+rule clean_expensive:
+    """Clean the most expensive intermediate files (vins_decoded, registrations, dealers_init)"""
     run:
-        touched_files = "data/dealers_init.jld2 data/treatment_effects data/treated data/control data/transaction_uids.csv data/affiliated_dealerships data/closest_dealerships data/related_dealerships.txt data/relat plots/event_study tables/*.tex facts.tex logs data/dealer_demographics.arrow data/price_table.arrow data/statistics.txt plots/*.png plots/trim_distn data/arrow data/group_market_share_changes.arrow data/transactions_for_analysis.jld2".split()
+        expensive_files = "data/arrow/vins_decoded.arrow data/arrow/registrations.arrow data/arrow/unmatched_registrations.arrow data/arrow/popular_models.arrow data/arrow/new_registrations.arrow data/dealers_init.jld2".split()
+
+        for f in expensive_files:
+            shell(f"rm -rf {f}")
+
+
+rule clean_analysis:
+    """Clean analysis files but keep the basic data processing"""
+    run:
+        analysis_files = "data/transactions_for_analysis.jld2 data/treated data/control data/transaction_uids.csv data/affiliated_dealerships data/closest_dealerships data/related_dealerships.txt".split()
+
+        for f in analysis_files:
+            shell(f"rm -rf {f}")
+
+
+rule clean:
+    """Clean everything from price_table onwards (keeps vins_decoded, registrations, new_registrations, dealers_init)"""
+    run:
+        touched_files = "data/price_table.arrow data/treatment_effects data/group_market_share_changes.arrow data/dealer_demographics.arrow data/statistics.txt plots/event_study plots/*.png plots/trim_distn tables/*.tex facts.tex logs".split()
 
         for f in touched_files:
+            shell(f"rm -rf {f}")
+
+
+rule clean_all:
+    """Clean everything (equivalent to old clean rule)"""
+    run:
+        all_files = "data/arrow data/dealers_init.jld2 data/price_table.arrow data/transactions_for_analysis.jld2 data/treatment_effects data/treated data/control data/transaction_uids.csv data/affiliated_dealerships data/closest_dealerships data/related_dealerships.txt data/group_market_share_changes.arrow data/dealer_demographics.arrow data/statistics.txt plots/event_study plots/*.png plots/trim_distn tables/*.tex facts.tex logs".split()
+
+        for f in all_files:
             shell(f"rm -rf {f}")
 
 
