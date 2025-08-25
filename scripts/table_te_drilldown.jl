@@ -4,6 +4,7 @@ using StatsBase
 using LinearAlgebra
 using LaTeXTabulars
 using LaTeXStrings
+using Distributions: cdf
 
 !isempty(ARGS) && snakemake!(ARGS[1])
 

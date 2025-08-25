@@ -46,8 +46,8 @@ with_logging() do
         plot_df[!, "te_$(col)_placebo_mean"] .+ 1.96plot_df[!, "te_$(col)_se"]
     plot_df.placebo_lower =
         plot_df[!, "te_$(col)_placebo_mean"] .- 1.96plot_df[!, "te_$(col)_se"]
-    plot_df.yerr_upper = min.(plot_df.placebo_upper - plot_df[!, "te_$col"], 0)
-    plot_df.yerr_lower = min.(plot_df.placebo_lower - plot_df[!, "te_$col"], 0)
+    plot_df.yerr_upper = max.(plot_df.placebo_upper - plot_df[!, "te_$col"], 0)
+    plot_df.yerr_lower = max.(plot_df[!, "te_$col"] - plot_df.placebo_lower, 0)
     scatter(
         plot_df.change_market_share,
         plot_df[!, "te_$col"],

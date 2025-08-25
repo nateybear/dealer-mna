@@ -1,11 +1,13 @@
 using StatsBase: mean, weights as w, median, cov
 using Distributions: Normal, pdf, MvNormal
+import Distributions
 using Dates: Day
 using Lazy: @>
 using DataFrames
 using PartialFunctions
 using Missings
 using FixedEffectModels
+using LinearAlgebra
 
 numunique(cols...) = cols |> splat(zip) |> unique |> length
 
@@ -119,7 +121,13 @@ function event_study(
             )'
         end
 
-        placebo_distn = MvNormal(reshape(mean(placebos, dims = 1), :), cov(placebos))
+        placebo_distn =
+            let μ = reshape(mean(placebos, dims = 1), :),
+                # don't check positive definiteness b/c of numerical issues
+                Σ = Distributions.PDMat(cholesky(cov(placebos), check = false))
+
+                MvNormal(μ, Σ)
+            end
 
         return (
             outcol,
