@@ -854,6 +854,7 @@ rule facts:
         popular_models="data/arrow/popular_models.arrow",
         dealers_init="data/dealers_init.jld2",
         transaction_uids="data/transaction_uids.csv",
+        transactions_for_analysis="data/transactions_for_analysis.jld2",
     output:
         "facts.tex",
     log:
