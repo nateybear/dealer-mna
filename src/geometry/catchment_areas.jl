@@ -23,19 +23,21 @@ end
 has_adjacent_dealers(args...) = !isempty(adjacent_dealers(args...))
 is_adjacent(x, y) = distance(x, y) < 2mi
 
-function catchment_area(dealers)
+function catchment_area(dealers, check_adjacent = false)
     points = map(eachrow(dealers)) do (; latitude, longitude)
         assert_crs!((longitude, latitude))
     end
     points_sf = to_sf(points)
 
-    # check if any points within 2 miles of each other
-    too_close = iterate(adjacent_dealers(points))
-    if !isnothing(too_close)
-        ((i, j), _) = too_close
-        error(
-            "Two dealers are too close to each other:\n$(dealers[i, :])\n\nand\n\n$(dealers[j, :])"
-        )
+    if check_adjacent
+        # check if any points within 2 miles of each other
+        too_close = iterate(adjacent_dealers(points))
+        if !isnothing(too_close)
+            ((i, j), _) = too_close
+            error(
+                "Two dealers are too close to each other:\n$(dealers[i, :])\n\nand\n\n$(dealers[j, :])"
+            )
+        end
     end
 
     # Calculate the Voronoi tesselation using DelaunayTriangulation.jl

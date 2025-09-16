@@ -8,6 +8,9 @@ using Missings
 using FixedEffectModels
 
 numunique(cols...) = cols |> splat(zip) |> unique |> length
+onlyunique = only ∘ unique
+parse_treated(reg_uid) = @> reg_uid split("_") last UUID
+is_treated(reg_uid, dealer_uid) = dealer_uid == parse_treated(reg_uid)
 
 const STATISTICS = (
     mean_baseprice = :base_price => mean,
@@ -20,19 +23,13 @@ const STATISTICS = (
     unique_trims = [:model, :extra] => numunique,
 )
 
-function event_study(
-    treated_before,
-    treated_after,
-    control_before,
-    control_after,
-    dealer_demographics,
-)
+function add_regression_weights(dealer_demographics, group)
     distance = make_distance_fn(dealer_demographics)
-    treated_uid = only(unique(treated_before.dealer_uid))
+    treated_uid = onlyunique(parse_treated.(group.reg_uid))
     treated_demographics = only(
         eachrow(subset(dealer_demographics, :uid => ByRow(==(treated_uid))))
     )
-    control_uids = unique(control_before.dealer_uid)
+    control_uids = setdiff(group.dealer_uid, [treated_uid])
     control_demographics = subset(dealer_demographics, :uid => ByRow(in(control_uids)))
     control_distances = [
         distance(treated_demographics, d)
@@ -48,39 +45,80 @@ function event_study(
 
     weights = vcat(control_weights, DataFrame(dealer_uid = treated_uid, weight = 1))
 
-    all_registrations = vcat(
-        treated_before,
-        treated_after,
-        control_before,
-        control_after,
-        cols = :union
-    )
+    return innerjoin(group, weights, on = :dealer_uid)
+end
 
-    make_panel((outcol, (incol, f))) = @> all_registrations begin
-        groupby([:T, :dealer_uid])
-        combine(incol => f => outcol)
+make_panel(registrations, (outcol, (incol, f))) = @> registrations begin
+    groupby([:T, :dealer_uid, :reg_uid])
+    combine(incol => f => outcol)
+end
+
+make_multi_formula(t::Tuple) = t
+make_multi_formula(t) = (t,)
+
+weighted_mean(x, weight) = mean(x, w(weight))
+
+extract_name(term::Term) = string(term.sym)
+extract_name(term::ConstantTerm) = string(term.n)
+extract_name(term::InteractionTerm) = join(extract_name.(term.terms), "&")
+
+df_cols(t::Tuple) = unique(Iterators.flatten(df_cols.(t)))
+df_cols(t::InteractionTerm) = df_cols(t.terms)
+df_cols(t::Term) = [t.sym]
+df_cols(::ConstantTerm) = []
+
+# fill unsupplied dealer cols with 0 so FixedEffectModels doesn't drop them from regression
+function fillcols!(df, form)
+    cols = df_cols(form)
+    df[!, cols] .= coalesce.(df[!, cols], 0)
+    return nothing
+end
+
+function event_study(
+    registrations,
+    dealer_demographics,
+    heterogeneity_term = ConstantTerm(1),
+    dealer_extras = nothing,
+    how_join = :dealer_uid, # how to join dealer_extras to the panel
+)
+    function dt(dealer_uid, reg_uid, T, critical_T)
+        return (dealer_uid == parse_treated(reg_uid)) * (T == critical_T)
     end
-
-    dt(dealer_uid, T, critical_T) = (dealer_uid == treated_uid) * (T == critical_T)
 
     function ev_term(critical_T)
         return FunctionTerm(
             dt,
-            [Term(:dealer_uid), Term(:T), ConstantTerm(critical_T)],
-            :(dt(dealer_uid, T, $critical_T)),
+            [Term(:dealer_uid), Term(:reg_uid), Term(:T), ConstantTerm(critical_T)],
+            :(dt(dealer_uid, reg_uid, T, $critical_T)),
         )
     end
 
+    # drop first period after b/c of colinearity
     coef_periods = setdiff(VALID_PERIODS, [0])
 
     function ev_formula(outcol)
-        ev_terms = sum(ev_term.(coef_periods)) # drop first period after b/c of colinearity
-        rhs = ev_terms + fe(:T) + fe(:dealer_uid)
+        ev_terms = mapreduce(
+            splat(&),
+            +,
+            Iterators.product(
+                ev_term.(coef_periods), make_multi_formula(heterogeneity_term)
+            ),
+        )
+        rhs = ev_terms + fe(:T) & fe(:reg_uid) + fe(:dealer_uid) & fe(:reg_uid)
         return Term(outcol) ~ rhs
     end
 
-    function te_estimate(panel, (outcol, _))
-        panel = innerjoin(panel, weights, on = :dealer_uid)
+    function te_estimate(statistic)
+        (outcol, _) = statistic
+        panel = @> registrations begin
+            make_panel(statistic)
+            groupby(:reg_uid)
+            combine(add_regression_weights$dealer_demographics)
+        end
+        if !isnothing(dealer_extras)
+            leftjoin!(panel, dealer_extras, on = how_join)
+            fillcols!(panel, heterogeneity_term)
+        end
         reg_result = reg(
             panel,
             ev_formula(outcol),
@@ -89,22 +127,60 @@ function event_study(
             save = :fe,
         )
         table = DataFrame(coeftable(reg_result))
-        extract_T(Name) = parse(Int64, match(r"^.*, ([-\d]+)\)$", Name).captures[1])
-        table.T = extract_T.(table.Name)
-        fes = fe(reg_result, keepkeys = true)
-        fe_treated = first(subset(fes, :dealer_uid => ByRow(==(treated_uid))).fe_dealer_uid)
-        fes_control = @> fes begin
-            subset(:dealer_uid => ByRow(!=(treated_uid)), :T => ByRow(==(0)))
-            innerjoin(control_weights, on = :dealer_uid)
+        function extract_T(Name)
+            return parse(
+                Int64, match(r"dt\(dealer_uid, reg_uid, T, ([-\d]+)\)", Name).captures[1]
+            )
         end
-        fe_synthetic = mean(fes_control.fe_dealer_uid, w(fes_control.weight))
+        table.T = extract_T.(table.Name)
+        extract_interaction(Name) =
+            if match(r" & ", Name) !== nothing
+                match(r" & (.*)$", Name).captures[1]
+            else
+                "1"
+            end
+        table.interaction = extract_interaction.(table.Name)
+        fes = fe(reg_result, keepkeys = true)
+        fes_treated = @> fes begin
+            subset([:reg_uid, :dealer_uid] => ByRow(is_treated))
+            groupby(:reg_uid)
+            combine(Symbol("fe_dealer_uid&fe_reg_uid") => onlyunique => :fe_treated)
+        end
+        fes_control = @> fes begin
+            subset([:reg_uid, :dealer_uid] => ByRow(!is_treated))
+            innerjoin(select(panel, :dealer_uid, :weight), on = :dealer_uid)
+            groupby(:reg_uid)
+            combine(
+                [Symbol("fe_dealer_uid&fe_reg_uid"), :weight] =>
+                    weighted_mean => :fe_synthetic,
+            )
+        end
+        diff_in_diffs = @> fes begin
+            innerjoin(panel, on = [:reg_uid, :dealer_uid, :T])
+            transform(
+                [outcol, Symbol("fe_dealer_uid&fe_reg_uid")] => ByRow(-) => :residual,
+                [:reg_uid, :dealer_uid] => ByRow(is_treated) => :treated,
+            )
+            groupby([:T, :reg_uid, :treated])
+            combine([:residual, :weight] => weighted_mean => :residual)
+            sort(:treated, rev = true)
+            groupby([:T, :reg_uid])
+            combine(:residual => splat(-) => :diff)
+            subset(:T => ByRow(in((-3, 2))))
+            sort(:T, rev = true)
+            groupby(:reg_uid)
+            combine(:diff => splat(-) => :diff_in_diff)
+        end
+        fes = @> fes_treated begin
+            innerjoin(fes_control, on = :reg_uid)
+            innerjoin(diff_in_diffs, on = :reg_uid)
+        end
         return (
             outcol,
-            fe_treated,
-            fe_synthetic,
+            fes,
             vcov(reg_result),
             select(
-                table, :T, :Estimate => outcol,
+                table, :T, :interaction, :Estimate => outcol,
                 Symbol("Std. Error") => Symbol("$(outcol)_se"),
             ),
         )
@@ -112,19 +188,24 @@ function event_study(
 
     function reducer(
         (acc_extra_stats, acc_coeftable),
-        (outcol, fe_treated, fe_synthetic, V, curr_coeftable),
+        (outcol, fes, V, curr_coeftable),
     )
-        new_extra_stats = DataFrame(stat = outcol, V = Ref(V); fe_treated, fe_synthetic)
+        new_extra_stats = DataFrame(stat = outcol, V = Ref(V), fes = Ref(fes))
         return (
             vcat(acc_extra_stats, new_extra_stats, cols = :union),
-            innerjoin(acc_coeftable, curr_coeftable, on = :T),
+            innerjoin(acc_coeftable, curr_coeftable, on = [:T, :interaction]),
         )
     end
 
-    init = (DataFrame(), DataFrame(T = coef_periods))
+    init = (
+        DataFrame(),
+        allcombinations(
+            DataFrame,
+            :T => coef_periods,
+            :interaction =>
+                collect(map(extract_name, make_multi_formula(heterogeneity_term))),
+        ),
+    )
 
-    return mapreduce(reducer, pairs(STATISTICS); init) do s
-        panel = make_panel(s)
-        te_estimate(panel, s)
-    end
+    return mapreduce(te_estimate, reducer, pairs(STATISTICS); init)
 end

@@ -48,14 +48,13 @@ read_csv = @$ CSV.read(_, DataFrame)
 
 #### run daemon inside of this REPL in the background (for shell commands)
 import DaemonMode
+import Base.Threads: @spawn
 daemon = nothing
 start_daemon() =
     let daemon = getproperty(@__MODULE__, :daemon)
         if isnothing(daemon) || istaskdone(daemon)
             @info "Starting daemon"
-            daemon = @async begin
-                DaemonMode.serve(async = true)
-            end
+            daemon = @spawn DaemonMode.serve(async = true)
             setproperty!(@__MODULE__, :daemon, daemon)
             sleep(0.5)  # give the daemon some time to start
             istaskfailed(daemon) && error("Daemon failed to start")

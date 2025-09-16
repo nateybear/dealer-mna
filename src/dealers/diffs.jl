@@ -151,7 +151,7 @@ function compile_diffs!()
     return nothing
 end
 
-dealer_idxs(idx::Int64) = reduce(union, (fd.i for fd in Diffs[idx]))
+dealer_idxs(idx::Int64) = reduce(union, (fd.i for fd in Diffs[idx]), init = Int64[])
 dealer_idxs(e::AbstractEvent) = begin
     # get the index of the event in the Events array
     idx = findfirst(e2 -> e2.uid == e.uid, Events)

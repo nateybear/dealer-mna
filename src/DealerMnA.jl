@@ -25,4 +25,10 @@ include("registrations/Registrations.jl")
 include("dealers/Dealers.jl")
 include("empirics/Empirics.jl")
 
+@static if false
+    for file in readdir("../scripts")
+        include("../scripts/$file")
+    end
+end
+
 end

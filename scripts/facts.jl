@@ -43,24 +43,6 @@ with_logging() do
             t -> countlines("data/affiliated_dealerships/seller_group_$(t).txt") == 0
         ),
     )
-    push!(
-        facts,
-        "exitingsellerunderprice" =>
-            round(
-                Int64,
-                mean(eachrow(exiting_sellers)) do (; transaction_uid, dealer_uid)
-                    tes = DataFrame(
-                        Arrow.Table(
-                            "data/treatment_effects/treated_dealers/$(transaction_uid)/$(dealer_uid).arrow"
-                        ),
-                    )
-                    extras = JLD2.load_object(
-                        "data/treatment_effects/treated_dealers/$(transaction_uid)/$(dealer_uid)_extras.jld2"
-                    )
-                    -first(Empirics.synthetic_comparison(tes, extras, :mean_price, -4:-3))
-                end,
-            ),
-    )
     push!(facts, "numexitingsellers" => nrow(exiting_sellers))
 
     # AVERAGE NUMBER OF CONTROL DEALERS

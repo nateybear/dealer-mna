@@ -3,7 +3,9 @@ using DealerMnA
 !isempty(ARGS) && snakemake!(ARGS[1])
 
 with_logging() do
-    in_writer = CSV.Chunks(snakemake.input[1], stringtype = String)
+    in_writer = CSV.Chunks(
+        snakemake.input[1], stringtype = String, quotechar = '"'
+    )
     open(Arrow.Writer, snakemake.output[1]) do out_writer
         for chunk in in_writer
             # Clean the chunk

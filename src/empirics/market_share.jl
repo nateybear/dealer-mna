@@ -4,6 +4,7 @@ import ..Registrations: registrations as all_registrations
 
 using DataStructures: DefaultDict
 using Base.Threads # let's speed this up
+import LinearAlgebra: BLAS
 
 # if group_remap is not provided, calc a straight market share
 # if group_remap is provided, calculate change in market share
@@ -49,6 +50,9 @@ function market_share(
             :geometry => ByRow(x -> distance(x, focal_geometry) < weight.max_distance),
             view = true,
         )
+        # change BLAS threadpool for this to lower contention
+        blas_threads = BLAS.get_num_threads()
+        BLAS.set_num_threads(1)
         @threads for dealer in eachrow(nearby)
             d = distance(dealer.geometry, focal_geometry)
             if dealer.uid == focal_uid || d > weight.max_distance || !dealer.active
@@ -93,6 +97,7 @@ function market_share(
                 end
             end
         end
+        BLAS.set_num_threads(blas_threads)
     end
 
     function class_share(body_class, include_contested = false)
