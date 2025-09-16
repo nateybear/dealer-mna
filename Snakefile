@@ -624,6 +624,7 @@ rule data_facts:
     input:
         "scripts/facts.jl",
         *julia_src,
+        "data/related_dealerships.txt",  # Ensure checkpoints are run first
         new_registrations="data/arrow/new_registrations.arrow",
         price_table="data/price_table.arrow",
         popular_models="data/arrow/popular_models.arrow",
@@ -894,6 +895,7 @@ rule table_diff_in_diff:
 rule table_triple_diff:
     input:
         "scripts/table_triple_diff.jl",
+        "data/related_dealerships.txt",  # Ensure checkpoints are run first
         treatment_effects="data/treatment_effects/{cut}.arrow",
         extras="data/treatment_effects/{cut}_extras.jld2",
         dealer_demographics="data/dealer_demographics.arrow",
