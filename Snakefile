@@ -1,5 +1,6 @@
 import glob
 import pandas as pd
+import os
 from itertools import chain
 
 # Global variables for Julia source files
@@ -168,18 +169,23 @@ def get_registration_files(
             for suffix in suffixes:
                 if include_transacted_dealer:
                     # For closest dealers files that need transacted_dealer_uid
-                    closest_dealers_file = checkpoints.data_closest_dealerships.get(
-                        transaction_uid=t.transaction_uid, dealer_uid=t.dealer_uid
-                    ).output[0]
-                    with open(closest_dealers_file, "r") as f:
-                        closest_dealers = f.read().splitlines()
-                    for d in closest_dealers:
-                        out.add(
-                            f"data/{folder}/{suffix}/last_registrations_before_{t.transaction_uid}_{t.dealer_uid}_{d}.arrow"
-                        )
-                        out.add(
-                            f"data/{folder}/{suffix}/first_registrations_after_{t.transaction_uid}_{t.dealer_uid}_{d}.arrow"
-                        )
+                    try:
+                        closest_dealers_file = checkpoints.data_closest_dealerships.get(
+                            transaction_uid=t.transaction_uid, dealer_uid=t.dealer_uid
+                        ).output[0]
+                        if os.path.exists(closest_dealers_file):
+                            with open(closest_dealers_file, "r") as f:
+                                closest_dealers = f.read().splitlines()
+                            for d in closest_dealers:
+                                out.add(
+                                    f"data/{folder}/{suffix}/last_registrations_before_{t.transaction_uid}_{t.dealer_uid}_{d}.arrow"
+                                )
+                                out.add(
+                                    f"data/{folder}/{suffix}/first_registrations_after_{t.transaction_uid}_{t.dealer_uid}_{d}.arrow"
+                                )
+                    except (FileNotFoundError, OSError):
+                        # Checkpoint file doesn't exist yet, skip for now
+                        pass
                 else:
                     out.add(
                         f"data/{folder}/{suffix}/last_registrations_before_{t.transaction_uid}_{t.dealer_uid}.arrow"
@@ -200,19 +206,24 @@ def get_dealer_group_files(transaction_uids, folders, group_type):
     """
     out = set()
     for t in transaction_uids.itertuples():
-        group_file = checkpoints.data_affiliated_dealerships.get(
-            transaction_uid=t.transaction_uid
-        ).output[f"{group_type}_group"]
-        with open(group_file, "r") as f:
-            dealers = f.read().splitlines()
-        for d in dealers:
-            for folder in folders:
-                out.add(
-                    f"data/{folder}/{group_type}/last_registrations_before_{t.transaction_uid}_{d}.arrow"
-                )
-                out.add(
-                    f"data/{folder}/{group_type}/first_registrations_after_{t.transaction_uid}_{d}.arrow"
-                )
+        try:
+            group_file = checkpoints.data_affiliated_dealerships.get(
+                transaction_uid=t.transaction_uid
+            ).output[f"{group_type}_group"]
+            if os.path.exists(group_file):
+                with open(group_file, "r") as f:
+                    dealers = f.read().splitlines()
+                for d in dealers:
+                    for folder in folders:
+                        out.add(
+                            f"data/{folder}/{group_type}/last_registrations_before_{t.transaction_uid}_{d}.arrow"
+                        )
+                        out.add(
+                            f"data/{folder}/{group_type}/first_registrations_after_{t.transaction_uid}_{d}.arrow"
+                        )
+        except (FileNotFoundError, OSError):
+            # Checkpoint file doesn't exist yet, skip for now
+            pass
     return list(out)
 
 
@@ -531,13 +542,13 @@ rule data_treatment_effect_cut:
     input:
         "src/empirics/event_study.jl",
         "scripts/treatment_effects.jl",
-        get_related_dealerships,
-        get_all_related_registrations,
+        "data/related_dealerships.txt",  # Ensure checkpoints are run first
         dealer_demographics="data/dealer_demographics.arrow",
         dealers_init="data/dealers_init.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
         registrations=get_all_treated_registrations,
+        related_registrations=get_all_related_registrations,
         transaction_uids="data/transaction_uids.csv",
     output:
         treatment_effects="data/treatment_effects/{cut}.arrow",
@@ -569,7 +580,7 @@ rule data_group_market_share_changes:
         "data/transaction_uids.csv",
         "data/related_dealerships.txt",
         "src/empirics/market_share.jl",
-        get_all_related_registrations,
+        related_registrations=get_all_related_registrations,
         dealers_init="data/dealers_init.jld2",
         transaction_uids="data/transaction_uids.csv",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
@@ -590,7 +601,8 @@ rule data_group_market_share_changes:
 rule data_treatment_effect_groups:
     input:
         "scripts/treatment_effect_groups.jl",
-        get_all_related_registrations,
+        "data/related_dealerships.txt",
+        related_registrations=get_all_related_registrations,
         group_market_share_changes="data/group_market_share_changes.arrow",
         dealer_demographics="data/dealer_demographics.arrow",
     output:
