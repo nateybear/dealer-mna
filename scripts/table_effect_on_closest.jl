@@ -37,8 +37,8 @@ function prepare_transaction_uids(transaction_uids, extras)
     transaction_uids.closest_dealer_uid = last.(transaction_uids.closest_dealer_uid)
     transaction_uids.reg_uid =
         transaction_uids.transaction_uid .* "_" .*
-        transaction_uids.dealer_uid .* "_" .*
-        transaction_uids.closest_dealer_uid
+        transaction_uids.closest_dealer_uid .* "_" .*
+        transaction_uids.dealer_uid
 
     transaction_uids.treated_reg_uid =
         transaction_uids.transaction_uid .* "_" .* transaction_uids.dealer_uid
