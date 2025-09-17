@@ -9,7 +9,7 @@ using FixedEffectModels
 
 numunique(cols...) = cols |> splat(zip) |> unique |> length
 onlyunique = only ∘ unique
-parse_treated(reg_uid) = @> reg_uid split("_") last UUID
+parse_treated(reg_uid) = @> reg_uid split("_") getindex(2) UUID
 is_treated(reg_uid, dealer_uid) = dealer_uid == parse_treated(reg_uid)
 
 const STATISTICS = (
@@ -133,12 +133,13 @@ function event_study(
             )
         end
         table.T = extract_T.(table.Name)
-        extract_interaction(Name) =
+        function extract_interaction(Name)
             if match(r" & ", Name) !== nothing
-                match(r" & (.*)$", Name).captures[1]
+                match(r"^dt\(dealer_uid, reg_uid, T, [-\d]+\) & (.*)$", Name).captures[1]
             else
                 "1"
             end
+        end
         table.interaction = extract_interaction.(table.Name)
         fes = fe(reg_result, keepkeys = true)
         fes_treated = @> fes begin

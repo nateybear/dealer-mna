@@ -21,8 +21,7 @@ function same_group(tuid, dealer_uid)
     end
 end
 
-function prepare_transaction_uids()
-transaction_uids = read_csv(snakemake.input["transaction_uids"])
+function prepare_transaction_uids(transaction_uids, extras)
     transform!(
         transaction_uids,
         [:transaction_uid, :dealer_uid] =>
@@ -36,8 +35,13 @@ transaction_uids = read_csv(snakemake.input["transaction_uids"])
     transaction_uids = DataFrames.flatten(transaction_uids, :closest_dealer_uid)
     transaction_uids.closest_dealer_index = first.(transaction_uids.closest_dealer_uid)
     transaction_uids.closest_dealer_uid = last.(transaction_uids.closest_dealer_uid)
-    transaction_uids.reg_uid = transaction_uids.transaction_uid .* "_" .* transaction_uids.dealer_uid .* "_" .* transaction_uids.closest_dealer_uid
-    transaction_uids.treated_reg_uid = transaction_uids.transaction_uid .* "_" .* transaction_uids.dealer_uid
+    transaction_uids.reg_uid =
+        transaction_uids.transaction_uid .* "_" .*
+        transaction_uids.dealer_uid .* "_" .*
+        transaction_uids.closest_dealer_uid
+
+    transaction_uids.treated_reg_uid =
+        transaction_uids.transaction_uid .* "_" .* transaction_uids.dealer_uid
     transform!(
         transaction_uids,
         [:dealer_uid, :transaction_uid, :closest_dealer_uid] .=> ByRow(UUID),
@@ -52,7 +56,6 @@ transaction_uids = read_csv(snakemake.input["transaction_uids"])
     transform!(transaction_uids, :distance => ByRow(log))
     subset!(transaction_uids, :same_group => ByRow(!))
 
-    extras = JLD2.load_object(snakemake.input["extras"])
     sales_extras = only(eachrow(subset(extras, :stat => ByRow(==(:total_sales)))))
     fes = sales_extras.fes
     select!(fes, :reg_uid, :diff_in_diff => :sales_change)
@@ -60,8 +63,8 @@ transaction_uids = read_csv(snakemake.input["transaction_uids"])
     return innerjoin(transaction_uids, fes, on = :treated_reg_uid => :reg_uid)
 end
 
-function all_registrations(df)
-    all_arrow_files = map(eachrow(df)) do r
+function all_registrations(transaction_uids)
+    all_arrow_files = map(eachrow(transaction_uids)) do r
         [
             "data/treated/closest_dealers/last_registrations_before_$(r.reg_uid).arrow",
             "data/treated/closest_dealers/first_registrations_after_$(r.reg_uid).arrow",
@@ -72,20 +75,14 @@ function all_registrations(df)
     return DataFrame(Arrow.Table(collect(Iterators.flatten(all_arrow_files))))
 end
 
-function remove_control_line!()
-    lines = readlines(snakemake.output["table_regression"])
-    idx_control = findfirst(startswith("Controls"), lines)
-    lines = lines[Not([idx_control, idx_control + 1])]
-    open(snakemake.output["table_regression"], "w") do io
-        foreach(println$io, lines)
-    end
-end
-
 !isempty(ARGS) && snakemake!(ARGS[1])
 
 with_logging() do
     Dealers.load_from_disk!(snakemake.input["dealers_init"])
-    transaction_uids = prepare_transaction_uids()
+    transaction_uids = prepare_transaction_uids(
+        read_csv(snakemake.input["transaction_uids"]),
+        JLD2.load_object(snakemake.input["extras"]),
+    )
     registrations = all_registrations(transaction_uids)
     dealer_demographics = DataFrame(Arrow.Table(snakemake.input["dealer_demographics"]))
     heterogeneity_term = ConstantTerm(1) + Term(:distance_log) * Term(:sales_change)
@@ -94,8 +91,13 @@ with_logging() do
         registrations,
         dealer_demographics,
         heterogeneity_term,
-        transaction_uids,
-        [:dealer_uid, :reg_uid],
+        select(
+            transaction_uids,
+            Not(:dealer_uid),
+            :closest_dealer_uid => :dealer_uid,
+            copycols = false,
+        ),
+        [:reg_uid, :dealer_uid],
     )
 
     te_cols = [

@@ -178,10 +178,10 @@ def get_registration_files(
                                 closest_dealers = f.read().splitlines()
                             for d in closest_dealers:
                                 out.add(
-                                    f"data/{folder}/{suffix}/last_registrations_before_{t.transaction_uid}_{t.dealer_uid}_{d}.arrow"
+                                    f"data/{folder}/{suffix}/last_registrations_before_{t.transaction_uid}_{d}_{t.dealer_uid}.arrow"
                                 )
                                 out.add(
-                                    f"data/{folder}/{suffix}/first_registrations_after_{t.transaction_uid}_{t.dealer_uid}_{d}.arrow"
+                                    f"data/{folder}/{suffix}/first_registrations_after_{t.transaction_uid}_{d}_{t.dealer_uid}.arrow"
                                 )
                     except (FileNotFoundError, OSError):
                         # Checkpoint file doesn't exist yet, skip for now
@@ -926,8 +926,10 @@ rule table_effect_on_closest:
     input:
         "scripts/table_effect_on_closest.jl",
         get_related_dealerships,
+        get_all_related_registrations,
         transaction_uids="data/transaction_uids.csv",
         dealers_init="data/dealers_init.jld2",
+        extras="data/treatment_effects/overall_extras.jld2",
     output:
         table_regression="tables/effect_on_closest.tex",
         scatter_sales="plots/effect_on_closest_scatter.png",
