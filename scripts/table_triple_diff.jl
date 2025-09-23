@@ -9,7 +9,9 @@ using LaTeXStrings
 
 function fit_plus_std(x, y; digits = 3)
     let significant = abs(x) > 1.96y, x = round(x; digits), y = round(y; digits)
-        LaTeXString("\\makecell{$x$(significant ? "^{***}" : "") \\\\ ($y)\\\\[0.25em]}")
+        LaTeXString(
+            "\\makecell{$x$(significant ? "\\textsuperscript{***}" : "") \\\\ ($y)\\\\[0.25em]}"
+        )
     end
 end
 
@@ -111,7 +113,12 @@ with_logging() do
                                 Rule(:mid),
                                 [row.col],
                                 Rule(:mid),
-                                ["cut", row.before_true, row.after_true, row.difference_true],
+                                [
+                                    cut,
+                                    row.before_true,
+                                    row.after_true,
+                                    row.difference_true,
+                                ],
                                 [
                                     "Non $cut",
                                     row.before_false,
@@ -142,7 +149,6 @@ with_logging() do
                     "Total N",
                     string(nrow(transaction_uids)),
                 ],
-                ["Note: Standard errors in parentheses. *** indicates significance at the 1% level."],
                 Rule(:bottom),
             ],
         )

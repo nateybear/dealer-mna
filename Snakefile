@@ -548,7 +548,6 @@ rule data_treatment_effect_cut:
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
         registrations=get_all_treated_registrations,
-        related_registrations=get_all_related_registrations,
         transaction_uids="data/transaction_uids.csv",
     output:
         treatment_effects="data/treatment_effects/{cut}.arrow",
@@ -620,6 +619,26 @@ rule data_treatment_effect_groups:
         )
 
 
+rule data_treatment_effect_closest:
+    input:
+        "scripts/treatment_effect_closest.jl",
+        get_related_dealerships,
+        get_all_related_registrations,
+        transaction_uids="data/transaction_uids.csv",
+        dealers_init="data/dealers_init.jld2",
+        extras="data/treatment_effects/overall_extras.jld2",
+        dealer_demographics="data/dealer_demographics.arrow",
+    output:
+        treatment_effects="data/treatment_effects/closest.arrow",
+        extra_stats="data/treatment_effects/closest_extras.jld2",
+    log:
+        "logs/treatment_effect_closest.log",
+    run:
+        julia(
+            "scripts/treatment_effect_closest.jl", input=input, output=output, log=log
+        )
+
+
 rule data_facts:
     input:
         "scripts/facts.jl",
@@ -681,7 +700,8 @@ rule plot_dealer_group_size_histogram:
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
     output:
-        "plots/dealer_group_size_histogram.png",
+        histogram="plots/dealer_group_size_histogram.png",
+        cumulative="plots/dealer_group_size_cumulative.png",
     log:
         "logs/dealer_group_size_histogram.log",
     run:
@@ -853,6 +873,22 @@ rule plot_event_study_all:
             statistic=["mean_price", "total_units", "total_sales", "trim_rank"],
         ),
 
+rule plot_effect_on_closest:
+    input:
+        "scripts/plot_effect_on_closest.jl",
+        dealers_init="data/dealers_init.jld2",
+        treatment_effects="data/treatment_effects/closest.arrow",
+        extras="data/treatment_effects/closest_extras.jld2",
+        overall_extras="data/treatment_effects/overall_extras.jld2",
+        transaction_uids="data/transaction_uids.csv",
+    output:
+        "plots/effect_on_closest.png"
+    log:
+        "logs/plot_effect_on_closest.log",
+    run:
+        julia("scripts/plot_effect_on_closest.jl", input=input, output=output, log=log)
+        
+
 
 rule table_body_make_count:
     input:
@@ -922,23 +958,6 @@ rule table_triple_diffs:
         ),
 
 
-rule table_effect_on_closest:
-    input:
-        "scripts/table_effect_on_closest.jl",
-        get_related_dealerships,
-        get_all_related_registrations,
-        transaction_uids="data/transaction_uids.csv",
-        dealers_init="data/dealers_init.jld2",
-        extras="data/treatment_effects/overall_extras.jld2",
-    output:
-        table_regression="tables/effect_on_closest.tex",
-        scatter_sales="plots/effect_on_closest_scatter.png",
-    log:
-        "logs/table_effect_on_closest.log",
-    run:
-        julia("scripts/table_effect_on_closest.jl", input=input, output=output, log=log)
-
-
 rule table_trim_variation:
     input:
         "scripts/table_trim_variation.jl",
@@ -978,13 +997,14 @@ rule all:
         "tables/msa_concentration.tex",
         # Main plots
         "plots/dealer_group_size_histogram.png",
+        "plots/dealer_group_size_cumulative.png",
         "plots/diff_in_diff_cornerplot.png",
         "plots/hist_odometer.png",
         "plots/registrations_spatial.png",
         "plots/sales_prices_quarterly.png",
         "plots/transaction_group_sizes.png",
         "plots/cr4_timeline.png",
-        "plots/effect_on_closest_scatter.png",
+        "plots/effect_on_closest.png",
         # Event study plots
         "plots/event_study/overall_mean_price.png",
         "plots/event_study/overall_total_units.png",

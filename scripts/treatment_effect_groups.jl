@@ -16,15 +16,23 @@ function all_registrations(group_df)
     return DataFrame(Arrow.Table(collect(Iterators.flatten(all_arrow_files))))
 end
 
-function splines(x)
-    return ns(
-        collect(x),
-        knots = [-0.1, -0.05, -0.01, 0, 0.01, 0.05, 0.1],
-        intercept = true,
-    )
+const NS = Ref{Function}()
+
+function calcsplines!(x)
+    if !isdefined(NS, 1)
+        NS[] = ns_(
+            collect(x),
+            boundary_knots = (-0.1, 0.1),
+            df = 5,
+            intercept = true,
+        )
+    end
+    return NS[]
 end
+
 function addsplines!(df, col = :change_market_share)
-    S = splines(df[!, col])
+    f = calcsplines!(df[!, col])
+    S = f(df[!, col])
     for i in 1:size(S, 2)
         df[:, "ns_$(i)"] = S[:, i]
     end
@@ -36,7 +44,7 @@ with_logging() do
     registrations = all_registrations(df)
     dealer_demographics = DataFrame(Arrow.Table(snakemake.input["dealer_demographics"]))
     df.reg_uid = df.transaction_uid .* "_" .* df.dealer_uid
-    df = transform(df, [:dealer_uid, :transaction_uid] .=> ByRow(UUID), renamecols=false)
+    df = transform(df, [:dealer_uid, :transaction_uid] .=> ByRow(UUID), renamecols = false)
     addsplines!(df)
     heterogeneity_term = mapreduce(Term ∘ Symbol, +, names(df, r"^ns_"))
     extras, coeftable = Empirics.event_study(
@@ -44,7 +52,7 @@ with_logging() do
         dealer_demographics,
         heterogeneity_term,
         df,
-        [:dealer_uid, :reg_uid]
+        how_join = [:dealer_uid, :reg_uid],
     )
     JLD2.save_object(snakemake.output["extra_stats"], extras)
     Arrow.write(snakemake.output["treatment_effects"], coeftable)

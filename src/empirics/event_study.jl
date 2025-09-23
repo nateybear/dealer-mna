@@ -60,7 +60,7 @@ weighted_mean(x, weight) = mean(x, w(weight))
 
 extract_name(term::Term) = string(term.sym)
 extract_name(term::ConstantTerm) = string(term.n)
-extract_name(term::InteractionTerm) = join(extract_name.(term.terms), "&")
+extract_name(term::InteractionTerm) = join(extract_name.(term.terms), " & ")
 
 df_cols(t::Tuple) = unique(Iterators.flatten(df_cols.(t)))
 df_cols(t::InteractionTerm) = df_cols(t.terms)
@@ -78,8 +78,9 @@ function event_study(
     registrations,
     dealer_demographics,
     heterogeneity_term = ConstantTerm(1),
-    dealer_extras = nothing,
+    dealer_extras = nothing;
     how_join = :dealer_uid, # how to join dealer_extras to the panel
+    statistics = keys(STATISTICS), # which statistics to estimate
 )
     function dt(dealer_uid, reg_uid, T, critical_T)
         return (dealer_uid == parse_treated(reg_uid)) * (T == critical_T)
@@ -208,5 +209,5 @@ function event_study(
         ),
     )
 
-    return mapreduce(te_estimate, reducer, pairs(STATISTICS); init)
+    return mapreduce(te_estimate, reducer, pairs(STATISTICS[statistics]); init)
 end

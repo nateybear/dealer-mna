@@ -1,10 +1,6 @@
 using DealerMnA
-using FixedEffectModels
-using RegressionTables
+using FixedEffectModels: Term, ConstantTerm
 using Unitful
-using Plots
-using Humanize: digitsep
-using Intervals
 
 import .Geometry: distance
 
@@ -97,75 +93,10 @@ with_logging() do
             :closest_dealer_uid => :dealer_uid,
             copycols = false,
         ),
-        [:reg_uid, :dealer_uid],
+        how_join = [:reg_uid, :dealer_uid],
+        statistics = [:total_sales],
     )
 
-    te_cols = [
-        :total_sales, :mean_price, :total_units, :trim_rank
-    ]
-    for col in te_cols
-        function te(group, transaction_uid, dealer_uid)
-            return first(Empirics.treatment_effect(col, group; transaction_uid, dealer_uid))
-        end
-        transform!(
-            transaction_uids,
-            [:transaction_uid, :dealer_uid] =>
-                ByRow(te$("treated_dealers")) => Symbol("treated_$col"),
-            [:transaction_uid, :closest_dealer_uid] =>
-                ByRow(te$("closest_dealers")) => Symbol("closest_$col"),
-        )
-    end
-
-    models = map(te_cols) do col
-        form =
-            Term(Symbol("closest_$col")) ~
-                Term(Symbol("treated_$col")) +
-                Term(:distance) & Term(Symbol("treated_$col"))
-        reg(transaction_uids, form)
-    end
-    regtable(
-        models...,
-        file = snakemake.output["table_regression"],
-        drop = ["(Intercept)"],
-        render = LatexTable(),
-        print_fe_section = false,
-    )
-    remove_control_line!()
-
-    # draw scatter and best fit for sales
-    (b, m, _) = coef(models[1])
-    plot_df = subset(
-        transaction_uids, :treated_total_sales => ByRow(in(-2_500_000 .. 5_000_000))
-    )
-    p = scatter(
-        plot_df.treated_total_sales,
-        plot_df.closest_total_sales,
-        group = plot_df.closest_dealer_index,
-        palette = :Set2,
-        xlabel = "Δ Quarterly Sales, Treated",
-        ylabel = "Δ Quarterly Sales, Closest",
-        label = ["1st" "2nd" "3rd"] .* "-closest",
-        margin = 2Plots.mm,
-        legend = :topright,
-        size = (700, 525),
-    )
-
-    (breaks, _) = xticks(p)[1]
-    labels = map(breaks) do b
-        readable = digitsep(abs(round(Int64, b)))
-        b < 0 ? "(\$$readable)" : "\$$(readable)"
-    end
-    xticks!(p, (breaks, labels))
-
-    (breaks, _) = yticks(p)[1]
-    labels = map(breaks) do b
-        readable = digitsep(abs(round(Int64, b)))
-        b < 0 ? "(\$$readable)" : "\$$(readable)"
-    end
-    yticks!(p, (breaks, labels))
-
-    Plots.abline!(p, m, b, color = :black, linewidth = 2, label = "Best fit line")
-    hline!(p, [0.0], color = :black, label = nothing, linestyle = :dot)
-
-    png(snakemake.output["scatter_sales"])
+    JLD2.save_object(snakemake.output["extra_stats"], extras)
+    Arrow.write(snakemake.output["treatment_effects"], coeftable)
 end

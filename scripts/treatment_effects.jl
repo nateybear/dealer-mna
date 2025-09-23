@@ -27,7 +27,7 @@ with_logging() do
                 dealer_demographics,
                 Term(:urban) + ConstantTerm(1),
                 dealer_demographics,
-                :dealer_uid => :uid,
+                how_join = :dealer_uid => :uid,
             )
         elseif snakemake.wildcards["cut"] == "exiting_seller"
             transaction_uids.exiting_seller = map(transaction_uids.transaction_uid) do uid

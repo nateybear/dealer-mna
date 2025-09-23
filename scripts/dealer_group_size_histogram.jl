@@ -14,5 +14,16 @@ with_logging() do
         label = nothing,
         size = (600, 400),
     )
-    png(snakemake.output[1])
+    png(snakemake.output["histogram"])
+
+    sort!(counts, :nrow)
+    counts.cumulative = cumsum(counts.nrow)
+    counts = @> counts groupby(:nrow) combine(:cumulative => last, renamecols=false)
+    plot(
+        counts.nrow,
+        counts.cumulative,
+        label = nothing,
+        size = (600, 400),
+    )
+    png(snakemake.output["cumulative"])
 end

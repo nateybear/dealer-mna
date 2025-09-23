@@ -9,7 +9,9 @@ using LaTeXStrings
 
 function fit_plus_std(x, y; digits = 3)
     let significant = abs(x) > 1.96y, x = round(x; digits), y = round(y; digits)
-        LaTeXString("\\makecell{$x$(significant ? "^{***}" : "") \\\\ ($y)\\\\[0.25em]}")
+        LaTeXString(
+            "\\makecell{$x$(significant ? "\\textsuperscript{***}" : "") \\\\ ($y)\\\\[0.25em]}"
+        )
     end
 end
 
@@ -61,8 +63,7 @@ with_logging() do
                 # give number of observations (thanks GPT)
                 [
                     "Number of observations",
-                    string(nrow(df[df.T .== -3, :])),
-                    string(nrow(df[df.T .== 2, :])),
+                    string(nrow(extras.fes[1])),
                     "",
                 ],
                 Rule(:bottom),
