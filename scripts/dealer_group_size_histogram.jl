@@ -23,7 +23,11 @@ with_logging() do
         counts.nrow,
         counts.cumulative,
         label = nothing,
-        size = (600, 400),
+        size = (800, 600),
+        linetype=:steppost,
+        xlabel="Dealer Group Size",
+        ylabel="Cumulative Number of Dealers",
+        left_margin = 5Plots.mm,
     )
     png(snakemake.output["cumulative"])
 end
