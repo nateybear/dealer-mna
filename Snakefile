@@ -129,6 +129,17 @@ rule data_price_table:
     run:
         julia("scripts/price_table.jl", input=input, output=output, log=log)
 
+rule data_registrations_normed:
+    input:
+        "scripts/registrations_normed.jl",
+        new_registrations="data/arrow/new_registrations.arrow",
+        price_table="data/price_table.arrow",
+    output:
+        "data/arrow/registrations_normed.arrow",
+    log:
+        "logs/registrations_normed.log",
+    run:
+        julia("scripts/registrations_normed.jl", input=input, output=output, log=log)
 
 checkpoint data_all_manufacturers:
     input:
