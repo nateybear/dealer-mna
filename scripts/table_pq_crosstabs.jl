@@ -30,8 +30,8 @@ with_logging() do
         :T => ByRow(≤(-3)),
     )
     extras = JLD2.load_object(snakemake.input["extras"])
-    mean_price = only(eachrow(subset(extras, :stat => ByRow(==(:mean_price)))))
-    total_units = only(eachrow(subset(extras, :stat => ByRow(==(:total_units)))))
+    mean_price = pluck(extras, :stat => ByRow(==(:mean_price)))
+    total_units = pluck(extras, :stat => ByRow(==(:total_units)))
     mean_price.fes.p_comparison = compare(mean(df.mean_price), mean_price, "P")
     total_units.fes.q_comparison = compare(mean(df.total_units), total_units, "Q")
 

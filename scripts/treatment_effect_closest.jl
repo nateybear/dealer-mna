@@ -52,7 +52,7 @@ function prepare_transaction_uids(transaction_uids, extras)
     transform!(transaction_uids, :distance => ByRow(log))
     subset!(transaction_uids, :same_group => ByRow(!))
 
-    sales_extras = only(eachrow(subset(extras, :stat => ByRow(==(:total_sales)))))
+    sales_extras = pluck(extras, :stat => ByRow(==(:total_sales)))
     fes = sales_extras.fes
     select!(fes, :reg_uid, :diff_in_diff => :sales_change)
 

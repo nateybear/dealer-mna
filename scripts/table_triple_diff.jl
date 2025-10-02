@@ -39,7 +39,7 @@ with_logging() do
     end
     table = DataFrame(
         map(cols) do col
-            extra = only(eachrow(subset(extras, :stat => ByRow(==(col)))))
+            extra = pluck(extras, :stat => ByRow(==(col)))
             transform!(
                 extra.fes,
                 :reg_uid => ByRow(UUID ∘ last ∘ (@$ split(_, "_"))) => :dealer_uid,

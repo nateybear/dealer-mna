@@ -21,7 +21,7 @@ with_logging() do
     cols = [:mean_price, :total_units, :trim_rank, :mean_baseprice, :median_markup]
     table = DataFrame(
         map(cols) do col
-            extra = only(eachrow(subset(extras, :stat => ByRow(==(col)))))
+            extra = pluck(extras, :stat => ByRow(==(col)))
             offset = mean(extra.fes.fe_treated - extra.fes.fe_synthetic)
             before = @> df begin
                 subset(:T => ByRow(==(-3)))

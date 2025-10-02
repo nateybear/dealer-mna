@@ -57,7 +57,7 @@ function prepare_transaction_uids(transaction_uids, extras)
     transform!(transaction_uids, :distance => ByRow(log))
     subset!(transaction_uids, :same_group => ByRow(!))
 
-    sales_extras = only(eachrow(subset(extras, :stat => ByRow(==(:total_sales)))))
+    sales_extras = pluck(extras, :stat => ByRow(==(:total_sales)))
     fes = sales_extras.fes
     select!(fes, :reg_uid, :diff_in_diff => :sales_change)
 
@@ -136,7 +136,7 @@ with_logging() do
         JLD2.load_object(snakemake.input["overall_extras"]),
     )
     extras = JLD2.load_object(snakemake.input["extras"])
-    sales_extras = only(eachrow(subset(extras, :stat => ByRow(==(:total_sales)))))
+    sales_extras = pluck(extras, :stat => ByRow(==(:total_sales)))
 
     diffs = @> coeftable begin
         subset(:T => ByRow(in([-3, 2])))

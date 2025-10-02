@@ -107,7 +107,7 @@ with_logging() do
         combine(col => splat(-) => :diff)
     end
     extras = JLD2.load_object(snakemake.input["extra_stats"])
-    col_extras = only(eachrow(subset(extras, :stat => ByRow(==(col)))))
+    col_extras = pluck(extras, :stat => ByRow(==(col)))
 
     # covariance matrix of all the differences
     V = let c = reshape(unique(coeftable.interaction), 1, :)

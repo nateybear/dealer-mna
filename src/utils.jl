@@ -166,3 +166,6 @@ function SplittablesBase.halve(gd::GroupedDataFrame)
         (gd[one], gd[two])
     end
 end
+
+
+pluck(df, args...; kwargs...) = only(eachrow(subset(df, args...; kwargs..., view = true)))

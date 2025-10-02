@@ -14,7 +14,7 @@ with_logging() do
     transaction_uid = UUID(snakemake.wildcards["transaction_uid"])
     transactions = JLD2.load_object(snakemake.input["transactions"])
     t = first(t for t in transactions if t.uid == transaction_uid)
-    dealer = only(eachrow(subset(Dealers.State.df, :uid => ByRow(==(dealer_uid)))))
+    dealer = pluck(Dealers.State.df, :uid => ByRow(==(dealer_uid)))
     @info "Dealer under consideration" dealer
     intersects = !isempty ∘ intersect
     relevant_dealers = subset(
