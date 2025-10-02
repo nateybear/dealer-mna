@@ -4,16 +4,20 @@ using Base: Fix1, Fix2
 import ..snakemake
 import JLD2
 
-normalize_trim = ByRow() do x...
-    trim_vars = reduce(skipmissing(x), init = [""]) do acc, trim
-        split_trim = @> trim strip replace(r"[^\w\s]" => "") uppercase split(r"\s+")
-        union(acc, split_trim)
-    end
+firstormissing(x, y) = all(ismissing, x) ? y : first(skipmissing(x))
 
-    @> trim_vars sort join(" ") strip string
+normalize_trim(x...) = @> x begin
+    firstormissing("")
+    strip
+    replace(r"[/-]" => " ")
+    replace(r"[^\w\s]" => "")
+    uppercase
+    split(r"\s+")
+    sort
+    join(" ")
 end
 
-trimnames(df) = names(df, r"^((trim)|(series))$")
+trimnames(df) = [ "trim", "series", "trim2", "series2" ] ∩ names(df)
 
 @memoize function price_table()
     if !isnothing(snakemake) && haskey(snakemake.input, "price_table")
@@ -28,7 +32,7 @@ trimnames(df) = names(df, r"^((trim)|(series))$")
             datadir("arrow/new_registrations.arrow")),
     )
         s = DataFrame(s)
-        transform!(s, trimnames(s) => normalize_trim => :extra)
+        transform!(s, trimnames(s) => ByRow(normalize_trim) => :extra)
 
         grouping = @> s begin
             groupby([:make, :model, :model_year, :extra])
@@ -50,6 +54,8 @@ trimnames(df) = names(df, r"^((trim)|(series))$")
 
     sort!(out, [:make, :model, :model_year, :mean_price])
     subset!(out, :n => ByRow(>(5)))
+    subset!(out, :extra => ByRow(!contains(r"\bWORK\b")))
+    subset!(out, :extra => ByRow(!contains(r"\bFLEET\b")))
 
     function evenly_spaced(x)
         let n = length(x)
@@ -81,7 +87,7 @@ function normalize_price(df, col_in = :vehsalesprice, col_out = :price_normed)
         )
     else
         @> df begin
-            transform(trimnames(df) => normalize_trim => :extra)
+            transform(trimnames(df) => ByRow(normalize_trim) => :extra)
             innerjoin(
                 select(price_table(), Not(:n)), on = [:make, :model, :model_year, :extra]
             )
