@@ -27,18 +27,19 @@ function add_distance(r, dealers)
     @> r add_zips transform([:geometry, :make] => ByRow(normed_distance$dealers) => AsTable)
 end
 
-function add_distance(r)
+function add_distance(r; state = State.df)
     r = add_zips(r)
     isempty(r) && return missing
     N = nrow(r)
     r.uid = [uuid4() for _ in 1:N] # add a unique identifier for each row to group back together later
-    flat_dealers = @> State.df begin
+    flat_dealers = @> state begin
         subset(:active => ByRow(identity))
         select(
             :geometry => :dealer_geometry,
             :gdns => :dlrgdn,
             :uid => :dealer_uid,
             :franchises => :make,
+            :gid => :dealer_gid,
         )
         flatten(:dlrgdn)
         flatten(:make)

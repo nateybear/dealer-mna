@@ -135,7 +135,7 @@ function compute_franchise_network!()
     all_franchises = collect(reduce(union, State.df.franchises))
     State.franchise_network = Dict(
         begin
-            dealer_idx = findall(∋(franchise), State.df.franchises)
+            dealer_idx = findall(∋(franchise), State.df.franchises) ∩ findall(State.df.active)
             geoms_df = DataFrame(
                 idx = dealer_idx,
                 longitude = first.(State.df.geometry[dealer_idx]),

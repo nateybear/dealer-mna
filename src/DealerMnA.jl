@@ -16,7 +16,7 @@ using Reexport
 end
 
 export Geometry,
-    Registrations, Dealers, Empirics, snakemake, snakemake!, with_logging, nonmissing,
+    Registrations, Dealers, Empirics, Demand, snakemake, snakemake!, with_logging, nonmissing,
     read_csv, start_daemon, stop_daemon, pluck
 
 include("utils.jl")
@@ -24,7 +24,9 @@ include("geometry/Geometry.jl")
 include("registrations/Registrations.jl")
 include("dealers/Dealers.jl")
 include("empirics/Empirics.jl")
+include("demand/Demand.jl")
 
+# attempt to force LSP to recognize module symbols in scripts
 @static if false
     for file in readdir("../scripts")
         include("../scripts/$file")
