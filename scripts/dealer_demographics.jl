@@ -1,10 +1,5 @@
 using DealerMnA
 
-using Unitful
-using Unitful.DefaultSymbols
-
-to_miles = ustrip ∘ uconvert$(u"mi")
-
 !isempty(ARGS) && snakemake!(ARGS[1])
 
 with_logging() do
@@ -15,8 +10,7 @@ with_logging() do
             Dealers.State.df,
             :franchises => ByRow(intersects$d.franchises),
         )
-        distances =
-            to_miles.(Geometry.distance.(relevant_dealers.geometry, Ref(d.geometry)))
+        distances = Geometry.miles.(relevant_dealers.geometry, Ref(d.geometry))
         order = sortperm(distances)[2:4]
         DataFrame(
             uid = d.uid,

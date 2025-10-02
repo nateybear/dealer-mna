@@ -33,6 +33,7 @@ distance(a::AG.IGeometry, b) = distance(a, AG.createpoint(b)) # distance between
 distance(a, b) = norm(a .- b)m # distance between two points
 
 miles(d) = ustrip(uconvert(mi, d)) # convert distance to miles
+miles(a, b) = miles(distance(a, b)) # distance between two geometries in miles
 
 #### reading function that asserts the correct CRS
 function gdf(filename, args...; kwargs...)

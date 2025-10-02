@@ -1,12 +1,11 @@
 using DealerMnA
 using FixedEffectModels: Term, ConstantTerm
-using Unitful
 
 import .Geometry: distance
 
 function miles(d1::UUID, d2::UUID)
     dealers = subset(Dealers.State.df, :uid => ByRow(in((d1, d2))), view = true)
-    return ustrip(uconvert(u"mi", distance(dealers.geometry...)))
+    return Geometry.miles(dealers.geometry...)
 end
 
 function same_group(tuid, dealer_uid)

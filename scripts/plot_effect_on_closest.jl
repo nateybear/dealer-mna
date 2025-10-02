@@ -1,6 +1,5 @@
 using DealerMnA
 using Plots
-using Unitful
 using Distributions: pdf, Normal
 using Optim: optimize
 using StatsBase: mean, weights
@@ -11,7 +10,7 @@ isempty(ARGS) || snakemake!(ARGS[1])
 
 function miles(d1::UUID, d2::UUID)
     dealers = subset(Dealers.State.df, :uid => ByRow(in((d1, d2))), view = true)
-    return ustrip(uconvert(u"mi", distance(dealers.geometry...)))
+    return Geometry.miles(dealers.geometry...)
 end
 
 function same_group(tuid, dealer_uid)
