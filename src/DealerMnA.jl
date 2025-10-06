@@ -19,6 +19,11 @@ export Geometry,
     Registrations, Dealers, Empirics, Demand, snakemake, snakemake!, with_logging, nonmissing,
     read_csv, start_daemon, stop_daemon, pluck
 
+using Random
+_rng = MersenneTwister(78735)
+const TRANSITION_GID = uuid4(_rng)
+const SINGLE_OPERATOR_GID = uuid4(_rng)
+
 include("utils.jl")
 include("geometry/Geometry.jl")
 include("registrations/Registrations.jl")

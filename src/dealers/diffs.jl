@@ -187,3 +187,37 @@ function timetravel(f, d::Date)
     i = searchsortedlast([e.when for e in Events], d, rev = true)
     return timetravel(f, Events[i], before = true)
 end
+
+import ..TRANSITION_GID
+
+function fuzzytravel(f, t::Tuple{Int64, Int64})
+    year, quarter = t
+    start_date = Date(year) + Quarter(quarter)
+    end_date = lastdayofquarter(start_date)
+    date_range = start_date:end_date
+
+    fuzzed_events = findall(eachindex(Events)) do i
+        e = Events[i]
+        isempty(Diffs[i]) && return false
+        d = regeffdate(e)
+        ismissing(d) && return false
+        fuzz_dates = (d - Quarter(1)) : (d + Quarter(1))
+        return !isempty(intersect(fuzz_dates, date_range))
+    end
+
+    i_before = isempty(fuzzed_events) ? findfirst(e -> e.when > start_date, Events) : minimum(fuzzed_events)
+
+    # if i_before is nothing, there are no events after start date, so just time travel to start_date
+    return timetravel(isnothing(i_before) ? start_date : Events[i_before]) do
+        for i in fuzzed_events
+            State.df.gid[i] = TRANSITION_GID
+            gdn_diffs = ( d for d in Diffs[i] if d isa FieldDiff{:gdns} )
+            for d in gdn_diffs
+                union!(State.df.gdns[d.i], d.after) # combine all gdns in fuzzy events to make sure we get all the registrations
+            end
+        end
+        return f() # timetravel will clean up the state for us
+    end
+end
+
+fuzzytravel(f, d::Date) = fuzzytravel(f, (year(d), quarter(d)))
