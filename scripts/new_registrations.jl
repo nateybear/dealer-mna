@@ -11,9 +11,7 @@ with_logging() do
         for chunk in Arrow.Stream(snakemake.input["unmatched_registrations"])
             @info "Processing chunk of registrations"
             registrations = DataFrame(chunk)
-            registrations.quarter = Dates.quarter.(registrations.regeffdate)
-            registrations.year = Dates.year.(registrations.regeffdate)
-            registrations.t = tuple.(registrations.year, registrations.quarter)
+            registrations.t = firstdayofquarter.(registrations.regeffdate)
             registrations = Registrations.normalize_price(registrations)
             registrations = combine(groupby(registrations, :t)) do r
                 t = first(r.t)

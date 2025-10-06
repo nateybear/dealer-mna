@@ -92,9 +92,8 @@ entities(e::Union{Entry, Exit}) = Set([e.business_name])
 regeffdate(e::Entry) = e.first_regeffdate
 regeffdate(e::Exit) = e.last_regeffdate
 regeffdate(t::Transaction) = mid(t.first_buyer_regeffdate, t.last_seller_regeffdate)
-timeofevent(e) = let d = regeffdate(e)
-    (Dates.year(d), Dates.quarter(d))
-end
+eventtime(e) = firstdayofquarter(regeffdate(e))
+eventtime(d1::Date, d2::Date) = (year(d1) - year(d2)) * 4 + (quarterofyear(d1) - quarterofyear(d2))
 
 mid(_, _) = missing
 mid(d1::Date, d2::Date) = d1 + (d2 - d1) ÷ 2
