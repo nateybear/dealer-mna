@@ -169,3 +169,5 @@ end
 
 
 pluck(df, args...; kwargs...) = only(eachrow(subset(df, args...; kwargs..., view = true)))
+
+Base.:-(d1::Tuple{Int64, Int64}, d2::Tuple{Int64, Int64}) = (d1[1] - d2[1]) * 4 + (d1[2] - d2[2])
