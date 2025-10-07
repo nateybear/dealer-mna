@@ -1,5 +1,5 @@
 import ..Dealers: Entry, Exit, Transaction, add_distance, seller_gdns, buyer_gdns,
-    timetravel, affected_gdns, State, dealer_idxs, Events
+    fuzzytravel, affected_gdns, State, dealer_idxs, Events
 import ..Registrations: registrations, normalize_price
 import ..Geometry: distance
 import ..snakemake
@@ -7,179 +7,135 @@ import ..nonmissing
 
 import JLD2
 using PartialFunctions
+import Folds
+using FoldsThreads
 
 make_filter(::Nothing) = []
 make_filter(make::String) = [:make => ByRow(==(make))]
 make_filter(make::Vector{String}) = [:make => ByRow(in(make))]
 make_filter(make::Set{String}) = make_filter(collect(make))
 
-function last_registrations_before(t::Transaction; dealer_uid = nothing)
-    ismissing(last_period_before(t)) && return missing
-
-    out = timetravel(t) do
-        i_extra = if isnothing(dealer_uid)
-            Set{Int}()
-        else
-            findfirst(==(dealer_uid), State.df.uid)
-        end
-        gdns = isnothing(dealer_uid) ? seller_gdns(t) : State.df.gdns[i_extra]
-        franchises = isnothing(dealer_uid) ? t.franchises : State.df.franchises[i_extra]
-        if !isempty(franchises ∩ t.franchises)
-            intersect!(franchises, t.franchises) # if this is a dealer that sells same makes, only look at those makes
-        end
-        @> registrations() begin
-            subset(
-                :regeffdate => ByRow(in(last_period_before(t))),
-                :dlrgdn => ByRow(in(gdns)),
-                make_filter(franchises)...,
-            )
-            normalize_price
-            add_distance
-        end
-    end
-
-    (ismissing(out) || isempty(out)) && return missing
-
-    out = create_time_col(out, t.last_seller_regeffdate + Day(1))
-    isnothing(dealer_uid) || subset!(out, :dealer_uid => ByRow(==(dealer_uid)))
-
-    # make sure registrations have all time periods
-    # before the transaction, or else return missing
-    before_periods = Set(p for p in VALID_PERIODS if p < 0)
-    out = @> out begin
-        groupby(:dealer_uid)
-        subset(:T => ⊇(before_periods))
-    end
-    return isempty(out) ? missing : out
+function registrations_in_window(window; dealer_uids = [], franchises = [])
+    return subset(
+        registrations(),
+        :dealer_uid => ByRow(in(dealer_uids)),
+        :t => ByRow(in(window)),
+        make_filter(franchises)...,
+    )
 end
 
-function first_registrations_after(t::Transaction; dealer_uid = nothing)
-    ismissing(first_period_after(t)) && return missing
+function treated_registrations(t; dealer_uid = nothing)
+    window = blackout_period(t)
+    ismissing(window) && return missing
 
-    out = timetravel(t, before = false) do
-        i_extra = if isnothing(dealer_uid)
-            Set{Int}()
-        else
-            findfirst(==(dealer_uid), State.df.uid)
-        end
-        gdns = isnothing(dealer_uid) ? buyer_gdns(t) : State.df.gdns[i_extra]
-        franchises = isnothing(dealer_uid) ? t.franchises : State.df.franchises[i_extra]
-        if !isempty(franchises ∩ t.franchises)
-            intersect!(franchises, t.franchises) # if this is a dealer that sells same makes, only look at those makes
-        end
-        @> registrations() begin
-            subset(
-                :regeffdate => ByRow(in(first_period_after(t))),
-                :dlrgdn => ByRow(in(gdns)),
-                make_filter(franchises)...,
-            )
-            normalize_price
-            add_distance
-        end
+    i_extra = if isnothing(dealer_uid)
+        Set{Int}()
+    else
+        findfirst(==(dealer_uid), State.df.uid)
     end
 
-    (ismissing(out) || isempty(out)) && return missing
-    isnothing(dealer_uid) || subset!(out, :dealer_uid => ByRow(==(dealer_uid)))
-    out = create_time_col(out, t.first_buyer_regeffdate - Day(1))
-
-    # make sure registrations have all time periods
-    # after the transaction, or else return missing
-    after_periods = Set(p for p in VALID_PERIODS if p ≥ 0)
-    out = @> out begin
-        groupby(:dealer_uid)
-        subset(:T => ⊇(after_periods))
+    franchises = isnothing(dealer_uid) ? t.franchises : State.df.franchises[i_extra]
+    if !isempty(franchises ∩ t.franchises)
+        intersect!(franchises, t.franchises) # if this is a dealer that sells same makes, only look at those makes
     end
+
+    dealer_uids = isnothing(dealer_uid) ? State.df.uid[dealer_idxs(t)] : Set([dealer_uid])
+
+    out = registrations_in_window(window; dealer_uids, franchises)
+    create_eventtime_col!(out, eventtime(t))
+
     return isempty(out) ? missing : out
 end
 
 function control_dealers(t; dealer_uid = nothing)
-    timetravel(t) do
-        # you are "tainted" if you have things happening to you, or you are closer than the radius
-        tainted_uids = reduce(
-            union,
-            (State.df.uid[dealer_idxs(t2)] for t2 in Events if t2.uid != t.uid),
-            init = Set{UUID}(),
-        )
+    # control dealers must be outside the radius of the treated dealerships and any extra dealers
+    i_extra = if isnothing(dealer_uid)
+        Set{Int}()
+    else
+        findfirst(==(dealer_uid), State.df.uid)
+    end
 
-        # control dealers must be outside the radius of the treated dealerships and any extra dealers
+    # you are "tainted" if you have things happening to you, or you are closer than the radius
+    # of an event within its blackout period
+    tainted_uids = Folds.mapreduce(
+        union,
+        Events,
+        WorkStealingEx(simd = true),
+        init = Set{UUID}(),
+    ) do e
+        idxs = dealer_idxs(e) ∪ i_extra
+        blackout = blackout_period(e)
+        if !ismissing(blackout) && eventtime(t) in blackout
+            too_close = findall(State.df.geometry) do g
+                any(distance.(Ref(g), State.df.geometry[idxs]) .≤ RADIUS)
+            end
+            union!(idxs, too_close)
+        end
+        return State.df.uid[idxs]
+    end
+
+    #franchises are either the franchise of the extra dealer, or of the treated dealerships
+    franchises = isnothing(dealer_uid) ? t.franchises : State.df.franchises[i_extra]
+    if !isempty(franchises ∩ t.franchises)
+        intersect!(franchises, t.franchises) # if this is a dealer that sells same makes, only look at those makes
+    end
+
+    intersects = !isempty ∘ intersect
+
+    return subset(
+        State.df,
+        :gid => ByRow(!in([t.buyer_gid, t.seller_gid])),
+        :uid => ByRow(!in(tainted_uids)),
+        :franchises => ByRow(intersects$franchises),
+        :active => ByRow(identity),
+    )
+end
+
+# iterate a series of events and maybe dealer uids,
+# and compile a unique list of control dealer uids, windows, and franchises
+function iter_control_dealers(ts::AbstractVector)
+    out = DefaultDict{UUID, Set{Tuple{Date, Set{String}}}}(Set{Tuple{Date, Set{String}}})
+    for t in ts
+        t, dealer_uid = t isa Tuple ? t : (t, nothing)
+
         i_extra = if isnothing(dealer_uid)
             Set{Int}()
         else
             findfirst(==(dealer_uid), State.df.uid)
         end
-        treated_dealerships = State.df[union(dealer_idxs(t), i_extra), :]
 
         #franchises are either the franchise of the extra dealer, or of the treated dealerships
         franchises = isnothing(dealer_uid) ? t.franchises : State.df.franchises[i_extra]
         if !isempty(franchises ∩ t.franchises)
             intersect!(franchises, t.franchises) # if this is a dealer that sells same makes, only look at those makes
         end
-        intersects = !isempty ∘ intersect
 
-        return subset(State.df,
-            :geometry => ByRow() do x
-                all(>(RADIUS),
-                    (distance(x, g) for g in treated_dealerships.geometry),
-                )
-            end,
-            :gid => ByRow(!in([t.buyer_gid, t.seller_gid])),
-            :uid => ByRow(!in(tainted_uids)),
-            :franchises => ByRow(intersects$franchises),
-            :active => ByRow(identity),
-        )
-    end
-end
-
-function control_registrations_before(t; dealer_uid = nothing)
-    gdns = reduce(union, control_dealers(t; dealer_uid).gdns)
-    before_periods = Set(p for p in VALID_PERIODS if p < 0)
-    i_extra = isnothing(dealer_uid) ? Set{Int}() : findfirst(==(dealer_uid), State.df.uid)
-    franchises = isnothing(dealer_uid) ? t.franchises : State.df.franchises[i_extra]
-    if !isempty(franchises ∩ t.franchises)
-        intersect!(franchises, t.franchises) # if this is a dealer that sells same makes, only look at those makes
-    end
-    timetravel(t) do
-        @> registrations() begin
-            subset(
-                :dlrgdn => ByRow(nonmissing(in(gdns))), # filter by the control group GDNS
-                :regeffdate => ByRow(
-                    # Only include registrations within the same period as the transaction
-                    in(last_period_before(t))
-                ),
-                make_filter(franchises)...,
-            )
-            normalize_price
-            add_distance
-            create_time_col(t.last_seller_regeffdate + Day(1))
-            groupby(:dealer_uid)
-            subset(:T => ⊇(before_periods))
+        ismissing(blackout_period(t)) && continue
+        controls = control_dealers(t; dealer_uid)
+        for uid in controls.uid
+            windows = out[uid]
+            for window in eventtime.(eventtime(t), VALID_PERIODS)
+                push!(windows, (window, franchises))
+            end
         end
     end
-end
+    reshaped = DataFrame(
+        dealer_uids = collect(keys(out)),
+        windows = collect(values(out)),
+    )
+    transform!(reshaped, :windows => ByRow((map$first) ∘ collect) => :window)
+    transform!(
+        reshaped, :windows => ByRow((map$last) ∘ collect) => :franchises
+    )
+    select!(reshaped, Not(:windows))
+    reshaped = @> reshaped flatten(:window) flatten(:franchises)
+    # regroup into as wide of window/dealer uid combos as possible
+    reshaped = @> reshaped groupby([:dealer_uids, :franchises]) combine(
+        :window => Set, renamecols = false
+    )
+    reshaped = @> reshaped groupby([:franchises, :window]) combine(
+        :dealer_uids => Set, renamecols = false
+    )
 
-function control_registrations_after(t; dealer_uid = nothing)
-    gdns = reduce(union, control_dealers(t; dealer_uid).gdns)
-    after_periods = Set(p for p in VALID_PERIODS if p ≥ 0)
-    i_extra = isnothing(dealer_uid) ? Set{Int}() : findfirst(==(dealer_uid), State.df.uid)
-    franchises = isnothing(dealer_uid) ? t.franchises : State.df.franchises[i_extra]
-    if !isempty(franchises ∩ t.franchises)
-        intersect!(franchises, t.franchises) # if this is a dealer that sells same makes, only look at those makes
-    end
-    timetravel(t, before = false) do
-        @> registrations() begin
-            subset(
-                :dlrgdn => ByRow(nonmissing(in(gdns))), # filter by the control group GDNS
-                :regeffdate => ByRow(
-                    # Only include registrations within the same period as the transaction
-                    in(first_period_after(t))
-                ),
-                make_filter(franchises)...,
-            )
-            normalize_price
-            add_distance
-            create_time_col(t.first_buyer_regeffdate - Day(1))
-            groupby(:dealer_uid)
-            subset(:T => ⊇(after_periods))
-        end
-    end
+    return eachrow(reshaped)
 end

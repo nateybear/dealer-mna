@@ -220,4 +220,5 @@ function fuzzytravel(f, t::Tuple{Int64, Int64})
     end
 end
 
-fuzzytravel(f, d::Date) = fuzzytravel(f, (year(d), quarter(d)))
+fuzzytravel(f, d::Date) = fuzzytravel(f, (year(d), quarterofyear(d)))
+fuzzytravel(f, e::AbstractEvent) = fuzzytravel(f, eventtime(e))

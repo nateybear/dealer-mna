@@ -12,12 +12,11 @@ with_logging() do
             Empirics.blackout_period(t) ⊆ Empirics.ANALYSIS_DATES &&
             t.buyer_gid != t.seller_gid
             @info "Transaction $(t.uid) is in the analysis period"
-            last_registrations = Empirics.last_registrations_before(t)
-            first_registrations = Empirics.first_registrations_after(t)
-            if !ismissing(last_registrations) &&
-                !ismissing(first_registrations) &&
-                !isempty(last_registrations) &&
-                !isempty(first_registrations)
+            treated_registrations = Empirics.treated_registrations(t)
+            controls = Empirics.control_dealers(t)
+            if !ismissing(treated_registrations) &&
+                treated_registrations.τ ⊇ Empirics.VALID_PERIODS &&
+                !isempty(controls)
                 @info "Transaction $(t.uid) has registrations before and after"
                 push!(out, t)
             end

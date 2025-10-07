@@ -9,39 +9,39 @@ using UUIDs
 with_logging() do
     Dealers.load_from_disk!(snakemake.input["dealers_init"])
     transactions = JLD2.load_object(snakemake.input["transactions_for_analysis"])
-    tuid = UUID(snakemake.wildcards["transaction_uid"])
-    t = first(t for t in transactions if t.uid == tuid)
+    transactions = DataFrame(
+        uid = [t.uid for t in transactions],
+        t = transactions,
+    )
 
-    # For closest dealers, dealer_uid wildcard is the closest dealer, 
-    # and transacted_dealer_uid wildcard is the treated dealer from transaction_uids
-    dealer_uid = UUID(snakemake.wildcards["dealer_uid"])
-
-    # For closest dealers, we need a 3-part reg_uid: transaction_uid_treated_dealer_uid_closest_dealer_uid
-    reg_uid = if haskey(snakemake.wildcards, "transacted_dealer_uid")
-        transacted_dealer_uid = snakemake.wildcards["transacted_dealer_uid"]
-        "$(tuid)_$(dealer_uid)_$(transacted_dealer_uid)"
+    iter = if haskey(snakemake.input, "dealer_uids")
+        dealer_uids = DataFrame(
+            transaction_uid = collect(keys(snakemake.input["dealer_uids"])),
+            dealer_uid = collect(values(snakemake.input["dealer_uids"])),
+        )
+        transform!(dealer_uids, :transaction_uid => ByRow(UUID) => :transaction_uid)
+        transform!(dealer_uids, :dealer_uid => ByRow(readlines) => :dealer_uid)
+        dealer_uids = @> dealer_uids flatten(:dealer_uid) transform(
+            :dealer_uid => ByRow(UUID) => :dealer_uid
+        )
+        innerjoin(transactions, dealer_uids, on = :uid => :transaction_uid)
     else
-        "$(tuid)_$(dealer_uid)"
+        transactions.dealer_uid .= nothing
+        transactions
     end
 
-    before_registrations = Empirics.control_registrations_before(t; dealer_uid)
-    after_registrations = Empirics.control_registrations_after(t; dealer_uid)
+    controls = Empirics.iter_control_dealers(zip(iter.t, iter.dealer_uid))
 
-    # Keep only dealers that appear in both periods
-    constant_dealers = before_registrations.dealer_uid ∩ after_registrations.dealer_uid
-
-    subset!(before_registrations, :dealer_uid => ByRow(in(constant_dealers)))
-    subset!(after_registrations, :dealer_uid => ByRow(in(constant_dealers)))
-
-    before_registrations[!, :reg_uid] .= reg_uid
-    after_registrations[!, :reg_uid] .= reg_uid
-
-    Arrow.write(
-        snakemake.output["before"],
-        before_registrations,
-    )
-    Arrow.write(
-        snakemake.output["after"],
-        after_registrations,
-    )
+    open(Arrow.Writer, snakemake.output[1]) do out_writer
+        for r in eachrow(controls)
+            control_regs = Empirics.registrations_in_window(
+                r.window; r.dealer_uids, r.franchises
+            )
+            control_regs.τ .= 0
+            Arrow.write(
+                out_writer,
+                control_regs,
+            )
+        end
+    end
 end

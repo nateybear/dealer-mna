@@ -13,10 +13,11 @@ with_logging() do
             registrations = DataFrame(chunk)
             registrations.t = firstdayofquarter.(registrations.regeffdate)
             registrations = Registrations.normalize_price(registrations)
+            isempty(registrations) && continue
             registrations = combine(groupby(registrations, :t)) do r
                 t = first(r.t)
-                Dealers.fuzzytravel(t) do state
-                    r = Dealers.add_distance(r; state)
+                return Dealers.fuzzytravel(t) do
+                    r = Dealers.add_distance(r)
                     return ismissing(r) ? DataFrame() : r
                 end
             end
