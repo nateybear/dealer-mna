@@ -102,6 +102,7 @@ rule data_new_registrations:
     input:
         "scripts/new_registrations.jl",
         unmatched_registrations="data/arrow/unmatched_registrations.arrow",
+        price_table="data/price_table.arrow",
         dealers_init="data/dealers_init.jld2",
     output:
         new_registrations="data/arrow/new_registrations.arrow",
@@ -129,17 +130,6 @@ rule data_price_table:
     run:
         julia("scripts/price_table.jl", input=input, output=output, log=log)
 
-rule data_registrations_normed:
-    input:
-        "scripts/registrations_normed.jl",
-        new_registrations="data/arrow/new_registrations.arrow",
-        price_table="data/price_table.arrow",
-    output:
-        "data/arrow/registrations_normed.arrow",
-    log:
-        "logs/registrations_normed.log",
-    run:
-        julia("scripts/registrations_normed.jl", input=input, output=output, log=log)
 
 checkpoint data_all_manufacturers:
     input:
@@ -163,79 +153,57 @@ def get_transaction_uids():
     return pd.read_csv(checkpoints.data_transaction_uids.get().output[0])
 
 
-def get_registration_files(
-    transaction_uids, folders, suffixes, include_transacted_dealer=False
-):
-    """
-    Generic function to build registration file paths
-    Args:
-        transaction_uids: DataFrame with transaction_uid and dealer_uid columns
-        folders: list of folder names (e.g., ['treated', 'control'])
-        suffixes: list of suffixes (e.g., ['treated_dealers', 'buyer', 'seller'])
-        include_transacted_dealer: if True, include files with transacted_dealer_uid
-    """
-    out = set()
-    for t in transaction_uids.itertuples():
-        for folder in folders:
-            for suffix in suffixes:
-                if include_transacted_dealer:
-                    # For closest dealers files that need transacted_dealer_uid
-                    try:
-                        closest_dealers_file = checkpoints.data_closest_dealerships.get(
-                            transaction_uid=t.transaction_uid, dealer_uid=t.dealer_uid
-                        ).output[0]
-                        if os.path.exists(closest_dealers_file):
-                            with open(closest_dealers_file, "r") as f:
-                                closest_dealers = f.read().splitlines()
-                            for d in closest_dealers:
-                                out.add(
-                                    f"data/{folder}/{suffix}/last_registrations_before_{t.transaction_uid}_{d}_{t.dealer_uid}.arrow"
-                                )
-                                out.add(
-                                    f"data/{folder}/{suffix}/first_registrations_after_{t.transaction_uid}_{d}_{t.dealer_uid}.arrow"
-                                )
-                    except (FileNotFoundError, OSError):
-                        # Checkpoint file doesn't exist yet, skip for now
-                        pass
-                else:
-                    out.add(
-                        f"data/{folder}/{suffix}/last_registrations_before_{t.transaction_uid}_{t.dealer_uid}.arrow"
-                    )
-                    out.add(
-                        f"data/{folder}/{suffix}/first_registrations_after_{t.transaction_uid}_{t.dealer_uid}.arrow"
-                    )
-    return list(out)
+def get_related_dealer_map(wildcards):
+    """Get dealer mapping files for a specific group type"""
+    transaction_uids = get_transaction_uids()
+    group = wildcards.group
 
-
-def get_dealer_group_files(transaction_uids, folders, group_type):
-    """
-    Get registration files for dealer groups (buyer/seller)
-    Args:
-        transaction_uids: DataFrame with transaction_uid column
-        folders: list of folder names (e.g., ['treated', 'control'])
-        group_type: 'buyer' or 'seller'
-    """
-    out = set()
-    for t in transaction_uids.itertuples():
-        try:
-            group_file = checkpoints.data_affiliated_dealerships.get(
+    if group == "buyer":
+        return {
+            t.transaction_uid: checkpoints.data_affiliated_dealerships.get(
                 transaction_uid=t.transaction_uid
-            ).output[f"{group_type}_group"]
-            if os.path.exists(group_file):
-                with open(group_file, "r") as f:
-                    dealers = f.read().splitlines()
-                for d in dealers:
-                    for folder in folders:
-                        out.add(
-                            f"data/{folder}/{group_type}/last_registrations_before_{t.transaction_uid}_{d}.arrow"
-                        )
-                        out.add(
-                            f"data/{folder}/{group_type}/first_registrations_after_{t.transaction_uid}_{d}.arrow"
-                        )
-        except (FileNotFoundError, OSError):
-            # Checkpoint file doesn't exist yet, skip for now
-            pass
-    return list(out)
+            ).output.buyer_group
+            for t in transaction_uids.itertuples()
+        }
+    elif group == "seller":
+        return {
+            t.transaction_uid: checkpoints.data_affiliated_dealerships.get(
+                transaction_uid=t.transaction_uid
+            ).output.seller_group
+            for t in transaction_uids.itertuples()
+        }
+    elif group == "closest_franchise":
+        # For closest franchise, we need to aggregate all closest dealer files for each transaction
+        dealer_map = {}
+        for t in transaction_uids.itertuples():
+            try:
+                closest_file = checkpoints.data_closest_dealerships.get(
+                    transaction_uid=t.transaction_uid,
+                    dealer_uid=t.dealer_uid,
+                    dealer_type="franchise",
+                ).output[0]
+                dealer_map[t.transaction_uid] = closest_file
+            except (FileNotFoundError, OSError):
+                # Checkpoint file doesn't exist yet, skip for now
+                pass
+        return dealer_map
+    elif group == "closest_any":
+        # For closest any, we need to aggregate all closest dealer files for each transaction
+        dealer_map = {}
+        for t in transaction_uids.itertuples():
+            try:
+                closest_file = checkpoints.data_closest_dealerships.get(
+                    transaction_uid=t.transaction_uid,
+                    dealer_uid=t.dealer_uid,
+                    dealer_type="any",
+                ).output[0]
+                dealer_map[t.transaction_uid] = closest_file
+            except (FileNotFoundError, OSError):
+                # Checkpoint file doesn't exist yet, skip for now
+                pass
+        return dealer_map
+    else:
+        raise ValueError(f"Unknown group type: {group}")
 
 
 def get_all_manufacturers(wildcards):
@@ -292,8 +260,6 @@ checkpoint data_transaction_uids:
 
 
 rule data_treated_registrations:
-    wildcard_constraints:
-        folder="(treated_dealers|buyer|seller)",
     input:
         "src/empirics/registrations.jl",
         "src/empirics/Empirics.jl",
@@ -304,10 +270,9 @@ rule data_treated_registrations:
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
     output:
-        before="data/treated/{folder}/last_registrations_before_{transaction_uid}_{dealer_uid}.arrow",
-        after="data/treated/{folder}/first_registrations_after_{transaction_uid}_{dealer_uid}.arrow",
+        "data/treated/treated_dealers.arrow",
     log:
-        "logs/{folder}_{transaction_uid}_{dealer_uid}.log",
+        "logs/treated_registrations_treated_dealers.log",
     run:
         julia(
             "scripts/treated_registrations.jl",
@@ -319,8 +284,6 @@ rule data_treated_registrations:
 
 
 rule data_control_registrations:
-    wildcard_constraints:
-        folder="(treated_dealers|buyer|seller)",
     input:
         "src/empirics/registrations.jl",
         "src/empirics/Empirics.jl",
@@ -331,10 +294,9 @@ rule data_control_registrations:
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
     output:
-        before="data/control/{folder}/last_registrations_before_{transaction_uid}_{dealer_uid}.arrow",
-        after="data/control/{folder}/first_registrations_after_{transaction_uid}_{dealer_uid}.arrow",
+        "data/control/treated_dealers.arrow",
     log:
-        "logs/{folder}_{transaction_uid}_{dealer_uid}.log",
+        "logs/control_registrations_treated_dealers.log",
     run:
         julia(
             "scripts/control_registrations.jl",
@@ -345,7 +307,9 @@ rule data_control_registrations:
         )
 
 
-rule data_treated_registrations_closest:
+rule data_treated_registrations_related:
+    wildcard_constraints:
+        group="(buyer|seller|closest_franchise|closest_any)",
     input:
         "src/empirics/registrations.jl",
         "src/empirics/Empirics.jl",
@@ -355,11 +319,11 @@ rule data_treated_registrations_closest:
         price_table="data/price_table.arrow",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
+        dealer_uids=get_related_dealer_map,
     output:
-        before="data/treated/closest_dealers/last_registrations_before_{transaction_uid}_{dealer_uid}_{transacted_dealer_uid}.arrow",
-        after="data/treated/closest_dealers/first_registrations_after_{transaction_uid}_{dealer_uid}_{transacted_dealer_uid}.arrow",
+        "data/treated/{group}.arrow",
     log:
-        "logs/closest_dealers_{transaction_uid}_{dealer_uid}_{transacted_dealer_uid}.log",
+        "logs/treated_registrations_{group}.log",
     run:
         julia(
             "scripts/treated_registrations.jl",
@@ -370,7 +334,9 @@ rule data_treated_registrations_closest:
         )
 
 
-rule data_control_registrations_closest:
+rule data_control_registrations_related:
+    wildcard_constraints:
+        group="(buyer|seller|closest_franchise|closest_any)",
     input:
         "src/empirics/registrations.jl",
         "src/empirics/Empirics.jl",
@@ -380,11 +346,11 @@ rule data_control_registrations_closest:
         price_table="data/price_table.arrow",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
+        dealer_uids=get_related_dealer_map,
     output:
-        before="data/control/closest_dealers/last_registrations_before_{transaction_uid}_{dealer_uid}_{transacted_dealer_uid}.arrow",
-        after="data/control/closest_dealers/first_registrations_after_{transaction_uid}_{dealer_uid}_{transacted_dealer_uid}.arrow",
+        "data/control/{group}.arrow",
     log:
-        "logs/closest_dealers_{transaction_uid}_{dealer_uid}_{transacted_dealer_uid}.log",
+        "logs/control_registrations_{group}.log",
     run:
         julia(
             "scripts/control_registrations.jl",
@@ -397,10 +363,10 @@ rule data_control_registrations_closest:
 
 def get_all_treated_registrations(wildcards):
     """Get all treated dealer registration files"""
-    transaction_uids = get_transaction_uids()
-    return get_registration_files(
-        transaction_uids, ["treated", "control"], ["treated_dealers"]
-    )
+    return [
+        "data/treated/treated_dealers.arrow",
+        "data/control/treated_dealers.arrow",
+    ]
 
 
 def get_related_dealerships(wildcards):
@@ -408,42 +374,80 @@ def get_related_dealerships(wildcards):
     transaction_uids = get_transaction_uids()
     out = set()
     for t in transaction_uids.itertuples():
-        out.add(f"data/closest_dealerships/{t.transaction_uid}_{t.dealer_uid}.txt")
+        out.add(
+            f"data/closest_dealerships/{t.transaction_uid}_{t.dealer_uid}_franchise.txt"
+        )
+        out.add(f"data/closest_dealerships/{t.transaction_uid}_{t.dealer_uid}_any.txt")
         out.add(f"data/affiliated_dealerships/buyer_group_{t.transaction_uid}.txt")
         out.add(f"data/affiliated_dealerships/seller_group_{t.transaction_uid}.txt")
     return list(out)
 
 
-def get_all_related_registrations(wildcards):
-    """Get all registration files including treated dealers, closest dealers, and buyer/seller groups"""
+def get_related_dealer_map(wildcards):
+    """Get dealer mapping files for a specific group type"""
     transaction_uids = get_transaction_uids()
+    group = wildcards.group
 
-    # Start with basic treated dealer files
-    out = set(
-        get_registration_files(
-            transaction_uids, ["treated", "control"], ["treated_dealers"]
+    if group == "buyer":
+        return {
+            t.transaction_uid: checkpoints.data_affiliated_dealerships.get(
+                transaction_uid=t.transaction_uid
+            ).output.buyer_group
+            for t in transaction_uids.itertuples()
+        }
+    elif group == "seller":
+        return {
+            t.transaction_uid: checkpoints.data_affiliated_dealerships.get(
+                transaction_uid=t.transaction_uid
+            ).output.seller_group
+            for t in transaction_uids.itertuples()
+        }
+    elif group == "closest_franchise":
+        # For closest franchise, we need to aggregate all closest dealer files for each transaction
+        dealer_map = {}
+        for t in transaction_uids.itertuples():
+            try:
+                closest_file = checkpoints.data_closest_dealerships.get(
+                    transaction_uid=t.transaction_uid, dealer_uid=t.dealer_uid
+                ).output[0]
+                dealer_map[t.transaction_uid] = closest_file
+            except (FileNotFoundError, OSError):
+                # Checkpoint file doesn't exist yet, skip for now
+                pass
+        return dealer_map
+    else:
+        raise ValueError(f"Unknown group type: {group}")
+
+
+def get_all_related_dealerships(wildcards):
+    """Get all related dealership files"""
+    transaction_uids = get_transaction_uids()
+    out = set()
+    for t in transaction_uids.itertuples():
+        out.add(f"data/affiliated_dealerships/buyer_group_{t.transaction_uid}.txt")
+        out.add(f"data/affiliated_dealerships/seller_group_{t.transaction_uid}.txt")
+        out.add(
+            f"data/closest_dealerships/{t.transaction_uid}_{t.dealer_uid}_franchise.txt"
         )
-    )
-
-    # Add closest dealer files
-    out.update(
-        get_registration_files(
-            transaction_uids,
-            ["treated", "control"],
-            ["closest_dealers"],
-            include_transacted_dealer=True,
-        )
-    )
-
-    # Add buyer and seller group files
-    out.update(
-        get_dealer_group_files(transaction_uids, ["treated", "control"], "buyer")
-    )
-    out.update(
-        get_dealer_group_files(transaction_uids, ["treated", "control"], "seller")
-    )
-
+        out.add(f"data/closest_dealerships/{t.transaction_uid}_{t.dealer_uid}_any.txt")
     return list(out)
+
+
+def get_all_related_registrations(wildcards):
+    """Get all registration files including treated dealers and related groups"""
+    # With the new approach, we have single arrow files for each group
+    return [
+        "data/treated/treated_dealers.arrow",
+        "data/control/treated_dealers.arrow",
+        "data/treated/buyer.arrow",
+        "data/treated/seller.arrow",
+        "data/treated/closest_franchise.arrow",
+        "data/treated/closest_any.arrow",
+        "data/control/buyer.arrow",
+        "data/control/seller.arrow",
+        "data/control/closest_franchise.arrow",
+        "data/control/closest_any.arrow",
+    ]
 
 
 rule data_all_treated_registrations:
@@ -478,6 +482,10 @@ checkpoint data_affiliated_dealerships:
 
 # get three closest dealerships for each transaction
 checkpoint data_closest_dealerships:
+    wildcard_constraints:
+        dealer_type="(franchise|any)",
+        transaction_uid="[0-9a-f\\-]+",
+        dealer_uid="[0-9a-f\\-]+",
     input:
         "data/transaction_uids.csv",
         "scripts/closest_dealerships.jl",
@@ -486,9 +494,9 @@ checkpoint data_closest_dealerships:
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
     output:
-        "data/closest_dealerships/{transaction_uid}_{dealer_uid}.txt",
+        "data/closest_dealerships/{transaction_uid}_{dealer_uid}_{dealer_type}.txt",
     log:
-        "logs/closest_dealerships_{transaction_uid}_{dealer_uid}.log",
+        "logs/closest_dealerships_{transaction_uid}_{dealer_uid}_{dealer_type}.log",
     run:
         julia(
             "scripts/closest_dealerships.jl",
@@ -648,6 +656,24 @@ rule data_treatment_effect_closest:
         julia(
             "scripts/treatment_effect_closest.jl", input=input, output=output, log=log
         )
+
+
+rule data_model_frames:
+    input:
+        "scripts/data_model_frames.jl",
+        "data/statistics.txt",
+        dealers_init="data/dealers_init.jld2",
+        new_registrations="data/arrow/new_registrations.arrow",
+        price_table="data/price_table.arrow",
+    output:
+        distances="data/model_frames/distances.jld2",
+        agent_data="data/model_frames/agent_data.arrow",
+        product_data="data/model_frames/product_data.arrow",
+        counts="data/model_frames/counts.arrow",
+    log:
+        "logs/model_frames.log",
+    run:
+        julia("scripts/data_model_frames.jl", input=input, output=output, log=log)
 
 
 rule data_facts:
@@ -884,6 +910,7 @@ rule plot_event_study_all:
             statistic=["mean_price", "total_units", "total_sales", "trim_rank"],
         ),
 
+
 rule plot_effect_on_closest:
     input:
         "scripts/plot_effect_on_closest.jl",
@@ -893,12 +920,11 @@ rule plot_effect_on_closest:
         overall_extras="data/treatment_effects/overall_extras.jld2",
         transaction_uids="data/transaction_uids.csv",
     output:
-        "plots/effect_on_closest.png"
+        "plots/effect_on_closest.png",
     log:
         "logs/plot_effect_on_closest.log",
     run:
         julia("scripts/plot_effect_on_closest.jl", input=input, output=output, log=log)
-        
 
 
 rule table_body_make_count:
@@ -1003,7 +1029,7 @@ rule all:
         "tables/diff_in_diff.tex",
         "tables/triple_diff_urban.tex",
         "tables/triple_diff_exiting_seller.tex",
-        "tables/effect_on_closest.tex",
+        #"tables/effect_on_closest.tex",
         "tables/trim_variation.tex",
         "tables/msa_concentration.tex",
         # Main plots
@@ -1031,6 +1057,11 @@ rule all:
         get_plot_trim_distns,
         # Facts
         "facts.tex",
+        # Demand model things
+        "data/model_frames/distances.jld2",
+        "data/model_frames/agent_data.arrow",
+        "data/model_frames/product_data.arrow",
+        "data/model_frames/counts.arrow",
 
 
 # ============================================================================
