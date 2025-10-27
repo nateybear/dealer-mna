@@ -99,5 +99,11 @@ function eventtime(d1::Date, d2::Date)
 end
 eventtime(x, t::Int64) = eventtime(x) + Quarter(t)
 
+# use a time variable that increments by one for callaway-santanna package
+cstime(x) =
+    let d = eventtime(x)
+        (year(d) - 2016) * 4 + quarterofyear(d)
+    end
+
 mid(_, _) = missing
 mid(d1::Date, d2::Date) = d1 + (d2 - d1) ÷ 2

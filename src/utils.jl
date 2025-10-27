@@ -45,6 +45,7 @@ nonmissing(f) = NonMissing(f)
 
 ### read_csv helper
 read_csv = @$ CSV.read(_, DataFrame)
+read_arrow = DataFrame ∘ Arrow.Table
 
 #### run daemon inside of this REPL in the background (for shell commands)
 import DaemonMode
@@ -166,6 +167,5 @@ function SplittablesBase.halve(gd::GroupedDataFrame)
         (gd[one], gd[two])
     end
 end
-
 
 pluck(df, args...; kwargs...) = only(eachrow(subset(df, args...; kwargs..., view = true)))

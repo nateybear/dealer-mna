@@ -13,6 +13,7 @@ with_logging() do
             registrations = DataFrame(chunk)
             registrations.t = firstdayofquarter.(registrations.regeffdate)
             registrations = Registrations.normalize_price(registrations)
+            registrations = Registrations.add_manufacturer(registrations)
             isempty(registrations) && continue
             registrations = combine(groupby(registrations, :t)) do r
                 t = first(r.t)

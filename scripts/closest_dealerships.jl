@@ -17,10 +17,10 @@ with_logging() do
     dealer = pluck(Dealers.State.df, :uid => ByRow(==(dealer_uid)))
     @info "Dealer under consideration" dealer
     intersects = !isempty ∘ intersect
+    franchise = snakemake.wildcards["type"] == "franchise"
     relevant_dealers = subset(
         Dealers.State.df,
-        :franchises => ByRow(intersects$dealer.franchises),
-        :active => ByRow(identity),
+        (franchise ? [:franchises => ByRow(intersects$dealer.franchises)] : [])...,
         :uid => ByRow(!=(dealer_uid)),
     )
     distances = Geometry.distance.(relevant_dealers.geometry, Ref(dealer.geometry))
@@ -32,12 +32,10 @@ with_logging() do
                 break
             end
             dealer_uid = relevant_dealers.uid[i]
-            last_registrations = Empirics.last_registrations_before(t; dealer_uid)
-            first_registrations = Empirics.first_registrations_after(t; dealer_uid)
-            if !ismissing(last_registrations) &&
-                !ismissing(first_registrations) &&
-                !isempty(last_registrations) &&
-                !isempty(first_registrations)
+            treated_registrations = Empirics.treated_registrations(t; dealer_uid)
+            if !ismissing(treated_registrations) &&
+                !isempty(treated_registrations) &&
+                treated_registrations.τ ⊇ Empirics.VALID_PERIODS
                 count += 1
                 @info "Writing $(count)th closest dealership $(relevant_dealers.uid[i])" distance = distances[i]
                 println(io, dealer_uid)

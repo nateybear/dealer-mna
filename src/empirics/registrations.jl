@@ -1,7 +1,7 @@
 import ..Dealers: Entry, Exit, Transaction, add_distance, seller_gdns, buyer_gdns,
     fuzzytravel, affected_gdns, State, dealer_idxs, Events
-import ..Registrations: registrations, normalize_price
-import ..Geometry: distance
+import ..Registrations: registrations, manufacturer
+import ..Geometry: distance, miles
 import ..snakemake
 import ..nonmissing
 
@@ -47,31 +47,12 @@ function treated_registrations(t; dealer_uid = nothing)
     return isempty(out) ? missing : out
 end
 
-function control_dealers(t; dealer_uid = nothing)
+function control_dealers(t; dealer_uid = nothing, dealer_demographics)
     # control dealers must be outside the radius of the treated dealerships and any extra dealers
     i_extra = if isnothing(dealer_uid)
         Set{Int}()
     else
         findfirst(==(dealer_uid), State.df.uid)
-    end
-
-    # you are "tainted" if you have things happening to you, or you are closer than the radius
-    # of an event within its blackout period
-    tainted_uids = Folds.mapreduce(
-        union,
-        Events,
-        WorkStealingEx(simd = true),
-        init = Set{UUID}(),
-    ) do e
-        idxs = dealer_idxs(e) ∪ i_extra
-        blackout = blackout_period(e)
-        if !ismissing(blackout) && eventtime(t) in blackout
-            too_close = findall(State.df.geometry) do g
-                any(distance.(Ref(g), State.df.geometry[idxs]) .≤ RADIUS)
-            end
-            union!(idxs, too_close)
-        end
-        return State.df.uid[idxs]
     end
 
     #franchises are either the franchise of the extra dealer, or of the treated dealerships
@@ -81,6 +62,45 @@ function control_dealers(t; dealer_uid = nothing)
     end
 
     intersects = !isempty ∘ intersect
+
+    # you are "tainted" if you have things happening to you, or you are closer than the radius
+    # of an event within its blackout period and a franchise that we care about
+    tainted_uids = Folds.mapreduce(
+        union,
+        Events,
+        WorkStealingEx(simd = true),
+        init = Set{UUID}(),
+    ) do e
+        e.when > Date(2020) && return Set{UUID}()
+        radioactive = dealer_idxs(e) ∪ i_extra
+        too_close = Set{Int}()
+        blackout = blackout_period(e)
+        if !ismissing(blackout) && eventtime(t) in blackout
+            for (i, (g, f)) in enumerate(zip(State.df.geometry, State.df.franchises))
+                if i in radioactive
+                    continue
+                end
+                if intersects(manufacturer.(f), manufacturer.(franchises))
+                    dynamic_radius = let uids = State.df.uid[radioactive]
+                        map(uids) do u
+                            min(
+                                pluck(
+                                    dealer_demographics, :uid => ByRow(==(u))
+                                ).closest_third,
+                                miles(RADIUS),
+                            )
+                        end
+                    end
+                    if any(
+                        miles.(Ref(g), State.df.geometry[radioactive]) .≤ dynamic_radius
+                    )
+                        push!(too_close, i)
+                    end
+                end
+            end
+        end
+        return State.df.uid[radioactive ∪ too_close]
+    end
 
     return subset(
         State.df,
@@ -93,7 +113,7 @@ end
 
 # iterate a series of events and maybe dealer uids,
 # and compile a unique list of control dealer uids, windows, and franchises
-function iter_control_dealers(ts::AbstractVector)
+function iter_control_dealers(ts::AbstractVector; dealer_demographics)
     out = DefaultDict{UUID, Set{Tuple{Date, Set{String}}}}(Set{Tuple{Date, Set{String}}})
     for t in ts
         t, dealer_uid = t isa Tuple ? t : (t, nothing)
@@ -111,7 +131,7 @@ function iter_control_dealers(ts::AbstractVector)
         end
 
         ismissing(blackout_period(t)) && continue
-        controls = control_dealers(t; dealer_uid)
+        controls = control_dealers(t; dealer_uid, dealer_demographics)
         for uid in controls.uid
             windows = out[uid]
             for window in eventtime.(eventtime(t), VALID_PERIODS)

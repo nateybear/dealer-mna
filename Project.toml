@@ -1,7 +1,7 @@
 name = "DealerMnA"
 uuid = "bfe56d52-e1e7-4d95-ada5-095d1989e2b8"
-authors = ["Nathan Garder Hattersley <nhattersley@utexas.edu>"]
 version = "0.1.0"
+authors = ["Nathan Garder Hattersley <nhattersley@utexas.edu>"]
 
 [deps]
 ArchGDAL = "c9ce4bd3-c3d5-55b8-8973-c0e20141b8c3"
@@ -75,6 +75,7 @@ Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 ProgressMeter = "92933f4c-e287-5a05-a399-4b506db050ca"
 PyCall = "438e738f-606a-5dbb-bf0a-cddfbfd45ab0"
 PyPlot = "d330b81b-6aea-500a-939a-2ce795aea3ee"
+RCall = "6f49c342-dc21-5d91-9882-a32aef131414"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Rasters = "a3a2b9e3-a471-40c9-b274-f788e487c689"
 Reexport = "189a3867-3050-52da-a836-e630ba90ab69"
@@ -125,6 +126,7 @@ Optim = "1.13.2"
 PlotlyKaleido = "2.3.0"
 PrecompileTools = "1.2.1"
 PyPlot = "2.11.6"
+RCall = "0.14.9"
 Random = "1.11.0"
 Reexport = "1.2.2"
 Splines2 = "0.2.1"

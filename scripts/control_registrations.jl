@@ -14,6 +14,8 @@ with_logging() do
         t = transactions,
     )
 
+    dealer_demographics = DataFrame(Arrow.Table(snakemake.input["dealer_demographics"]))
+
     iter = if haskey(snakemake.input, "dealer_uids")
         dealer_uids = DataFrame(
             transaction_uid = collect(keys(snakemake.input["dealer_uids"])),
@@ -30,10 +32,12 @@ with_logging() do
         transactions
     end
 
-    controls = Empirics.iter_control_dealers(zip(iter.t, iter.dealer_uid))
+    controls = Empirics.iter_control_dealers(
+        collect(zip(iter.t, iter.dealer_uid)); dealer_demographics
+    )
 
     open(Arrow.Writer, snakemake.output[1]) do out_writer
-        for r in eachrow(controls)
+        for r in controls
             control_regs = Empirics.registrations_in_window(
                 r.window; r.dealer_uids, r.franchises
             )

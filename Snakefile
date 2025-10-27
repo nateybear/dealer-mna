@@ -293,6 +293,7 @@ rule data_control_registrations:
         price_table="data/price_table.arrow",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
+        dealer_demographics="data/dealer_demographics.arrow",
     output:
         "data/control/treated_dealers.arrow",
     log:
@@ -361,14 +362,6 @@ rule data_control_registrations_related:
         )
 
 
-def get_all_treated_registrations(wildcards):
-    """Get all treated dealer registration files"""
-    return [
-        "data/treated/treated_dealers.arrow",
-        "data/control/treated_dealers.arrow",
-    ]
-
-
 def get_related_dealerships(wildcards):
     """Get all related dealership files"""
     transaction_uids = get_transaction_uids()
@@ -433,27 +426,25 @@ def get_all_related_dealerships(wildcards):
     return list(out)
 
 
-def get_all_related_registrations(wildcards):
-    """Get all registration files including treated dealers and related groups"""
-    # With the new approach, we have single arrow files for each group
-    return [
-        "data/treated/treated_dealers.arrow",
-        "data/control/treated_dealers.arrow",
-        "data/treated/buyer.arrow",
-        "data/treated/seller.arrow",
-        "data/treated/closest_franchise.arrow",
-        "data/treated/closest_any.arrow",
-        "data/control/buyer.arrow",
-        "data/control/seller.arrow",
-        "data/control/closest_franchise.arrow",
-        "data/control/closest_any.arrow",
-    ]
+def get_all_related_dealerships(wildcards):
+    """Get all related dealership files"""
+    transaction_uids = get_transaction_uids()
+    out = set()
+    for t in transaction_uids.itertuples():
+        out.add(f"data/affiliated_dealerships/buyer_group_{t.transaction_uid}.txt")
+        out.add(f"data/affiliated_dealerships/seller_group_{t.transaction_uid}.txt")
+        out.add(
+            f"data/closest_dealerships/{t.transaction_uid}_{t.dealer_uid}_franchise.txt"
+        )
+        out.add(f"data/closest_dealerships/{t.transaction_uid}_{t.dealer_uid}_any.txt")
+    return list(out)
 
 
 rule data_all_treated_registrations:
     input:
         "data/transaction_uids.csv",
-        get_all_treated_registrations,
+        "data/treated/treated_dealers.arrow",
+        "data/control/treated_dealers.arrow",
 
 
 # these generate sets of uids for each transaction
@@ -540,7 +531,8 @@ rule data_treatment_effect_overall:
         dealers_init="data/dealers_init.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
-        registrations=get_all_treated_registrations,
+        treated_registrations="data/treated/treated_dealers.arrow",
+        control_registrations="data/control/treated_dealers.arrow",
         transaction_uids="data/transaction_uids.csv",
     output:
         treatment_effects="data/treatment_effects/overall.arrow",
@@ -566,7 +558,8 @@ rule data_treatment_effect_cut:
         dealers_init="data/dealers_init.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
-        registrations=get_all_treated_registrations,
+        treated_registrations="data/treated/treated_dealers.arrow",
+        control_registrations="data/control/treated_dealers.arrow",
         transaction_uids="data/transaction_uids.csv",
     output:
         treatment_effects="data/treatment_effects/{cut}.arrow",
@@ -595,10 +588,9 @@ rule data_group_market_share_changes:
     input:
         "scripts/group_market_share_changes.jl",
         "data/statistics.txt",
-        "data/transaction_uids.csv",
         "data/related_dealerships.txt",
         "src/empirics/market_share.jl",
-        related_registrations=get_all_related_registrations,
+        get_all_related_dealerships,
         dealers_init="data/dealers_init.jld2",
         transaction_uids="data/transaction_uids.csv",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
@@ -620,7 +612,10 @@ rule data_treatment_effect_groups:
     input:
         "scripts/treatment_effect_groups.jl",
         "data/related_dealerships.txt",
-        related_registrations=get_all_related_registrations,
+        treated_buyer="data/treated/buyer.arrow",
+        control_buyer="data/control/buyer.arrow",
+        treated_seller="data/treated/seller.arrow",
+        control_seller="data/control/seller.arrow",
         group_market_share_changes="data/group_market_share_changes.arrow",
         dealer_demographics="data/dealer_demographics.arrow",
     output:
@@ -639,22 +634,29 @@ rule data_treatment_effect_groups:
 
 
 rule data_treatment_effect_closest:
+    wildcard_constraints:
+        group="(franchise|any)",
     input:
         "scripts/treatment_effect_closest.jl",
         get_related_dealerships,
-        get_all_related_registrations,
+        treated_registrations="data/treated/closest_{group}.arrow",
+        control_registrations="data/control/closest_{group}.arrow",
         transaction_uids="data/transaction_uids.csv",
         dealers_init="data/dealers_init.jld2",
         extras="data/treatment_effects/overall_extras.jld2",
         dealer_demographics="data/dealer_demographics.arrow",
     output:
-        treatment_effects="data/treatment_effects/closest.arrow",
-        extra_stats="data/treatment_effects/closest_extras.jld2",
+        treatment_effects="data/treatment_effects/closest_{group}.arrow",
+        extra_stats="data/treatment_effects/closest_{group}_extras.jld2",
     log:
-        "logs/treatment_effect_closest.log",
+        "logs/treatment_effect_closest_{group}.log",
     run:
         julia(
-            "scripts/treatment_effect_closest.jl", input=input, output=output, log=log
+            "scripts/treatment_effect_closest.jl",
+            input=input,
+            output=output,
+            log=log,
+            wildcards=wildcards,
         )
 
 

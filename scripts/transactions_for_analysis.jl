@@ -1,4 +1,5 @@
 using DealerMnA
+using Combinatorics
 
 !isempty(ARGS) && snakemake!(ARGS[1])
 
@@ -15,13 +16,32 @@ with_logging() do
             treated_registrations = Empirics.treated_registrations(t)
             controls = Empirics.control_dealers(t)
             if !ismissing(treated_registrations) &&
-                treated_registrations.τ ⊇ Empirics.VALID_PERIODS &&
-                !isempty(controls)
+                !isempty(controls) &&
+                treated_registrations.τ ⊇ Empirics.VALID_PERIODS
                 @info "Transaction $(t.uid) has registrations before and after"
                 push!(out, t)
             end
         end
     end
+
+    # find multiple transactions on one dealership
+    doubled_transactions = Set{UUID}()
+    for (i, j) in combinations(out, 2)
+        if !isempty(
+            intersect(
+                Dealers.State.df.uid[Dealers.dealer_idxs(i)],
+                Dealers.State.df.uid[Dealers.dealer_idxs(j)],
+            ),
+        )
+            push!(doubled_transactions, i.uid)
+            push!(doubled_transactions, j.uid)
+        end
+    end
+
+    @info "Removing $(length(doubled_transactions)) transactions that share a dealership with another transaction" doubled_transactions
+
+    out = filter(!in(doubled_transactions), out)
+
     JLD2.save_object(
         snakemake.output[1],
         out,
