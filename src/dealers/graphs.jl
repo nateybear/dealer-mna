@@ -117,6 +117,25 @@ function insert_entity!(
         end
         g[name, controlling_entity["name"]] = ["controlling entity"]
     end
+
+    # check if we have a company name that we can link to
+    company_name = get(company_data, "company_name", nothing)
+    if !isnothing(company_name) && company_name != name
+        if !haskey(g, company_name)
+            insert_entity!(g; name = company_name, company_id, jurisdiction_code)
+        end
+        g[name, company_name] = ["also known as"]
+    end
+    alternative_names = get(company_data, "alternative_names", nothing)
+    if !isnothing(alternative_names)
+        for alt_name in alternative_names
+            if !haskey(g, alt_name)
+                insert_entity!(g; name = alt_name, company_id, jurisdiction_code)
+            end
+            g[name, alt_name] = ["also known as"]
+        end
+    end
+    return g
 end
 
 function insert_board!(g, (dealer, board))

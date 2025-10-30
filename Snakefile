@@ -668,10 +668,7 @@ rule data_model_frames:
         new_registrations="data/arrow/new_registrations.arrow",
         price_table="data/price_table.arrow",
     output:
-        distances="data/model_frames/distances.jld2",
-        agent_data="data/model_frames/agent_data.arrow",
-        product_data="data/model_frames/product_data.arrow",
-        counts="data/model_frames/counts.arrow",
+        "data/model_frames.jld2",
     log:
         "logs/model_frames.log",
     run:
