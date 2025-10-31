@@ -10,7 +10,7 @@ function δ(params::AbstractVector, model::DemandModel)::SparseArray{Float32, 5}
     # adjust by trim parameters (trim ≥ 0)
     θs::Vector{Float32} = @pull trim_params params model
 
-    nth(x::T, n::Int64) where T = last(first(x, n))::T
+    nth(x::NTuple{N, T}, n::Int64) where {N, T} = last(first(x, n))::T
     @inbounds for (θ, idxs) in zip(partition(θs, 2), values(model.product_lookup.make))
         iks = nth.(Tuple.(idxs), 3) # get trim ranks for these indices
         @inline ks = nth.(Ref(keys(model.product_lookup.k)), iks)
