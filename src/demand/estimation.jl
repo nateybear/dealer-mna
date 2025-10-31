@@ -144,11 +144,11 @@ function loglikelihood(
             # log mean choice probabilities
             grid_keys::Vector{CartesianIndex{4}} = collect(nonzero_keys(grid))
             grid[grid_keys] = log.(grid[grid_keys])
-            grid_reshape::SparseVector{Float32} = reshape(grid, :)
+            grid_reshape::SparseArray{Float32, 1} = reshape(grid, :)
 
             # pull counts for zip z
             iz = searchsortedfirst(collect(keys(model.counts_lookup.z)), z)
-            counts::SparseVector{Float32} = reshape(model.counts[iz, :, :, :, :], :)
+            counts::SparseArray{Float32, 1} = reshape(model.counts[iz, :, :, :, :], :)
 
             # log likelihood of all models, trims, quarters, firms for zip z
             Float32(dot(counts, grid_reshape))
