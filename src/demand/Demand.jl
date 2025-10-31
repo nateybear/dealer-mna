@@ -25,6 +25,7 @@ using Base.Threads: @threads
 using SparseArrayKit
 using TensorOperations: tensorcontract
 using Folds
+using FoldsThreads
 
 const PRODUCT_ATTRIBUTES = [:domestic]
 const DEMOGRAPHIC_ATTRIBUTES = [:median_earnings_inv, :urban_pct, :black_pct, :hispanic_pct]
@@ -47,12 +48,17 @@ ProductInfo = @NamedTuple begin
     g::UUID
 end
 
-AgentInfo = NamedTuple{tuple(DEMOGRAPHIC_ATTRIBUTES..., :M), NTuple{length(DEMOGRAPHIC_ATTRIBUTES) + 1, Float32}}
+AgentInfo = NamedTuple{
+    tuple(DEMOGRAPHIC_ATTRIBUTES..., :M),
+    NTuple{length(DEMOGRAPHIC_ATTRIBUTES) + 1, Float32},
+}
 
 # for a given key, return the list of Cartesian indices in the sparse array
 # where that key appears
 Lookup{N, T} = DefaultOrderedDict{T, Vector{CartesianIndex{N}}}
-Lookup{N, T}() where {N, T} = DefaultOrderedDict{T, Vector{CartesianIndex{N}}}(Vector{CartesianIndex{N}})
+function Lookup{N, T}() where {N, T}
+    return DefaultOrderedDict{T, Vector{CartesianIndex{N}}}(Vector{CartesianIndex{N}})
+end
 
 ProductLookup = @NamedTuple begin
     t::Lookup{4, Tuple{Int64, Int64}} # (year, quarter)

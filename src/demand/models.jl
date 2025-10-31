@@ -1,21 +1,17 @@
+const MUTEX = ReentrantLock()
+
 abstract type AbstractCoefType end
 abstract type AbstractDemandModel end
 
 struct RandomCoefType <: AbstractCoefType
     draws::Vector{Float32} # S-vector
-    grid::SparseArray{Float32, 3} # S x T × (J * F * K + 1), last slice is outside good
 end
-function RandomCoefType(S::Int64, T, J::Int64)
-    return RandomCoefType(rand(Normal(0, 1), S), SparseArray{Float32}(undef, (S, T, J + 1)))
-end
+RandomCoefType(S::Int64, T, J::Int64) = RandomCoefType(rand(Normal(0, 1), S))
 
 struct FixedCoefType <: AbstractCoefType
     draws::Vector{Float32} # 1-vector
-    grid::SparseArray{Float32, 3} # 1 x T × (J * F * K + 1), last column is outside good
 end
-function FixedCoefType(::Int64, T::Int64, J::Int64)
-    return FixedCoefType(zeros(Float32, 1), SparseArray{Float32}(undef, (1, T, J + 1)))
-end
+FixedCoefType(::Int64, T::Int64, J::Int64) = FixedCoefType(zeros(Float32, 1))
 FixedCoefType(J::Int64) = FixedCoefType(1, J)
 
 struct DemandModel{T <: AbstractCoefType} <: AbstractDemandModel
@@ -121,7 +117,9 @@ function δ(params::AbstractVector, model::AbstractDemandModel)
 end
 
 @memoize function x_matrix(model)
-    out = SparseArray{Float32}(undef, (size(model.product_info)..., n_product_attributes(model) + 1)) # splat product info into last dimension
+    out = SparseArray{Float32}(
+        undef, (size(model.product_info)..., n_product_attributes(model) + 1)
+    ) # splat product info into last dimension
     for idx in nonzero_keys(model.product_info)
         info = model.product_info[idx]
         out[Tuple(idx)..., :] .= [info[PRODUCT_ATTRIBUTES]..., info.p]
@@ -147,7 +145,9 @@ function μ(params, model::DemandModel{FixedCoefType}, zip_code)
 
     # add distance disutility
     for (uid, dist) in zip(names(dist_f, 1), dist_f)
-        idxs = model.product_lookup.f[uid]
+        idxs = lock(MUTEX) do
+            model.product_lookup.f[uid] # sometimes can resize? lock for memory safety
+        end
         for idx in idxs
             out[1, Tuple(idx)...] -= exp.(η[1] .+ η[2] * dist)
         end
@@ -178,7 +178,9 @@ function loglikelihood(
         collect(keys(model.agent_data))
     end
     δ̂ = δ(params, model) # include mean utilities and adjustment for trim 1 × T × (J * F * K)
-    return Folds.mapreduce(+, zips, ThreadedEx(simd=true)) do z
+    blas_threads = BLAS.get_num_threads()
+    BLAS.set_num_threads(1)
+    out = Folds.mapreduce(+, zips, WorkStealingEx(simd = true)) do z
         grid = δ̂ + μ(params, model, z) # (S x T × J × F × K)
         CCPs!(model, grid) # choice probabilities (S x J * T * F)
         # TODO: take mean across first dimension with tensorcontract
@@ -188,6 +190,8 @@ function loglikelihood(
         counts = reshape(model.counts[iz, :, :, :, :], :)
         dot(counts, reshape(grid, :)) # log likelihood of all models, trims, quarters, firms for zip z
     end
+    BLAS.set_num_threads(blas_threads)
+    return out
 end
 
 function CCPs!(model, grid)
@@ -196,8 +200,8 @@ function CCPs!(model, grid)
             idxs = map(t -> CartesianIndex(i, t...), Tuple.(ts))
             u = maximum(grid[idxs])
             outside_option = exp(-u)
-            grid[idxs] .= exp.(grid[idxs] .- u)
-            grid[idxs] ./= sum(grid[idxs]) + outside_option
+            grid[idxs] = exp.(grid[idxs] .- u)
+            grid[idxs] /= sum(grid[idxs]) + outside_option
         end
     end
     return nothing
