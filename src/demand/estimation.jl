@@ -122,7 +122,7 @@ function loglikelihood(
             # utility up to idiosyncratic error (S x T × J × F × K)
             μ̂ = μ(params, model, z)
 
-            grid = if size(μ̂, 1) > 1
+            grid::SparseArray{Float32, 4} = if size(μ̂, 1) > 1
                 out = similar(μ̂)
                 @inbounds for s in 1:size(μ̂, 1)
                     for idx in nonzero_keys(δ̂)
@@ -139,12 +139,12 @@ function loglikelihood(
             CCPs!(model, grid)
 
             # Take mean across first dimension
-            grid::SparseArray{Float32, 5} = tensorcontract(mean_vec, (-1,), grid, (-1, 2, 3, 4, 5))
+            grid_mean::SparseArray{Float32, 4} = tensorcontract(mean_vec, (-1,), grid, (-1, 2, 3, 4, 5))
 
             # log mean choice probabilities
-            grid_keys = Vector{CartesianIndex{4}}(nonzero_keys(grid))
-            grid[grid_keys] = log.(grid[grid_keys])
-            grid_reshape::SparseVector{Float32} = reshape(grid, :)
+            grid_keys = Vector{CartesianIndex{4}}(nonzero_keys(grid_mean))
+            grid_mean[grid_keys] = log.(grid_mean[grid_keys])
+            grid_reshape::SparseVector{Float32} = reshape(grid_mean, :)
 
             # pull counts for zip z
             iz = searchsortedfirst(collect(keys(model.counts_lookup.z)), z)
