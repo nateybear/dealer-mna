@@ -11,7 +11,7 @@ function δ(params::AbstractVector, model::AbstractDemandModel)
     θs = @pull trim_params params model
 
     nth(x, n) = last(first(x, n))
-    for (θ, idxs) in zip(partition(θs, 2), values(model.product_lookup.make))
+    @inbounds for (θ, idxs) in zip(partition(θs, 2), values(model.product_lookup.make))
         iks = nth.(Tuple.(idxs), 3) # get trim ranks for these indices
         ks = nth.(Ref(keys(model.product_lookup.k)), iks)
         deltas[idxs] .*= 1 .+ quantile.(Gamma(abs.(θ)...), ks)
@@ -21,7 +21,7 @@ function δ(params::AbstractVector, model::AbstractDemandModel)
 end
 
 # demographic/product attribute interaction, demographic/price and random coeff interaction, distance disutility
-function μ(params, model::DemandModel{FixedCoefType}, zip_code)
+function μ(params, model::AbstractDemandModel, zip_code)
     Πᵦ = @pull demo_product_params params model # (n_demo x n_product)
     Πᵦ = reshape(Πᵦ, n_demographics(model), n_product_attributes(model)) # (n_demo × n_product)
     Πₚ = @pull demo_price_params params model # (n_demo)
@@ -37,7 +37,7 @@ function μ(params, model::DemandModel{FixedCoefType}, zip_code)
     out = tensorcontract(x_j, (1, 2, 3, 4, 5, -1), SparseArray(Π'D_i), (-1,))
 
     # add distance disutility
-    for (uid, dist) in zip(names(dist_f, 1), dist_f)
+    @inbounds for (uid, dist) in zip(names(dist_f, 1), dist_f)
         idxs = lock(MUTEX) do
             model.product_lookup.f[uid] # sometimes can resize? lock for memory safety
         end
@@ -46,9 +46,57 @@ function μ(params, model::DemandModel{FixedCoefType}, zip_code)
         end
     end
 
-    # do not add random coefficients :)
+    # add random utility (or zero for fixed coef model)
+    # S × T × J × K × F
+    ru = randomutility(params, model)
+    S = size(ru, 1)
 
+    if S > 1
+        # Expand out to S dimensions and add random utility only to existing sparse entries
+        expanded_out = similar(ru)
+
+        # Copy existing entries and add random utility
+        @inbounds for s in 1:S
+            for idx in nonzero_keys(out)
+                (_, i...) = Tuple(idx)
+                expanded_out[s, i...] = out[idx]
+            end
+        end
+
+        expanded_out += ru
+
+        return expanded_out
+    else
+        return out
+    end
+end
+
+function randomutility(_, ::DemandModel{FixedCoefType})
+    return reshape(SparseArray([0.0f0]), ones(Int8, 5)...)
+end
+function randomutility(params, model::DemandModel{RandomCoefType})
+    σ = @pull random_coefs params model # (1) for price
+    σ = abs(only(σ))
+    p = x_matrix(model)[:, :, :, :, :, end] # extract price from x_matrix
+    S = length(model.u.draws)
+    out = SparseArray{Float32}(undef, (S, size(p)[2:end]...))
+    @inbounds for s in 1:S
+        for idx in nonzero_keys(p)
+            (_, i...) = Tuple(idx)
+            out[s, i...] = p[idx] * σ * model.u.draws[s]
+        end
+    end
     return out
+end
+
+function with_blas_single_threading(f)
+    old = BLAS.get_num_threads()
+    BLAS.set_num_threads(1)
+    try
+        f()
+    finally
+        BLAS.set_num_threads(old)
+    end
 end
 
 # loglikelihood for all models, trims, quarters, dealers
@@ -60,25 +108,53 @@ function loglikelihood(
     else
         collect(keys(model.agent_data))
     end
-    δ̂ = δ(params, model) # include mean utilities and adjustment for trim 1 × T × (J * F * K)
-    blas_threads = BLAS.get_num_threads()
-    BLAS.set_num_threads(1)
-    out = Folds.mapreduce(+, zips, WorkStealingEx(simd = true)) do z
-        grid = δ̂ + μ(params, model, z) # (S x T × J × F × K)
-        CCPs!(model, grid) # choice probabilities (S x J * T * F)
-        # TODO: take mean across first dimension with tensorcontract
-        grid_keys = collect(nonzero_keys(grid))
-        grid[grid_keys] = log.(grid[grid_keys])
-        iz = searchsortedfirst(collect(keys(model.counts_lookup.z)), z)
-        counts = reshape(model.counts[iz, :, :, :, :], :)
-        dot(counts, reshape(grid, :)) # log likelihood of all models, trims, quarters, firms for zip z
+
+    # mean utilities and trim adjustments (1 × T × J × F × K)
+    δ̂ = δ(params, model)
+
+    mean_vec = SparseArray(ones(Float32, size(model.u.draws)))
+    mean_vec /= size(model.u.draws, 1)
+
+    with_blas_single_threading() do
+        Folds.mapreduce(+, zips, WorkStealingEx(simd = true)) do z
+            # utility up to idiosyncratic error (S x T × J × F × K)
+            μ̂ = μ(params, model, z)
+
+            grid = if size(μ̂, 1) > 1
+                out = similar(μ̂)
+                @inbounds for s in 1:size(μ̂, 1)
+                    for idx in nonzero_keys(δ̂)
+                        (_, i...) = Tuple(idx)
+                        out[s, i...] = δ̂[1, i...]
+                    end
+                end
+                out + μ̂
+            else
+                δ̂ + μ̂
+            end
+
+            # choice probabilities (S x T × J × F × K)
+            CCPs!(model, grid)
+
+            # Take mean across first dimension
+            grid = tensorcontract(mean_vec, (-1,), grid, (-1, 2, 3, 4, 5))
+
+            # log mean choice probabilities
+            grid_keys = collect(nonzero_keys(grid))
+            grid[grid_keys] = log.(grid[grid_keys])
+
+            # pull counts for zip z
+            iz = searchsortedfirst(collect(keys(model.counts_lookup.z)), z)
+            counts = reshape(model.counts[iz, :, :, :, :], :)
+
+            # log likelihood of all models, trims, quarters, firms for zip z
+            dot(counts, reshape(grid, :))
+        end
     end
-    BLAS.set_num_threads(blas_threads)
-    return out
 end
 
 function CCPs!(model, grid)
-    for ts in values(model.product_lookup.t)
+    @inbounds for ts in values(model.product_lookup.t)
         for i in 1:size(grid, 1)
             idxs = map(t -> CartesianIndex(i, t...), Tuple.(ts))
             u = maximum(grid[idxs])

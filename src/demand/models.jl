@@ -32,7 +32,7 @@ function DemandModel{T}(;
     counts_lookup,
 ) where {T <: AbstractCoefType}
     u = T(
-        250, # number of simulation draws
+        100, # number of simulation draws
         size(product_info, 1), # number of (quarter, dealer, model, trim) combinations
         prod(size(product_info)[2:4]),
     )

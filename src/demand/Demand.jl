@@ -23,7 +23,7 @@ using LinearAlgebra
 using StatsBase
 using Base.Threads: @threads
 using SparseArrayKit
-using TensorOperations: tensorcontract
+using TensorOperations: tensorcontract, tensorproduct
 using Folds
 using FoldsThreads
 
