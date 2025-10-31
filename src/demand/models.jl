@@ -82,7 +82,7 @@ macro pull(name, params, model)
         n_before = mapreduce(+, first(ORDER, i - 1), init = 0) do f
             f($(esc(model)))
         end
-        @view $(esc(params))[n_before .+ (1:$fname($(esc(model))))]
+        Vector{Float32}($(esc(params))[n_before .+ (1:$fname($(esc(model))))])
     end
 end
 
