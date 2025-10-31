@@ -28,7 +28,7 @@ function μ(params, model::AbstractDemandModel, zip_code)::SparseArray{Float32, 
     Π = hcat(Πᵦ, Πₚ) # n_demo x (n_product + 1)
 
     x_j = x_matrix(model) # T × J × K × F × (n_product + price)
-    D_i = Vector{Float32}(model.agent_data[zip_code][DEMOGRAPHIC_ATTRIBUTES]) # n_demo-vector
+    D_i::Vector{Float32} = collect(model.agent_data[zip_code][DEMOGRAPHIC_ATTRIBUTES]) # n_demo-vector
 
     dist_f = model.distances[zip_code, :] # 1 x F
 
