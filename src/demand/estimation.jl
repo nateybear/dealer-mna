@@ -22,8 +22,7 @@ end
 
 # demographic/product attribute interaction, demographic/price and random coeff interaction, distance disutility
 function μ(params, model::AbstractDemandModel, zip_code)::SparseArray{Float32, 5}
-    Πᵦ::Vector{Float32} = @pull demo_product_params params model # (n_demo x n_product)
-    Πᵦ::Matrix{Float32} = reshape(Πᵦ, n_demographics(model), n_product_attributes(model)) # (n_demo × n_product)
+    Πᵦ::Matrix{Float32} = reshape(@pull(demo_product_params, params, model), n_demographics(model), n_product_attributes(model)) # (n_demo × n_product)
     Πₚ = @pull demo_price_params params model # (n_demo)
     η = @pull dist_params params model # (2)
     Π = hcat(Πᵦ, Πₚ) # n_demo x (n_product + 1)
