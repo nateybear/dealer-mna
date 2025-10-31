@@ -142,7 +142,7 @@ function loglikelihood(
             grid = tensorcontract(mean_vec, (-1,), grid, (-1, 2, 3, 4, 5))
 
             # log mean choice probabilities
-            grid_keys = Vector{CartesianIndex{4}}(nonzero_keys(grid))
+            grid_keys::Vector{CartesianIndex{4}} = collect(nonzero_keys(grid))
             grid[grid_keys] = log.(grid[grid_keys])
             grid_reshape::SparseVector{Float32} = reshape(grid, :)
 
