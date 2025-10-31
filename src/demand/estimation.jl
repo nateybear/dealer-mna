@@ -4,7 +4,7 @@ function δ(params::AbstractVector, model::DemandModel)::SparseArray{Float32, 5}
     deltas = similar(model.product_info, Float32)
 
     @inbounds for (idxs, delta) in zip(values(model.product_lookup.tjf), guesses)
-        deltas[idxs] += delta
+        deltas[idxs] .= delta
     end
 
     # adjust by trim parameters (trim ≥ 0)
