@@ -139,7 +139,7 @@ function loglikelihood(
             CCPs!(model, grid)
 
             # Take mean across first dimension
-            grid::SparseArray{Float32, 4} = tensorcontract(mean_vec, (-1,), grid, (-1, 2, 3, 4, 5))
+            grid::SparseArray{Float32, 5} = tensorcontract(mean_vec, (-1,), grid, (-1, 2, 3, 4, 5))
 
             # log mean choice probabilities
             grid_keys = Vector{CartesianIndex{4}}(nonzero_keys(grid))
