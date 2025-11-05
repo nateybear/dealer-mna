@@ -1,5 +1,3 @@
-const MUTEX = ReentrantLock()
-
 abstract type AbstractCoefType end
 abstract type AbstractDemandModel end
 

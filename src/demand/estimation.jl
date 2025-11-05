@@ -37,9 +37,8 @@ function μ(params, model::AbstractDemandModel, zip_code)::SparseArray{Float32, 
 
     # add distance disutility
     @inbounds for (uid, dist) in zip(names(dist_f, 1), dist_f)
-        idxs = lock(MUTEX) do
-            model.product_lookup.f[uid] # sometimes can resize? lock for memory safety
-        end
+        # regular getindex dispatches to a method that can sometimes resize. Not thread safe!
+        idxs = get(model.product_lookup.f, uid, Vector{CartesianIndex{4}}())
         for idx in idxs
             out[1, Tuple(idx)...] -= exp.(η[1] .+ η[2] * dist)
         end
