@@ -13,6 +13,9 @@ struct UniformWeight end
 end
 (l::LinearWeight)(d) = max(0, 1 - d / l.max_distance)
 
+max_distance(::UniformWeight) = 10_000mi # Oh I would walk 10,000 miles...
+max_distance(l::LinearWeight) = l.max_distance
+
 function total_population(id::UUID, distance_weight = LinearWeight())
     idx = findfirst(==(id), State.df.uid)
     return total_population(State.df[idx, :], distance_weight)

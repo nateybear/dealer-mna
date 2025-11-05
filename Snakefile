@@ -890,16 +890,17 @@ rule plot_transaction_group_sizes:
         )
 
 
-rule plot_cr4_timeline:
+rule plot_hhi_longitudinal_cross_sectional:
     input:
-        "scripts/plot_cr4_timeline.jl",
+        "scripts/plot_hhi_longitudinal_cross_sectional.jl",
         dealers_init="data/dealers_init.jld2",
     output:
-        "plots/cr4_timeline.png",
+        longitudinal="plots/hhi_timeline.png",
+        cross_sectional="plots/hhi_cross_sectional.png",
     log:
-        "logs/plot_cr4_timeline.log",
+        "logs/plot_hhi_longitudinal_cross_sectional.log",
     run:
-        julia("scripts/plot_cr4_timeline.jl", input=input, output=output, log=log)
+        julia("scripts/plot_hhi_longitudinal_cross_sectional.jl", input=input, output=output, log=log)
 
 
 rule plot_event_study_all:
@@ -1039,7 +1040,8 @@ rule all:
         "plots/registrations_spatial.png",
         "plots/sales_prices_quarterly.png",
         "plots/transaction_group_sizes.png",
-        "plots/cr4_timeline.png",
+        "plots/hhi_timeline.png",
+        "plots/hhi_cross_sectional.png",
         "plots/effect_on_closest.png",
         # Event study plots
         "plots/event_study/overall_mean_price.png",

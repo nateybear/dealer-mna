@@ -1,4 +1,4 @@
-import ..Dealers: timetravel, State, add_distance
+import ..Dealers: timetravel, fuzzytravel, State, add_distance
 using ..Geometry: distance
 import ..Registrations: registrations
 import ..pluck
@@ -104,13 +104,25 @@ function hhi(
     end
 end
 
+# hard code this for missing data
+const OVERALL_SHARE = DataFrame(
+    body_class = ["SUV/Crossover", "Sedan", "Coupe", "Pickup", "Van"],
+    class_weight = [
+        0.42604284545328114,
+        0.23097072302825422,
+        0.027261662148870575,
+        0.2982546800785856,
+        0.01747008929100848,
+    ],
+)
+
 function _market_shares(
     handle,
     focal_dealer,
     period,
     weight,
 )
-    our_registrations = timetravel(minimum(period)) do
+    our_registrations = fuzzytravel(minimum(period)) do
         @> registrations() begin
             subset(
                 :regeffdate => ByRow(in(period)),
@@ -122,21 +134,25 @@ function _market_shares(
 
     # calc market share within each body class, then weight by
     # how important that body class is to the focal dealer
-    body_class_weights = @> our_registrations begin
-        groupby(:body_class)
-        combine(nrow)
-        transform(:nrow => (x -> x ./ sum(x)) => :class_weight)
-        select(Not(:nrow))
+    body_class_weights = if isempty(our_registrations)
+        OVERALL_SHARE
+    else
+        @> our_registrations begin
+            groupby(:body_class)
+            combine(nrow)
+            transform(:nrow => (x -> x ./ sum(x)) => :class_weight)
+            select(Not(:nrow))
+        end
     end
 
     body_classes = body_class_weights.body_class
 
     # compile our group's and other groups' registrations
-    timetravel(maximum(period)) do
+    fuzzytravel(maximum(period)) do
         nearby = subset(
             State.df,
             :geometry =>
-                ByRow(x -> distance(x, focal_dealer.geometry) < weight.max_distance),
+                ByRow(x -> distance(x, focal_dealer.geometry) < max_distance(weight)),
             :active => identity,
             view = true,
         )
