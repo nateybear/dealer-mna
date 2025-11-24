@@ -22,7 +22,7 @@ function total_population(id::UUID, distance_weight = LinearWeight())
 end
 function total_population(d, distance_weight = LinearWeight())
     z = transform(zips(), :geometry => ByRow(g -> distance(g, d.geometry)) => :distance)
-    subset!(z, :distance => ByRow(x -> x < RADIUS))
+    z = subset(z, :distance => ByRow(x -> x < RADIUS))
     return sum(z.population .* distance_weight.(z.distance))
 end
 
@@ -32,8 +32,8 @@ function pop_weighted(id::UUID, col, distance_weight = LinearWeight())
 end
 function pop_weighted(d, col, distance_weight = LinearWeight())
     z = transform(zips(), :geometry => ByRow(g -> distance(g, d.geometry)) => :distance)
-    subset!(z, :distance => ByRow(x -> x < RADIUS))
-    dropmissing!(z, col)
+    z = subset(z, :distance => ByRow(x -> x < RADIUS))
+    z = dropmissing(z, col)
     return mean(z[!, col], w(z.population .* distance_weight.(z.distance)))
 end
 

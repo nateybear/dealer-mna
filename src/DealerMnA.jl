@@ -17,7 +17,7 @@ end
 
 export Geometry,
     Registrations, Dealers, Empirics, Demand, snakemake, snakemake!, with_logging, nonmissing,
-    read_csv, start_daemon, stop_daemon, pluck
+    read_csv, read_arrow, start_daemon, stop_daemon, pluck
 
 using Random
 _rng = MersenneTwister(78735)

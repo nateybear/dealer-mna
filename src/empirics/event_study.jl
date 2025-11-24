@@ -113,12 +113,9 @@ function event_study(
         )
         controls = [
             :median_income,
-            :share_black,
-            :share_hispanic,
             :share_urban,
             :closest_first,
             :closest_second,
-            :closest_third,
         ]
         controls = mapreduce(Term, +, controls)
         rhs = ev_terms + fe(:t) * fe(:manufacturer) + fe(:dealer_uid) + fe(:msa)

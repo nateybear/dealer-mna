@@ -33,7 +33,10 @@ with_logging() do
     open(Arrow.Writer, snakemake.output[1]) do out_writer
         for r in eachrow(iter)
             treated_registrations = Empirics.treated_registrations(r.t; r.dealer_uid)
-            ismissing(treated_registrations) ||
+            if ismissing(treated_registrations)
+                @warn "No treated registrations found for transaction $(r.uid)"; continue
+            end
+                treated_registrations.D = treated_registrations.τ .>= 0
                 Arrow.write(out_writer, treated_registrations)
         end
     end

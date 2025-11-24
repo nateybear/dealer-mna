@@ -6,6 +6,7 @@ using Combinatorics
 with_logging() do
     Dealers.load_from_disk!(snakemake.input["dealers_init"])
     out = Dealers.Transaction[]
+    dealer_demographics = read_arrow(snakemake.input["dealer_demographics"])
     for (i, t) in enumerate(Dealers.Events)
         if t isa Dealers.Transaction &&
             !isempty(Dealers.Diffs[i]) &&
@@ -14,7 +15,7 @@ with_logging() do
             t.buyer_gid != t.seller_gid
             @info "Transaction $(t.uid) is in the analysis period"
             treated_registrations = Empirics.treated_registrations(t)
-            controls = Empirics.control_dealers(t)
+            controls = Empirics.control_dealers(t; dealer_demographics)
             if !ismissing(treated_registrations) &&
                 !isempty(controls) &&
                 treated_registrations.τ ⊇ Empirics.VALID_PERIODS

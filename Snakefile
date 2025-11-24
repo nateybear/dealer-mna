@@ -233,6 +233,7 @@ rule data_transactions_for_analysis:
         price_table="data/price_table.arrow",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
+        dealer_demographics="data/dealer_demographics.arrow",
     output:
         "data/transactions_for_analysis.jld2",
     log:
@@ -894,6 +895,7 @@ rule plot_hhi_longitudinal_cross_sectional:
     input:
         "scripts/plot_hhi_longitudinal_cross_sectional.jl",
         dealers_init="data/dealers_init.jld2",
+        new_registrations="data/arrow/new_registrations.arrow",
     output:
         longitudinal="plots/hhi_timeline.png",
         cross_sectional="plots/hhi_cross_sectional.png",
@@ -1058,11 +1060,11 @@ rule all:
         get_plot_trim_distns,
         # Facts
         "facts.tex",
-        # Demand model things
-        "data/model_frames/distances.jld2",
-        "data/model_frames/agent_data.arrow",
-        "data/model_frames/product_data.arrow",
-        "data/model_frames/counts.arrow",
+        # # Demand model things
+        # "data/model_frames/distances.jld2",
+        # "data/model_frames/agent_data.arrow",
+        # "data/model_frames/product_data.arrow",
+        # "data/model_frames/counts.arrow",
 
 
 # ============================================================================
