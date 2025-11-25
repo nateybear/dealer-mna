@@ -20,7 +20,7 @@ import ..snakemake
             error("Arrow file for new registrations not found: $arrow_file")
         end
 
-        DataFrame(Arrow.Table(fname))
+        read_arrow(fname)
     end
 
 include("zips.jl")

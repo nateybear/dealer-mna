@@ -21,7 +21,7 @@ trimnames(df) = [ "trim", "series", "trim2", "series2" ] ∩ names(df)
 
 @memoize function price_table()
     if !isnothing(snakemake) && haskey(snakemake.input, "price_table")
-        return DataFrame(Arrow.Table(snakemake.input["price_table"]))
+        return read_arrow(snakemake.input["price_table"])
     end
 
     out = DefaultDict{Tuple{String, String, Int64, String}, Mean}(Mean)
