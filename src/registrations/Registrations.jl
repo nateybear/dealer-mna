@@ -8,7 +8,7 @@ using Memoize
 using PartialFunctions
 using Lazy: @>
 
-import ..snakemake
+import ..snakemake, ..read_arrow
 
 @memoize registrations() =
     let arrow_file = datadir("arrow/new_registrations.arrow"),

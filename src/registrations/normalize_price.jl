@@ -19,18 +19,10 @@ end
 
 trimnames(df) = [ "trim", "series", "trim2", "series2" ] ∩ names(df)
 
-@memoize function price_table()
-    if !isnothing(snakemake)
-        return read_arrow(snakemake.input["price_table"])
-    end
-
-    out = DefaultDict{Tuple{String, String, Int64, String}, Mean}(Mean)
+function make_price_table()
+out = DefaultDict{Tuple{String, String, Int64, String}, Mean}(Mean)
     fitmean(v) = fit!(Mean(), v)
-    for s in Arrow.Stream(
-        get(snakemake.input,
-            "new_registrations",
-            datadir("arrow/new_registrations.arrow")),
-    )
+    for s in Arrow.Stream(registrations())
         s = DataFrame(s)
         transform!(s, trimnames(s) => ByRow(normalize_trim) => :extra)
 
@@ -73,6 +65,14 @@ trimnames(df) = [ "trim", "series", "trim2", "series2" ] ∩ names(df)
     end
 
     return out
+end
+
+@memoize function price_table()
+    if !isnothing(snakemake)
+        return read_arrow(snakemake.input["price_table"])
+    end
+
+    return make_price_table()
 end
 
 function normalize_price(df, col_in = :vehsalesprice, col_out = :price_normed)
