@@ -20,7 +20,7 @@ end
 trimnames(df) = [ "trim", "series", "trim2", "series2" ] ∩ names(df)
 
 @memoize function price_table()
-    if !isnothing(snakemake) && haskey(snakemake.input, "price_table")
+    if !isnothing(snakemake)
         return read_arrow(snakemake.input["price_table"])
     end
 
