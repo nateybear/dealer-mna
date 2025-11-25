@@ -321,11 +321,13 @@ rule data_treated_registrations_related:
         price_table="data/price_table.arrow",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
-        dealer_uids=get_related_dealer_map,
+        dealer_uids=lambda w: get_related_dealer_map(w).values(),
     output:
         "data/treated/{group}.arrow",
     log:
         "logs/treated_registrations_{group}.log",
+    params:
+        dealer_uids=get_related_dealer_map,
     run:
         julia(
             "scripts/treated_registrations.jl",
