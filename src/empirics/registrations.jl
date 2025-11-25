@@ -24,6 +24,24 @@ function registrations_in_window(window; dealer_uids = [], franchises = [])
     )
 end
 
+function last_registrations_before(t; dealer_uid = nothing)
+    all_registrations = treated_registrations(t; dealer_uid)
+    ismissing(all_registrations) && return missing
+    return subset(
+        all_registrations,
+        :τ => ByRow(<(0)),
+    )
+end
+
+function first_registrations_after(t; dealer_uid = nothing)
+    all_registrations = treated_registrations(t; dealer_uid)
+    ismissing(all_registrations) && return missing
+    return subset(
+        all_registrations,
+        :τ => ByRow(>=(0)),
+    )
+end
+
 function treated_registrations(t; dealer_uid = nothing)
     window = blackout_period(t)
     ismissing(window) && return missing
