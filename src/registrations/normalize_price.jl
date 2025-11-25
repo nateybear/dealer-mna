@@ -17,10 +17,10 @@ normalize_trim(x...) = @> x begin
     join(" ")
 end
 
-trimnames(df) = [ "trim", "series", "trim2", "series2" ] ∩ names(df)
+trimnames(df) = ["trim", "series", "trim2", "series2"] ∩ names(df)
 
 function make_price_table()
-out = DefaultDict{Tuple{String, String, Int64, String}, Mean}(Mean)
+    out = DefaultDict{Tuple{String, String, Int64, String}, Mean}(Mean)
     fitmean(v) = fit!(Mean(), v)
     for s in Arrow.Stream(registrations())
         s = DataFrame(s)
@@ -49,11 +49,9 @@ out = DefaultDict{Tuple{String, String, Int64, String}, Mean}(Mean)
     subset!(out, :extra => ByRow(!contains(r"\bWORK\b")))
     subset!(out, :extra => ByRow(!contains(r"\bFLEET\b")))
 
-    function evenly_spaced(x)
-        let n = length(x)
+    evenly_spaced(x) = let n = length(x)
             range(0, 1, length = n + 1) |> (@$ Iterators.take(_, n)) |> collect
         end
-    end
 
     out = @> out begin
         groupby([:make, :model, :model_year])
