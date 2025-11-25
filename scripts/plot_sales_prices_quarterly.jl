@@ -5,7 +5,7 @@ using StatsBase
 !isempty(ARGS) && snakemake!(ARGS[1])
 
 with_logging() do
-    registrations = DataFrame(Arrow.Table(snakemake.input["new_registrations"]))
+    registrations = read_arrow(snakemake.input["new_registrations"])
     select!(registrations, :regeffdate, :vehsalesprice)
     transform!(
         registrations, :regeffdate .=> ByRow.([year, quarterofyear]) .=> [:year, :quarter]

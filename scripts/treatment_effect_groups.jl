@@ -13,7 +13,7 @@ function all_registrations(group_df)
             "data/control/$(r.group)/first_registrations_after_$(r.transaction_uid)_$(r.dealer_uid).arrow",
         ]
     end
-    return DataFrame(Arrow.Table(collect(Iterators.flatten(all_arrow_files))))
+    return read_arrow(collect(Iterators.flatten(all_arrow_files)))
 end
 
 const NS = Ref{Function}()
@@ -40,9 +40,9 @@ function addsplines!(df, col = :change_market_share)
 end
 
 with_logging() do
-    df = DataFrame(Arrow.Table(snakemake.input["group_market_share_changes"]))
+    df = read_arrow(snakemake.input["group_market_share_changes"])
     registrations = all_registrations(df)
-    dealer_demographics = DataFrame(Arrow.Table(snakemake.input["dealer_demographics"]))
+    dealer_demographics = read_arrow(snakemake.input["dealer_demographics"])
     df.reg_uid = df.transaction_uid .* "_" .* df.dealer_uid
     df = transform(df, [:dealer_uid, :transaction_uid] .=> ByRow(UUID), renamecols = false)
     addsplines!(df)

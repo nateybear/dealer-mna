@@ -129,7 +129,7 @@ end
 
 with_logging() do
     Dealers.load_from_disk!(snakemake.input["dealers_init"])
-    coeftable = DataFrame(Arrow.Table(snakemake.input["treatment_effects"]))
+    coeftable = read_arrow(snakemake.input["treatment_effects"])
     transaction_uids = prepare_transaction_uids(
         read_csv(snakemake.input["transaction_uids"]),
         JLD2.load_object(snakemake.input["overall_extras"]),

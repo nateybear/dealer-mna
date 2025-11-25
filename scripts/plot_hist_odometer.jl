@@ -5,7 +5,7 @@ using Loess
 !isempty(ARGS) && snakemake!(ARGS[1])
 
 with_logging() do
-    registrations = DataFrame(Arrow.Table(snakemake.input["registrations"]))
+    registrations = read_arrow(snakemake.input["registrations"])
     select!(registrations, :vehodmtrreading => :odometer, :regeffdate, :model_year)
     registrations = subset(
         registrations,

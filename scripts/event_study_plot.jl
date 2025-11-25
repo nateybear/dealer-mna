@@ -67,7 +67,7 @@ end
 
 with_logging() do
     statistic = Symbol(snakemake.wildcards["statistic"])
-    df = DataFrame(Arrow.Table(snakemake.input["treatment_effect"]))
+    df = read_arrow(snakemake.input["treatment_effect"])
     rename!(df, Symbol("$(statistic)_se") => :se)
     event_study_plot!(df, statistic)
 end

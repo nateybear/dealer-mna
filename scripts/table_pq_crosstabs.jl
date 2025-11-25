@@ -26,7 +26,7 @@ end
 
 with_logging() do
     df = subset(
-        DataFrame(Arrow.Table(snakemake.input["treatment_effects"])),
+        read_arrow(snakemake.input["treatment_effects"]),
         :T => ByRow(≤(-3)),
     )
     extras = JLD2.load_object(snakemake.input["extras"])

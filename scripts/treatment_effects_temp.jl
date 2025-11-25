@@ -30,7 +30,7 @@ with_logging() do
     registrations.cstime = Dealers.cstime.(registrations.t)
     transaction_uids = read_csv(snakemake.input["transaction_uids"])
     mapcols!(ByRow(UUID), transaction_uids)
-    dealer_demographics = DataFrame(Arrow.Table(snakemake.input["dealer_demographics"]))
+    dealer_demographics = read_arrow(snakemake.input["dealer_demographics"])
 
 
 

@@ -67,7 +67,7 @@ function all_registrations(transaction_uids)
             "data/control/closest_dealers/first_registrations_after_$(r.reg_uid).arrow",
         ]
     end
-    return DataFrame(Arrow.Table(collect(Iterators.flatten(all_arrow_files))))
+    return read_arrow(collect(Iterators.flatten(all_arrow_files)))
 end
 
 !isempty(ARGS) && snakemake!(ARGS[1])
@@ -79,7 +79,7 @@ with_logging() do
         JLD2.load_object(snakemake.input["extras"]),
     )
     registrations = all_registrations(transaction_uids)
-    dealer_demographics = DataFrame(Arrow.Table(snakemake.input["dealer_demographics"]))
+    dealer_demographics = read_arrow(snakemake.input["dealer_demographics"])
     heterogeneity_term = ConstantTerm(1) + Term(:distance_log) * Term(:sales_change)
 
     extras, coeftable = Empirics.event_study(

@@ -16,12 +16,12 @@ function fit_plus_std(x, y; digits = 3)
 end
 
 with_logging() do
-    df = DataFrame(Arrow.Table(snakemake.input["treatment_effects"]))
+    df = read_arrow(snakemake.input["treatment_effects"])
     extras = JLD2.load_object(snakemake.input["extras"])
     cut = snakemake.wildcards["cut"]
     cols = [:mean_price, :total_units, :trim_rank, :mean_baseprice, :median_markup]
     transaction_uids = read_csv(snakemake.input["transaction_uids"])
-    dealer_demographics = DataFrame(Arrow.Table(snakemake.input["dealer_demographics"]))
+    dealer_demographics = read_arrow(snakemake.input["dealer_demographics"])
     transform!(
         transaction_uids, names(transaction_uids) .=> ByRow(UUID), renamecols = false
     )

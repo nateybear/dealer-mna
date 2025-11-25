@@ -16,7 +16,7 @@ function fit_plus_std(x, y; digits = 3)
 end
 
 with_logging() do
-    df = DataFrame(Arrow.Table(snakemake.input["treatment_effects"]))
+    df = read_arrow(snakemake.input["treatment_effects"])
     extras = JLD2.load_object(snakemake.input["extras"])
     cols = [:mean_price, :total_units, :trim_rank, :mean_baseprice, :median_markup]
     table = DataFrame(

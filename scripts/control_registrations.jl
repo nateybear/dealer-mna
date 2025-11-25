@@ -14,12 +14,12 @@ with_logging() do
         t = transactions,
     )
 
-    dealer_demographics = DataFrame(Arrow.Table(snakemake.input["dealer_demographics"]))
+    dealer_demographics = read_arrow(snakemake.input["dealer_demographics"])
 
-    iter = if haskey(snakemake.input, "dealer_uids")
+    iter = if haskey(snakemake.params, "dealer_uids")
         dealer_uids = DataFrame(
-            transaction_uid = collect(keys(snakemake.input["dealer_uids"])),
-            dealer_uid = collect(values(snakemake.input["dealer_uids"])),
+            transaction_uid = collect(keys(snakemake.params["dealer_uids"])),
+            dealer_uid = collect(values(snakemake.params["dealer_uids"])),
         )
         transform!(dealer_uids, :transaction_uid => ByRow(UUID) => :transaction_uid)
         transform!(dealer_uids, :dealer_uid => ByRow(readlines) => :dealer_uid)

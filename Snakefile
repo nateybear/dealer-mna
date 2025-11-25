@@ -350,11 +350,13 @@ rule data_control_registrations_related:
         price_table="data/price_table.arrow",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
-        dealer_uids=get_related_dealer_map,
+        dealer_uids=lambda w: get_related_dealer_map(w).values(),
     output:
         "data/control/{group}.arrow",
     log:
         "logs/control_registrations_{group}.log",
+    params:
+        dealer_uids=get_related_dealer_map,
     run:
         julia(
             "scripts/control_registrations.jl",

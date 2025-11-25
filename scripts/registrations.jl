@@ -27,7 +27,7 @@ with_logging() do
 
         # "implicit" filtering since vins are only decoded for registrations with odometer < 250
         vins = select(
-            DataFrame(Arrow.Table(snakemake.input["vins_decoded"])),
+            read_arrow(snakemake.input["vins_decoded"]),
             Not(r"displacement"),
         )
         for fname in shuffle(snakemake.input["registration_files"])

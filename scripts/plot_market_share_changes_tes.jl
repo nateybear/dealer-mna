@@ -14,7 +14,7 @@ function all_regressions(group_df)
             "data/control/$(r.group)/first_registrations_after_$(r.transaction_uid)_$(r.dealer_uid).arrow",
         ]
     end
-    return DataFrame(Arrow.Table(collect(Iterators.flatten(all_arrow_files))))
+    return read_arrow(collect(Iterators.flatten(all_arrow_files)))
 end
 
 const NS = Ref{Function}()
@@ -95,11 +95,11 @@ function spans_from_labels(xs::Vector, labels::Vector)
 end
 
 with_logging() do
-    df = DataFrame(Arrow.Table(snakemake.input["group_market_share_changes"]))
+    df = read_arrow(snakemake.input["group_market_share_changes"])
     calcsplines!(df.change_market_share)
     df.reg_uid = df.transaction_uid .* "_" .* df.dealer_uid
     col = Symbol(snakemake.wildcards["col"])
-    coeftable = DataFrame(Arrow.Table(snakemake.input["treatment_effect"]))
+    coeftable = read_arrow(snakemake.input["treatment_effect"])
     diffs = @> coeftable begin
         subset(:T => ByRow(in([-3, 2])))
         sort(:T, rev = true)
