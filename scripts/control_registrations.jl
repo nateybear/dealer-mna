@@ -42,7 +42,7 @@ with_logging() do
                 r.window; r.dealer_uids, r.franchises
             )
             control_regs.τ .= 0
-            control_regs.D .= 0
+            control_regs.D .= false
             Arrow.write(
                 out_writer,
                 control_regs,

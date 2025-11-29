@@ -41,7 +41,7 @@ with_logging() do
 
     @info "Removing $(length(doubled_transactions)) transactions that share a dealership with another transaction" doubled_transactions
 
-    out = filter(!in(doubled_transactions), out)
+    out = [ t for t in out if !(t.uid in doubled_transactions) ]
 
     JLD2.save_object(
         snakemake.output[1],

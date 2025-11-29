@@ -22,7 +22,7 @@ trimnames(df) = ["trim", "series", "trim2", "series2"] ∩ names(df)
 function make_price_table()
     out = DefaultDict{Tuple{String, String, Int64, String}, Mean}(Mean)
     fitmean(v) = fit!(Mean(), v)
-    for s in Arrow.Stream(registrations())
+    for s in Arrow.Stream(snakemake.input["new_registrations"])
         s = DataFrame(s)
         transform!(s, trimnames(s) => ByRow(normalize_trim) => :extra)
 

@@ -13,3 +13,4 @@ join_lines_based_on_source = true
 format_markdown = true
 separate_kwargs_with_semicolon = false
 pipe_to_function_call = false
+margin = 100

@@ -39,7 +39,21 @@ end
 # Types for the dealer group graph
 include("graphs.jl")
 function add_groups(dealers, col = :business_name)
-    graph = JLD2.load_object(datadir("dealer_groups_graph.jld2"))
+    # JLD2 anonymous function serialization issues
+    graph =
+        let (; graph, vertex_labels, vertex_properties, edge_data, graph_data, default_weight) = JLD2.load_object(
+                datadir("dealer_groups_graph.jld2")
+            )
+            DealerGraph(
+                graph,
+                vertex_labels,
+                vertex_properties,
+                edge_data,
+                graph_data,
+                new_dealer_graph().weight_function, # herein lies the issue
+                default_weight,
+            )
+        end
     l = collect(labels(graph))
     group_ids = DataFrame(business_name = l, group_id = [graph[a].id for a in l])
     return innerjoin(dealers, group_ids, on = col => :business_name)

@@ -1,4 +1,4 @@
-using StatsBase: mean, weights as w, median
+using StatsBase: mean, weights as w, median, mode
 using Distributions: Normal, pdf
 using Dates: Day
 using Lazy: @>
@@ -6,6 +6,10 @@ using DataFrames
 using PartialFunctions
 using Missings
 using FixedEffectModels
+using NamedArrays
+
+numunique(cols...) = cols |> splat(zip) |> unique |> length
+onlyunique = only ∘ unique
 
 const DEFAULT_PERIODS = setdiff(VALID_PERIODS, [0])
 const DEFAULT_DEMOGRAPHICS = [
@@ -26,32 +30,39 @@ const STATISTICS = (
     unique_trims = [:model, :extra] => numunique,
 )
 
-abstract type AbstractEventStudy end
+abstract type AbstractEventStudyConfig end
 
-registrations(::AbstractEventStudy) = error("unimplemented")
-groupcols(::AbstractEventStudy) = [:t, :dealer_uid]
+registrations(::AbstractEventStudyConfig) = error("unimplemented")
+groupcols(::AbstractEventStudyConfig) = [:t, :dealer_uid]
+summarycols(::AbstractEventStudyConfig) = [:τ, :D]
 
 @kwdef struct EventStudyResult{
     N,
-    TExtra = Nothing,
-    TEstimate = Float64,
-    TDidEstimate = Float64,
+    TExtra,
+    TEstimate,
+    TStdErr,
 }
-    periods::NTuple{N, Int8} = DEFAULT_PERIODS
+    periods::NTuple{N, Int8} = Tuple(Int8.(DEFAULT_PERIODS))
     estimates::NTuple{N, TEstimate}
-    std_errs::NTuple{N, TEstimate}
-    did_estimate::TDidEstimate
-    did_stderr::TDidEstimate
+    std_errs::NTuple{N, TStdErr}
+    did_estimate::TEstimate
+    did_stderr::TStdErr
     extras::TExtra = nothing
 end
 
-function make_panel(event_study, (outcol, (incol, f)))
-    @> registrations(event_study) begin
-        groupby(groupcols(event_study))
+function make_panel(es, statistic)
+    (outcol, (incol, f)) = statistic
+    @> registrations(es) begin
+        groupby(groupcols(es))
         combine(
             incol => f => outcol,
-            [:τ, :D, :cstime, :event_time] .=> onlyunique,
+            summarycols(es) .=> onlyunique,
+            nrow => :n,
             renamecols = false,
         )
     end
 end
+
+include("cs_event_study.jl")
+include("homemade_types.jl")
+include("homemade_event_study.jl")

@@ -36,7 +36,7 @@ with_logging() do
             if ismissing(treated_registrations)
                 @warn "No treated registrations found for transaction $(r.uid)"; continue
             end
-                treated_registrations.D = treated_registrations.τ .>= 0
+                treated_registrations.D .= true
                 Arrow.write(out_writer, treated_registrations)
         end
     end
