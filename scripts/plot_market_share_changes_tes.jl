@@ -5,18 +5,6 @@ using Splines2
 
 !isempty(ARGS) && snakemake!(ARGS[1])
 
-function all_regressions(group_df)
-    all_arrow_files = map(eachrow(group_df)) do r
-        [
-            "data/treated/$(r.group)/last_registrations_before_$(r.transaction_uid)_$(r.dealer_uid).arrow",
-            "data/treated/$(r.group)/first_registrations_after_$(r.transaction_uid)_$(r.dealer_uid).arrow",
-            "data/control/$(r.group)/last_registrations_before_$(r.transaction_uid)_$(r.dealer_uid).arrow",
-            "data/control/$(r.group)/first_registrations_after_$(r.transaction_uid)_$(r.dealer_uid).arrow",
-        ]
-    end
-    return read_arrow(collect(Iterators.flatten(all_arrow_files)))
-end
-
 const NS = Ref{Function}()
 
 function calcsplines!(x)
@@ -97,24 +85,8 @@ end
 with_logging() do
     df = read_arrow(snakemake.input["group_market_share_changes"])
     calcsplines!(df.change_market_share)
-    df.reg_uid = df.transaction_uid .* "_" .* df.dealer_uid
     col = Symbol(snakemake.wildcards["col"])
-    coeftable = read_arrow(snakemake.input["treatment_effect"])
-    diffs = @> coeftable begin
-        subset(:T => ByRow(in([-3, 2])))
-        sort(:T, rev = true)
-        groupby(:interaction)
-        combine(col => splat(-) => :diff)
-    end
-    extras = JLD2.load_object(snakemake.input["extra_stats"])
-    col_extras = pluck(extras, :stat => ByRow(==(col)))
-
-    # covariance matrix of all the differences
-    V = let c = reshape(unique(coeftable.interaction), 1, :)
-        spline_mask = coeftable.interaction .== c
-        ∇ = (-(coeftable.T .== -3) .+ (coeftable.T .== 2)) .* spline_mask
-        ∇'col_extras.V * ∇
-    end
+    tes = JLD2.load_object(snakemake.input["treatment_effect"])[col]
 
     x_grid = DataFrame(x = range(extrema(df.change_market_share)..., length = 500))
     addsplines!(x_grid, :x)

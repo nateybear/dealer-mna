@@ -19,6 +19,7 @@ wildcard_constraints:
     folder="[a-z_]+",
     buy_sell="[a-z]+",
     i="[0-9]+",
+    es_specification="(callawaysantanna|weights|controls)"
 
 
 # ============================================================================
@@ -350,6 +351,7 @@ rule data_control_registrations_related:
         price_table="data/price_table.arrow",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
+        dealer_demographics="data/dealer_demographics.arrow",
         dealer_uids=lambda w: get_related_dealer_map(w).values(),
     output:
         "data/control/{group}.arrow",
@@ -429,27 +431,6 @@ def get_all_related_dealerships(wildcards):
         )
         out.add(f"data/closest_dealerships/{t.transaction_uid}_{t.dealer_uid}_any.txt")
     return list(out)
-
-
-def get_all_related_dealerships(wildcards):
-    """Get all related dealership files"""
-    transaction_uids = get_transaction_uids()
-    out = set()
-    for t in transaction_uids.itertuples():
-        out.add(f"data/affiliated_dealerships/buyer_group_{t.transaction_uid}.txt")
-        out.add(f"data/affiliated_dealerships/seller_group_{t.transaction_uid}.txt")
-        out.add(
-            f"data/closest_dealerships/{t.transaction_uid}_{t.dealer_uid}_franchise.txt"
-        )
-        out.add(f"data/closest_dealerships/{t.transaction_uid}_{t.dealer_uid}_any.txt")
-    return list(out)
-
-
-rule data_all_treated_registrations:
-    input:
-        "data/transaction_uids.csv",
-        "data/treated/treated_dealers.arrow",
-        "data/control/treated_dealers.arrow",
 
 
 # these generate sets of uids for each transaction
@@ -539,11 +520,12 @@ rule data_treatment_effect_overall:
         treated_registrations="data/treated/treated_dealers.arrow",
         control_registrations="data/control/treated_dealers.arrow",
         transaction_uids="data/transaction_uids.csv",
+        transactions_for_analysis="data/transactions_for_analysis.jld2",
     output:
-        treatment_effects="data/treatment_effects/overall.arrow",
-        extra_stats="data/treatment_effects/overall_extras.jld2",
+        increasing="data/treatment_effects/overall_increasing_{specification}.jld2",
+        decreasing="data/treatment_effects/overall_decreasing_{specification}.jld2",
     log:
-        "logs/treatment_effects_overall.log",
+        "logs/treatment_effects_overall_{specification}.log",
     run:
         julia(
             "scripts/treatment_effects.jl",
@@ -567,10 +549,9 @@ rule data_treatment_effect_cut:
         control_registrations="data/control/treated_dealers.arrow",
         transaction_uids="data/transaction_uids.csv",
     output:
-        treatment_effects="data/treatment_effects/{cut}.arrow",
-        extra_stats="data/treatment_effects/{cut}_extras.jld2",
+        "data/treatment_effects/{cut}_{specification}.jld2",
     log:
-        "logs/treatment_effects_{cut}.log",
+        "logs/treatment_effects_{cut}_{specification}.log",
     run:
         julia(
             "scripts/treatment_effects.jl",
@@ -584,8 +565,9 @@ rule data_treatment_effect_cut:
 rule data_treatment_effect_cuts:
     input:
         expand(
-            "data/treatment_effects/{cut}.arrow",
+            "data/treatment_effects/{cut}_{specification}.jld2",
             cut=["urban", "exiting_seller"],
+            specification=["weights", "controls"],
         ),
 
 
@@ -624,10 +606,9 @@ rule data_treatment_effect_groups:
         group_market_share_changes="data/group_market_share_changes.arrow",
         dealer_demographics="data/dealer_demographics.arrow",
     output:
-        treatment_effects="data/treatment_effects/groups.arrow",
-        extra_stats="data/treatment_effects/groups_extras.jld2",
+        "data/treatment_effects/groups_{specification}.jld2",
     log:
-        "logs/treatment_effects_groups.log",
+        "logs/treatment_effects_groups_{specification}.log",
     run:
         julia(
             "scripts/treatment_effect_groups.jl",
@@ -648,13 +629,12 @@ rule data_treatment_effect_closest:
         control_registrations="data/control/closest_{group}.arrow",
         transaction_uids="data/transaction_uids.csv",
         dealers_init="data/dealers_init.jld2",
-        extras="data/treatment_effects/overall_extras.jld2",
+        treatment_effect_overall="data/treatment_effects/overall_{specification}.jld2",
         dealer_demographics="data/dealer_demographics.arrow",
     output:
-        treatment_effects="data/treatment_effects/closest_{group}.arrow",
-        extra_stats="data/treatment_effects/closest_{group}_extras.jld2",
+        "data/treatment_effects/closest_{group}_{specification}.jld2",
     log:
-        "logs/treatment_effect_closest_{group}.log",
+        "logs/treatment_effect_closest_{group}_{specification}.log",
     run:
         julia(
             "scripts/treatment_effect_closest.jl",
@@ -702,11 +682,11 @@ rule data_facts:
 rule plot_event_study_overall:
     input:
         "scripts/event_study_plot.jl",
-        treatment_effect="data/treatment_effects/overall.arrow",
+        treatment_effect="data/treatment_effects/overall_{specification}.jld2",
     output:
-        "plots/event_study/overall_{statistic}.png",
+        "plots/event_study/overall_{specification}_{statistic}.png",
     log:
-        "logs/event_study_overall_{statistic}.log",
+        "logs/event_study_overall_{specification}_{statistic}.log",
     run:
         julia(
             "scripts/event_study_plot.jl",
@@ -720,7 +700,7 @@ rule plot_event_study_overall:
 rule plot_diff_in_diff_cornerplot:
     input:
         "scripts/plot_diff_in_diff_cornerplot.jl",
-        extras="data/treatment_effects/overall_extras.jld2",
+        treatment_effect="data/treatment_effects/overall_weights.jld2",
     output:
         "plots/diff_in_diff_cornerplot.png",
     log:
@@ -758,12 +738,11 @@ rule plot_market_share_change_te:
     input:
         "scripts/plot_market_share_changes_tes.jl",
         group_market_share_changes="data/group_market_share_changes.arrow",
-        treatment_effect="data/treatment_effects/groups.arrow",
-        extra_stats="data/treatment_effects/groups_extras.jld2",
+        treatment_effect="data/treatment_effects/groups_{specification}.jld2",
     output:
-        "plots/market_share_change_te_{col}.png",
+        "plots/market_share_change_te_{col}_{specification}.png",
     log:
-        "logs/plot_market_share_change_te_{col}.log",
+        "logs/plot_market_share_change_te_{col}_{specification}.log",
     run:
         julia(
             "scripts/plot_market_share_changes_tes.jl",
@@ -777,7 +756,7 @@ rule plot_market_share_change_te:
 rule plot_market_share_changes_tes:
     input:
         expand(
-            "plots/market_share_change_te_{col}.png",
+            "plots/market_share_change_te_{col}_{specification}.png",
             col=[
                 "mean_price",
                 "median_markup",
@@ -785,6 +764,7 @@ rule plot_market_share_changes_tes:
                 "total_units",
                 "trim_rank",
             ],
+            specification=["weights"],
         ),
 
 

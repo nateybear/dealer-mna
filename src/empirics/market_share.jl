@@ -88,12 +88,13 @@ function hhi(
         end
 
         before_sales = deepcopy(group_sales)
-        before_gid =
+        before_gid = fuzzytravel(minimum(period)) do
             let transacted_dealers = subset(
                     State.df, :uid => ByRow(in(keys(group_remap))), view = true
                 )
                 only(unique(transacted_dealers.gid))
             end
+        end
         before_sales[before_gid] += transacted_sales
 
         after_sales = deepcopy(group_sales)
@@ -125,7 +126,7 @@ function _market_shares(
     our_registrations = fuzzytravel(minimum(period)) do
         @> registrations() begin
             subset(
-                :regeffdate => ByRow(in(period)),
+                :t => ByRow(in(period)),
                 :dlrgdn => ByRow(in(focal_dealer.gdns)),
                 view = true,
             )
@@ -159,7 +160,7 @@ function _market_shares(
 
         nearby_registrations = @> registrations() begin
             subset(
-                :regeffdate => ByRow(in(period)),
+                :t => ByRow(in(period)),
                 :body_class => ByRow(in(body_classes)),
                 view = true,
             )

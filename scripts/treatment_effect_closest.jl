@@ -30,13 +30,7 @@ function prepare_transaction_uids(transaction_uids, extras)
     transaction_uids = DataFrames.flatten(transaction_uids, :closest_dealer_uid)
     transaction_uids.closest_dealer_index = first.(transaction_uids.closest_dealer_uid)
     transaction_uids.closest_dealer_uid = last.(transaction_uids.closest_dealer_uid)
-    transaction_uids.reg_uid =
-        transaction_uids.transaction_uid .* "_" .*
-        transaction_uids.closest_dealer_uid .* "_" .*
-        transaction_uids.dealer_uid
 
-    transaction_uids.treated_reg_uid =
-        transaction_uids.transaction_uid .* "_" .* transaction_uids.dealer_uid
     transform!(
         transaction_uids,
         [:dealer_uid, :transaction_uid, :closest_dealer_uid] .=> ByRow(UUID),
@@ -51,23 +45,9 @@ function prepare_transaction_uids(transaction_uids, extras)
     transform!(transaction_uids, :distance => ByRow(log))
     subset!(transaction_uids, :same_group => ByRow(!))
 
-    sales_extras = pluck(extras, :stat => ByRow(==(:total_sales)))
-    fes = sales_extras.fes
-    select!(fes, :reg_uid, :diff_in_diff => :sales_change)
+    select!(extras, :dealer_uid => :treated_dealer_uid, :diff_in_diff => :sales_change)
 
-    return innerjoin(transaction_uids, fes, on = :treated_reg_uid => :reg_uid)
-end
-
-function all_registrations(transaction_uids)
-    all_arrow_files = map(eachrow(transaction_uids)) do r
-        [
-            "data/treated/closest_dealers/last_registrations_before_$(r.reg_uid).arrow",
-            "data/treated/closest_dealers/first_registrations_after_$(r.reg_uid).arrow",
-            "data/control/closest_dealers/last_registrations_before_$(r.reg_uid).arrow",
-            "data/control/closest_dealers/first_registrations_after_$(r.reg_uid).arrow",
-        ]
-    end
-    return read_arrow(collect(Iterators.flatten(all_arrow_files)))
+    return innerjoin(transaction_uids, extras, on = :dealer_uid)
 end
 
 !isempty(ARGS) && snakemake!(ARGS[1])
@@ -76,26 +56,32 @@ with_logging() do
     Dealers.load_from_disk!(snakemake.input["dealers_init"])
     transaction_uids = prepare_transaction_uids(
         read_csv(snakemake.input["transaction_uids"]),
-        JLD2.load_object(snakemake.input["extras"]),
+        JLD2.load_object(snakemake.input["treatment_effect_overall"])[:total_sales].extras,
     )
-    registrations = all_registrations(transaction_uids)
+    registrations = read_arrow(
+        snakemake.input["treated_registrations"], snakemake.input["control_registrations"]
+    )
     dealer_demographics = read_arrow(snakemake.input["dealer_demographics"])
     heterogeneity_term = ConstantTerm(1) + Term(:distance_log) * Term(:sales_change)
 
-    extras, coeftable = Empirics.event_study(
-        registrations,
-        dealer_demographics,
-        heterogeneity_term,
-        select(
-            transaction_uids,
-            Not(:dealer_uid),
-            :closest_dealer_uid => :dealer_uid,
-            copycols = false,
-        ),
-        how_join = [:reg_uid, :dealer_uid],
-        statistics = [:total_sales],
-    )
+    config = let Config = Empirics.parse_event_study_config(snakemake.wildcards["specification"])
+        Config(
+            registrations = registrations,
+            dealer_demographics = dealer_demographics,
+            interaction_style = Empirics.WithAdditionalInteraction(
+                term = heterogeneity_term,
+                additional_data = select(
+                    transaction_uids,
+                    Not(:dealer_uid),
+                    :closest_dealer_uid => :dealer_uid,
+                    copycols = false,
+                ),
+            ),
+        )
+    end
 
-    JLD2.save_object(snakemake.output["extra_stats"], extras)
-    Arrow.write(snakemake.output["treatment_effects"], coeftable)
+    JLD2.save_object(
+        snakemake.output[1],
+        Empirics.event_study(config, :sales_change => Empirics.DEFAULT_STATISTICS[:sales_change]),
+    )
 end

@@ -3,7 +3,7 @@
     TInteraction <: AbstractInteractionStyle,
     TCovariateStyle <: AbstractCovariateStyle,
 } <: AbstractEventStudyConfig
-    registrations::DataFrame
+    registrations::AbstractDataFrame
     dealer_demographics::DataFrame
     interaction_style::TInteraction = NoInteraction()
     covariate_style::TCovariateStyle = WithRegressionWeights()
@@ -34,6 +34,16 @@ function joinadditional!(panel, es::DIYEventStudyConfig)
     leftjoin!(panel, es.dealer_demographics, on = :dealer_uid => :uid)
     attachadditionaldata!(panel, es.interaction_style)
     attachregressionweights!(panel, es.dealer_demographics, es.covariate_style)
+    addcohorts!(panel)
+    return nothing
+end
+
+function addcohorts!(panel)
+    cohort_join = subset(panel, :τ => ByRow(==( -4)))
+    select!(cohort_join, :dealer_uid, :t => :cohort)
+    unique!(cohort_join)
+    leftjoin!(panel, cohort_join, on = :dealer_uid)
+    panel.cohort .= coalesce.(panel.cohort, Date(1900))
     return nothing
 end
 
@@ -42,9 +52,11 @@ function event_study(es::DIYEventStudyConfig, statistic)
     panel = make_panel(es, statistic)
     joinadditional!(panel, es)
 
+    cohorts = [ d for d in unique(panel.cohort) if d > Date(2000) ]
+
     # run regression
     event_col, _ = statistic
-    formula = event_terms(es.interaction_style) + fes(es.fixed_effect_style)
+    formula = event_terms(es.interaction_style, cohorts) + fes(es.fixed_effect_style)
     formula = add_controls(es.covariate_style, formula)
     formula = Term(event_col) ~ formula
     reg_result = reg(

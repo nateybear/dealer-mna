@@ -21,7 +21,7 @@ end
     T <: Union{AbstractTerm, Tuple{Vararg{<:AbstractTerm}}}, THowJoin
 } <: AbstractInteractionStyle
     term::T
-    additional_data::DataFrame
+    additional_data::AbstractDataFrame
     how_join::THowJoin = :dealer_uid
 end
 const WithInteractionStyle = Union{WithIncludedInteraction, WithAdditionalInteraction}
@@ -38,16 +38,29 @@ function ev_term(critical_τ)
     )
 end
 
+function cohort_term(critical_cohort)
+    return FunctionTerm(
+        cohort -> cohort == critical_cohort,
+        [Term(:cohort)],
+        :(cohort == $critical_cohort),
+    )
+end
+
 _make_multi_formula(t::Tuple) = t
 _make_multi_formula(t) = (t,)
 
-event_terms(::NoInteraction) = mapreduce(ev_term, +, DEFAULT_PERIODS)
-
 import Base.Iterators: product
-function event_terms(interaction::WithInteractionStyle)
-    all_interactions = product(DEFAULT_PERIODS, _make_multi_formula(interaction.term))
-    mapreduce(+, all_interactions) do (critical_τ, term)
-        return ev_term(critical_τ) & term
+function event_terms(::NoInteraction, cohorts)
+    all_cohorts = product(cohorts, DEFAULT_PERIODS)
+    mapreduce(+, all_cohorts) do (critical_cohort, critical_τ)
+        return cohort_term(critical_cohort) & ev_term(critical_τ)
+    end
+end
+
+function event_terms(interaction::WithInteractionStyle, cohorts)
+    all_interactions = product(cohorts, DEFAULT_PERIODS, _make_multi_formula(interaction.term))
+    mapreduce(+, all_interactions) do (critical_cohort, critical_τ, term)
+        return cohort_term(critical_cohort) & ev_term(critical_τ) & term
     end
 end
 
@@ -122,22 +135,51 @@ end
 
 extract_τ(Name) = parse(Int64, match(r"dt\(D, τ, ([-\d]+)\)", Name).captures[1])
 
+extract_cohort(Name) =
+    parse(Date, match(r"cohort == Date\(\"(.*)\"\) & dt", Name).captures[1])
+
 extract_interaction(Name) =
-    if !isnothing(match(r" & ", Name))
-        match(r"^dt\(D, τ, [-\d]+\) & (.*)$", Name).captures[1]
+    if !isnothing(match(r"dt\(.*\) & .*$", Name))
+        match(r"dt\(D, τ, [-\d]+\) & (.*)$", Name).captures[1]
     else
         "1"
     end
 
 function EventStudyResult(
-    ::DataFrame,
+    panel::DataFrame,
     reg_result::FixedEffectModel,
     ::WithInteractionStyle,
 )
     table = DataFrame(coeftable(reg_result))
     table.τ = extract_τ.(table.Name)
+    table.cohort = extract_cohort.(table.Name)
     table.interaction = extract_interaction.(table.Name)
+    nan_mask = .!isnan.(table[!, "Std. Error"])
+    subset!(table, Symbol("Std. Error") => ByRow(!isnan)) # some excluded terms
 
+    cohort_props = @> panel begin
+        subset(:cohort => ByRow(>(Date(2000)))) 
+        groupby(:cohort) 
+        combine(proprow => :weight)
+    end
+
+    # rebalance because of excluded terms
+    table = combine(groupby(table, [:τ, :interaction])) do subdf
+        out = innerjoin(subdf, cohort_props, on = :cohort)
+        out.weight .= out.weight ./ sum(out.weight)
+        return out
+    end
+
+    gtable = groupby(table, [:τ, :interaction])
+
+    group_mask = let c = reshape(unique(groupindices(gtable)), 1, :)
+        (groupindices(gtable) .== c) .* table.weight
+    end
+
+    estimates = group_mask'table.Estimate
+    V_agg = group_mask' * vcov(reg_result)[nan_mask, nan_mask] * group_mask
+
+    table = combine(gtable, nrow)
     interactions = unique(table.interaction)
 
     ∇(i) =
@@ -146,20 +188,22 @@ function EventStudyResult(
         end
 
     est(nabla) = NamedArray(
-        nabla' * table.Estimate,
+        nabla' * estimates,
         (interactions,),
     )
 
     V(nabla) = NamedArray(
-        nabla' * vcov(reg_result) * nabla,
+        nabla' * V_agg * nabla,
         (interactions, interactions),
     )
+
+    did_nabla = sum(∇.(2:3))/2 - sum(∇.(-4:-3))/2
 
     return EventStudyResult(
         estimates = Tuple(est.(∇.(DEFAULT_PERIODS))),
         std_errs = Tuple(V.(∇.(DEFAULT_PERIODS))),
-        did_estimate = est(∇(2) - ∇(-3)),
-        did_stderr = V(∇(2) - ∇(-3)),
+        did_estimate = est(did_nabla),
+        did_stderr = V(did_nabla),
     )
 end
 
@@ -173,6 +217,21 @@ function EventStudyResult(
 )
     table = DataFrame(coeftable(reg_result))
     table.τ = extract_τ.(table.Name)
+    table.cohort = extract_cohort.(table.Name)
+
+    cohort_props = @> panel begin
+        subset(:cohort => ByRow(>(Date(2000)))) 
+        groupby(:cohort) 
+        combine(proprow => :weight)
+    end
+
+    table = innerjoin(table, cohort_props, on = :cohort)
+    group_mask = let c = reshape(unique(table.τ), 1, :)
+        (table.τ .== c) .* table.weight
+    end
+
+    estimates = group_mask'table.Estimate
+    V = group_mask' * vcov(reg_result) * group_mask
 
     γ = unique(fe(reg_result, keepkeys = true))
 
@@ -198,13 +257,13 @@ function EventStudyResult(
         combine([:diff, :weight] => weighted_mean => :diff_in_diff)
     end
 
-    ∇ = [0, -1, 0, 0, 0, 1, 0]
-    difference = ∇'table.Estimate
-    se_difference = sqrt(∇' * vcov(reg_result) * ∇)
+    ∇ = [-1/2, -1/2, 0, 0, 0, 1/2, 1/2]
+    difference = ∇'estimates
+    se_difference = sqrt(∇' * V * ∇)
 
     return EventStudyResult(
-        estimates = Tuple(table.Estimate),
-        std_errs = Tuple(table[!, "Std. Error"]),
+        estimates = Tuple(estimates),
+        std_errs = Tuple(sqrt.(diag(V))),
         did_estimate = difference,
         did_stderr = se_difference,
         extras = diff_in_diffs,

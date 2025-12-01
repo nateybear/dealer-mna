@@ -5,9 +5,9 @@ using Plots
 !isempty(ARGS) && snakemake!(ARGS[1])
 
 with_logging() do
-    extras = JLD2.load_object(snakemake.input["extras"])
-    plot_df = mapreduce(innerjoin$(on=:reg_uid,), eachrow(extras)) do r
-        select(r.fes, :reg_uid, :diff_in_diff => Symbol(r.stat))
+    tes = JLD2.load_object(snakemake.input["treatment_effect"])
+    plot_df = mapreduce(innerjoin$(on=:dealer_uid,), pairs(tes)) do (stat, result)
+        DataFrames.rename(result.extra, :diff_in_diff => stat)
     end
 
     titleize(x) = titlecase(replace(string(x), "_" => " "))
@@ -22,9 +22,9 @@ with_logging() do
     )
 
     # fix the trim_rank plots
-    for idx in 15:19
-        ylims!(p[idx], (-0.15, 0.15))
-    end
+    # for idx in 15:19
+    #     ylims!(p[idx], (-0.15, 0.15))
+    # end
 
     png(p, snakemake.output[1])
 end

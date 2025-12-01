@@ -17,7 +17,7 @@ with_logging() do
     dealer = pluck(Dealers.State.df, :uid => ByRow(==(dealer_uid)))
     @info "Dealer under consideration" dealer
     intersects = !isempty ∘ intersect
-    franchise = snakemake.wildcards["type"] == "franchise"
+    franchise = snakemake.wildcards["dealer_type"] == "franchise"
     relevant_dealers = subset(
         Dealers.State.df,
         (franchise ? [:franchises => ByRow(intersects$dealer.franchises)] : [])...,

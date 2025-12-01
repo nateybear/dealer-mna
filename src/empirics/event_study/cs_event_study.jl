@@ -4,14 +4,14 @@ using RCall
 import ..Dealers, ..snakemake
 
 @kwdef struct CSEventStudyConfig <: AbstractEventStudyConfig
-    registrations::DataFrame
+    registrations::AbstractDataFrame
     dealer_demographics::DataFrame
     covariates::Vector{Symbol} = DEFAULT_DEMOGRAPHICS
 end
 
-function CSEventStudyConfig(
+function CSEventStudyConfig(;
     registrations,
-    dealer_demographics;
+    dealer_demographics,
     covariates = DEFAULT_DEMOGRAPHICS,
 )
     transactions = JLD2.load_object(snakemake.input["transactions_for_analysis"])
@@ -59,8 +59,7 @@ function event_study(es::CSEventStudyConfig, statistic)
         idname = "dealer_uid",
         gname = "event_time",
         data = panel,
-        xformla = as.formula(paste("~", paste(covariates, collapse = "+"))),
-        est_method = "ipw",
+        est_method = "dr",
         allow_unbalanced_panel = TRUE,
         anticipation = 1,
     )

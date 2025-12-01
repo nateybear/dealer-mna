@@ -21,7 +21,6 @@ const DEFAULT_DEMOGRAPHICS = [
 ]
 const STATISTICS = (
     mean_baseprice = :base_price => mean,
-    sales_baseprice = :base_price => sum,
     median_markup = :price_normed => median,
     total_sales = :vehsalesprice => sum,
     total_units = :vehsalesprice => length,
@@ -66,3 +65,24 @@ end
 include("cs_event_study.jl")
 include("homemade_types.jl")
 include("homemade_event_study.jl")
+
+function event_study(es::AbstractEventStudyConfig)
+    results = Dict{Symbol, EventStudyResult}()
+    for statistic in pairs(STATISTICS)
+        stat_name, _ = statistic
+        results[stat_name] = event_study(es, statistic)
+    end
+    return results
+end
+
+function parse_event_study_config(str)
+    if str == "callawaysantanna"
+        CSEventStudyConfig
+    elseif str == "weights"
+        DIEventStudyConfig$(covariate_spec = WithRegressionWeights(),)
+    elseif str == "controls"
+        DIEventStudyConfig$(covariate_spec = WithRegressionCovariates(),)
+    else
+        error("Unknown event study specification: $str")
+    end
+end

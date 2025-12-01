@@ -34,10 +34,11 @@ with_logging() do
         for r in eachrow(iter)
             treated_registrations = Empirics.treated_registrations(r.t; r.dealer_uid)
             if ismissing(treated_registrations)
-                @warn "No treated registrations found for transaction $(r.uid)"; continue
+                @warn "No treated registrations found for transaction $(r.uid)"
+                continue
             end
-                treated_registrations.D .= true
-                Arrow.write(out_writer, treated_registrations)
+            treated_registrations.D .= true
+            Arrow.write(out_writer, treated_registrations)
         end
     end
 end
