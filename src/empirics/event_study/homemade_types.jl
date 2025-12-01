@@ -122,7 +122,8 @@ end
 
 extract_τ(Name) = parse(Int64, match(r"dt\(D, τ, ([-\d]+)\)", Name).captures[1])
 
-extract_interaction(Name) = if match(r" & ", Name) !== nothing
+extract_interaction(Name) =
+    if !isnothing(match(r" & ", Name))
         match(r"^dt\(D, τ, [-\d]+\) & (.*)$", Name).captures[1]
     else
         "1"
@@ -131,7 +132,7 @@ extract_interaction(Name) = if match(r" & ", Name) !== nothing
 function EventStudyResult(
     ::DataFrame,
     reg_result::FixedEffectModel,
-    interaction::WithInteractionStyle,
+    ::WithInteractionStyle,
 )
     table = DataFrame(coeftable(reg_result))
     table.τ = extract_τ.(table.Name)
@@ -174,20 +175,25 @@ function EventStudyResult(
     table.τ = extract_τ.(table.Name)
 
     γ = unique(fe(reg_result, keepkeys = true))
+
     maybe_cols(x...) =
         mapreduce(vcat, x) do col
             col in names(γ) ? [Symbol(col)] : Symbol[]
         end
+
+    outcol = Symbol(reg_result.responsename)
+
     diff_in_diffs = @> γ begin
         innerjoin(panel, on = [:t, :dealer_uid, maybe_cols("manufacturer", "msa")...])
-        transform(names(γ, r"^fe_") => ByRow(+) => :fe_total)
-        transform(
-            [Symbol(reg_result.responsename), :fe_total] => ByRow(-) => :residual
-        )
+        transform(names(γ, r"^fe_") => (+) => :fe_total)
+        transform([outcol, :fe_total] => (-) => :residual)
         subset(:τ => ByRow(in((-3, 2)))) # only need to difference residuals of treated dealers
         sort(:τ, rev = true)
         groupby([:dealer_uid, :manufacturer])
-        combine(:residual => splat(-) => :diff, :weight => mean => :weight)
+        combine(
+            :residual => splat(-) => :diff,
+            :weight => mean => :weight,
+        )
         groupby(:dealer_uid)
         combine([:diff, :weight] => weighted_mean => :diff_in_diff)
     end
