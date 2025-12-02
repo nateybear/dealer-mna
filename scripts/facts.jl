@@ -18,9 +18,10 @@ process_facts(facts) =
 with_logging() do
     Dealers.load_from_disk!(snakemake.input["dealers_init"])
     facts = Dict{String, Any}()
-    registrations = Registrations.normalize_price(Registrations.registrations())
+    registrations = Registrations.registrations()
     transaction_uids = read_csv(snakemake.input["transaction_uids"])
     transactions = JLD2.load_object(snakemake.input["transactions_for_analysis"])
+    dealer_demographics = read_arrow(snakemake.input["dealer_demographics"])
     price_table = Registrations.price_table()
     transform!(
         transaction_uids,
@@ -48,18 +49,7 @@ with_logging() do
     # AVERAGE NUMBER OF CONTROL DEALERS
     push!(
         facts,
-        "avgnumcontroldealers" =>
-            round(
-                Int64,
-                mean(eachrow(transaction_uids)) do (; transaction_uid, dealer_uid)
-                    control_before = DataFrame(
-                        Arrow.Table(
-                            "data/control/treated_dealers/last_registrations_before_$(transaction_uid)_$(dealer_uid).arrow"
-                        ),
-                    )
-                    length(unique(control_before.dealer_uid))
-                end,
-            ),
+        "avgnumcontroldealers" => round(Int64, mean(nrow ∘ Empirics.control_dealers$(;dealer_demographics), transactions)),
     )
 
     # NUBMER OF DUPLICATE/WEIRD GDNS
