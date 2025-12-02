@@ -791,6 +791,25 @@ rule plot_hist_odometer:
         julia("scripts/plot_hist_odometer.jl", input=input, output=output, log=log)
 
 
+rule plot_treated_control_overlap:
+    input:
+        "scripts/plot_treated_control_overlap.jl",
+        treated_registrations="data/treated/treated_dealers.arrow",
+        control_registrations="data/control/treated_dealers.arrow",
+        dealer_demographics="data/dealer_demographics.arrow",
+    output:
+        "plots/treated_control_overlap_{demographic}.png",
+    log:
+        "logs/plot_treated_control_overlap_{demographic}.log",
+    run:
+        julia(
+            "scripts/plot_treated_control_overlap.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 rule plot_registrations_spatial:
     input:
         "scripts/plot_registrations_spatial.jl",
@@ -997,6 +1016,17 @@ rule all:
         "plots/transaction_group_sizes.png",
         "plots/hhi_timeline.png",
         "plots/hhi_cross_sectional.png",
+        expand(
+            "plots/treated_control_overlap_{demographic}.png",
+            demographic=[
+                "total_population",
+                "change_population",
+                "median_income",
+                "share_urban",
+                "share_black",
+                "share_hispanic",
+            ],
+        ),
         expand("plots/effect_on_closest_{group}.png", group=["franchise", "any"]),
         # Event study plots
         expand(
