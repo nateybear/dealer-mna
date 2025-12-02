@@ -488,7 +488,7 @@ rule data_treatment_effect_overall:
     output:
         increasing="data/treatment_effects/overall_increasing_{specification}.jld2",
         decreasing="data/treatment_effects/overall_decreasing_{specification}.jld2",
-        overall_extras="data/treatment_effects/overall_{specification}.jld2",
+        overall="data/treatment_effects/overall_{specification}.jld2",
     log:
         "logs/treatment_effects_overall_{specification}.log",
     run:
