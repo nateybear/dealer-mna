@@ -80,9 +80,9 @@ function parse_event_study_config(str)
     if str == "callawaysantanna"
         CSEventStudyConfig
     elseif str == "weights"
-        (; kwargs...) -> DIYEventStudyConfig(; kwargs..., covariate_spec = WithRegressionWeights())
+        (; kwargs...) -> DIYEventStudyConfig(; kwargs..., covariate_style = WithRegressionWeights())
     elseif str == "none"
-        (; kwargs...) -> DIYEventStudyConfig(; kwargs..., covariate_spec = NoCovariates())
+        (; kwargs...) -> DIYEventStudyConfig(; kwargs..., covariate_style = NoCovariates())
     else
         error("Unknown event study specification: $str")
     end
