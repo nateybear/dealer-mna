@@ -11,7 +11,7 @@ using NamedArrays
 numunique(cols...) = cols |> splat(zip) |> unique |> length
 onlyunique = only ∘ unique
 
-const DEFAULT_PERIODS = setdiff(VALID_PERIODS, [0])
+const DEFAULT_PERIODS = setdiff(VALID_PERIODS, [-1])
 const DEFAULT_DEMOGRAPHICS = [
     :total_population,
     :median_income,

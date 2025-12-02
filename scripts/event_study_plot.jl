@@ -3,52 +3,63 @@ using DealerMnA
 using Plots
 import StatsBase: std, mean, sample, median
 using NamedArrays
+using Base.Iterators: flatmap
 
 !isempty(ARGS) && snakemake!(ARGS[1])
 
-function add_zero(periods, estimates, stderrs)
-    if 0 in es_result.periods
+function add_minus_one(periods, estimates, stderrs)
+    if -1 in es_result.periods
         return DataFrame(
             T = collect(periods),
             estimate = collect(estimates),
             se = collect(stderrs),
         )
     else
-        sub_zero = findall(<(0), periods)
-        sup_zero = findall(>(0), periods)
+        below = findall(<(-1), periods)
+        above = findall(>(-1), periods)
         return DataFrame(
-            T = [periods[sub_zero]..., 0, periods[sup_zero]...],
-            estimate = [estimates[sub_zero]..., 0.0, estimates[sup_zero]...],
-            se = [stderrs[sub_zero]..., 0.0, stderrs[sup_zero]...],
+            T = [periods[below]..., -1, periods[above]...],
+            estimate = [estimates[below]..., 0.0, estimates[above]...],
+            se = [stderrs[below]..., 0.0, stderrs[above]...],
         )
     end
 end
 
-function iter_series(es_result)
-    if es_result.estimates[1] isa AbstractFloat
-        return [(
-            add_zero(
-                es_result.periods,
-                es_result.estimates,
-                es_result.std_errs,
-            ), "")]
-    else # only do binary :)
-        cut_name = titlecase(only(setdiff(names(es_result.estimates[1])[1], ["1"])))
-        non_cut = add_zero(
+const Result{N, K} = Empirics.EventStudyResult{N, <:AbstractDataFrame, <:K}
+
+function iter_series(es_result::Result{N, AbstractFloat}, label = "") where {N}
+    return [(
+        add_minus_one(
             es_result.periods,
-            getindex.(es_result.estimates, "1"),
-            sqrt.(getindex.(es_result.std_errs, "1", "1")),
-        )
-        cut = add_zero(
-            es_result.periods,
-            sum.(es_result.estimates),
-            sqrt.(sum.(es_result.std_errs)),
-        )
-        return [
-            (non_cut, "Non $(cut_name)"),
-            (cut, "$(cut_name)"),
-        ]
+            es_result.estimates,
+            es_result.std_errs,
+        ), label)]
+end
+
+# only do binary :)
+function iter_series(es_result::Result{N, NamedArray}, label = "") where {N}
+    cut_name = titlecase(only(setdiff(names(es_result.estimates[1])[1], ["1"])))
+    non_cut = add_minus_one(
+        es_result.periods,
+        getindex.(es_result.estimates, "1"),
+        sqrt.(getindex.(es_result.std_errs, "1", "1")),
+    )
+    cut = add_minus_one(
+        es_result.periods,
+        sum.(es_result.estimates),
+        sqrt.(sum.(es_result.std_errs)),
+    )
+    return [
+        (non_cut, "$(label)Non $(cut_name)"),
+        (cut, "$(label)$(cut_name)"),
+    ]
+end
+
+function iter_series(es_results::AbstractVector{<:Empirics.EventStudyResult}, labels = nothing)
+    if isnothing(labels)
+        labels = fill("", length(es_results))
     end
+    return flatmap(splat(iter_series), zip(es_results, labels))
 end
 
 # only do a binary cut here :)
