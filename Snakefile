@@ -460,10 +460,21 @@ checkpoint data_related_dealerships:
     shell:
         "touch {output}"
 
+rule data_zip_demographics:
+    input:
+        "scripts/zip_demographics.jl",
+    output:
+        "data/zip_demographics.csv",
+    log:
+        "logs/zip_demographics.log",
+    run:
+        julia("scripts/zip_demographics.jl", input=input, output=output, log=log)
+
 
 rule data_dealer_demographics:
     input:
         "scripts/dealer_demographics.jl",
+        "data/zip_demographics.csv",
         dealers_init="data/dealers_init.jld2",
     output:
         "data/dealer_demographics.arrow",
