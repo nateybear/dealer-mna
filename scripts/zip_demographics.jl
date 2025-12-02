@@ -142,5 +142,12 @@ with_logging() do
 
     transform!(zip_demographics, [:population_2010, :population] => ByRow(pct_change) => :population_pct_change)
 
+    dropmissing!(zip_demographics)
+    subset!(
+        zip_demographics, 
+        names(zip_demographics, r"_pct$") .=> ByRow(!isnan),
+        :population_pct_change => ByRow(isfinite),
+    )
+
     CSV.write(snakemake.output[1], zip_demographics)
 end
