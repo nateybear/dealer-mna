@@ -80,8 +80,8 @@ function parse_event_study_config(str)
         CSEventStudyConfig
     elseif str == "weights"
         DIEventStudyConfig$(covariate_spec = WithRegressionWeights(),)
-    elseif str == "controls"
-        DIEventStudyConfig$(covariate_spec = WithRegressionCovariates(),)
+    elseif str == "none"
+        DIEventStudyConfig$(covariate_spec = NoCovariates(),)
     else
         error("Unknown event study specification: $str")
     end

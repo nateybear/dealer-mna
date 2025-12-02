@@ -15,11 +15,11 @@ wildcard_constraints:
     dealer_uid="[0-9a-f\\-]+",
     transacted_dealer_uid="[0-9a-f\\-]+",
     statistic="[a-z_]+",
-    cut="[a-z_]+",
+    cut="(urban|exiting_seller)",
     folder="[a-z_]+",
     buy_sell="[a-z]+",
     i="[0-9]+",
-    es_specification="(callawaysantanna|weights|controls)"
+    specification="(callawaysantanna|weights|none)",
 
 
 # ============================================================================
@@ -383,42 +383,6 @@ def get_related_dealerships(wildcards):
     return list(out)
 
 
-def get_related_dealer_map(wildcards):
-    """Get dealer mapping files for a specific group type"""
-    transaction_uids = get_transaction_uids()
-    group = wildcards.group
-
-    if group == "buyer":
-        return {
-            t.transaction_uid: checkpoints.data_affiliated_dealerships.get(
-                transaction_uid=t.transaction_uid
-            ).output.buyer_group
-            for t in transaction_uids.itertuples()
-        }
-    elif group == "seller":
-        return {
-            t.transaction_uid: checkpoints.data_affiliated_dealerships.get(
-                transaction_uid=t.transaction_uid
-            ).output.seller_group
-            for t in transaction_uids.itertuples()
-        }
-    elif group == "closest_franchise":
-        # For closest franchise, we need to aggregate all closest dealer files for each transaction
-        dealer_map = {}
-        for t in transaction_uids.itertuples():
-            try:
-                closest_file = checkpoints.data_closest_dealerships.get(
-                    transaction_uid=t.transaction_uid, dealer_uid=t.dealer_uid
-                ).output[0]
-                dealer_map[t.transaction_uid] = closest_file
-            except (FileNotFoundError, OSError):
-                # Checkpoint file doesn't exist yet, skip for now
-                pass
-        return dealer_map
-    else:
-        raise ValueError(f"Unknown group type: {group}")
-
-
 def get_all_related_dealerships(wildcards):
     """Get all related dealership files"""
     transaction_uids = get_transaction_uids()
@@ -511,7 +475,7 @@ rule data_dealer_demographics:
 
 rule data_treatment_effect_overall:
     input:
-        "src/empirics/event_study.jl",
+        glob.glob("src/empirics/*.jl"),
         "scripts/treatment_effects.jl",
         dealer_demographics="data/dealer_demographics.arrow",
         dealers_init="data/dealers_init.jld2",
@@ -524,6 +488,7 @@ rule data_treatment_effect_overall:
     output:
         increasing="data/treatment_effects/overall_increasing_{specification}.jld2",
         decreasing="data/treatment_effects/overall_decreasing_{specification}.jld2",
+        overall_extras="data/treatment_effects/overall_{specification}.jld2",
     log:
         "logs/treatment_effects_overall_{specification}.log",
     run:
@@ -538,7 +503,7 @@ rule data_treatment_effect_overall:
 
 rule data_treatment_effect_cut:
     input:
-        "src/empirics/event_study.jl",
+        glob.glob("src/empirics/*.jl"),
         "scripts/treatment_effects.jl",
         "data/related_dealerships.txt",  # Ensure checkpoints are run first
         dealer_demographics="data/dealer_demographics.arrow",
@@ -886,7 +851,12 @@ rule plot_hhi_longitudinal_cross_sectional:
     log:
         "logs/plot_hhi_longitudinal_cross_sectional.log",
     run:
-        julia("scripts/plot_hhi_longitudinal_cross_sectional.jl", input=input, output=output, log=log)
+        julia(
+            "scripts/plot_hhi_longitudinal_cross_sectional.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
 
 
 rule plot_event_study_all:
@@ -898,17 +868,18 @@ rule plot_event_study_all:
 
 
 rule plot_effect_on_closest:
+    wildcard_constraints:
+        group="(franchise|any)",
     input:
         "scripts/plot_effect_on_closest.jl",
         dealers_init="data/dealers_init.jld2",
-        treatment_effects="data/treatment_effects/closest.arrow",
-        extras="data/treatment_effects/closest_extras.jld2",
-        overall_extras="data/treatment_effects/overall_extras.jld2",
+        treatment_effects="data/treatment_effects/closest_{group}_weights.jld2",
+        overall_effects="data/treatment_effects/overall_weights.jld2",
         transaction_uids="data/transaction_uids.csv",
     output:
-        "plots/effect_on_closest.png",
+        "plots/effect_on_closest_{group}.png",
     log:
-        "logs/plot_effect_on_closest.log",
+        "logs/plot_effect_on_closest_{group}.log",
     run:
         julia("scripts/plot_effect_on_closest.jl", input=input, output=output, log=log)
 
@@ -928,8 +899,7 @@ rule table_body_make_count:
 rule table_pq_crosstabs:
     input:
         "scripts/table_pq_crosstabs.jl",
-        treatment_effects="data/treatment_effects/overall.arrow",
-        extras="data/treatment_effects/overall_extras.jld2",
+        treatment_effects="data/treatment_effects/overall_weights.jld2",
     output:
         "tables/pq_crosstabs.tex",
     log:
@@ -941,8 +911,7 @@ rule table_pq_crosstabs:
 rule table_diff_in_diff:
     input:
         "scripts/table_diff_in_diff.jl",
-        treatment_effects="data/treatment_effects/overall.arrow",
-        extras="data/treatment_effects/overall_extras.jld2",
+        treatment_effects="data/treatment_effects/overall_weights.jld2",
     output:
         "tables/diff_in_diff.tex",
     log:
@@ -955,8 +924,7 @@ rule table_triple_diff:
     input:
         "scripts/table_triple_diff.jl",
         "data/related_dealerships.txt",  # Ensure checkpoints are run first
-        treatment_effects="data/treatment_effects/{cut}.arrow",
-        extras="data/treatment_effects/{cut}_extras.jld2",
+        treatment_effects="data/treatment_effects/{cut}_weights.jld2",
         dealer_demographics="data/dealer_demographics.arrow",
         transaction_uids="data/transaction_uids.csv",
     output:
@@ -1028,18 +996,23 @@ rule all:
         "plots/transaction_group_sizes.png",
         "plots/hhi_timeline.png",
         "plots/hhi_cross_sectional.png",
-        "plots/effect_on_closest.png",
+        expand("plots/effect_on_closest_{group}.png", group=["franchise", "any"]),
         # Event study plots
-        "plots/event_study/overall_mean_price.png",
-        "plots/event_study/overall_total_units.png",
-        "plots/event_study/overall_total_sales.png",
-        "plots/event_study/overall_trim_rank.png",
+        expand(
+            [
+                "plots/event_study/overall_{specification}_mean_price.png",
+                "plots/event_study/overall_{specification}_total_units.png",
+                "plots/event_study/overall_{specification}_total_sales.png",
+                "plots/event_study/overall_{specification}_trim_rank.png",
+            ],
+            specification=["weights", "none", "callawaysantanna"],
+        ),
         # Market share change plots
-        "plots/market_share_change_te_mean_price.png",
-        "plots/market_share_change_te_median_markup.png",
-        "plots/market_share_change_te_mean_baseprice.png",
-        "plots/market_share_change_te_total_units.png",
-        "plots/market_share_change_te_trim_rank.png",
+        "plots/market_share_change_te_mean_price_weights.png",
+        "plots/market_share_change_te_median_markup_weights.png",
+        "plots/market_share_change_te_mean_baseprice_weights.png",
+        "plots/market_share_change_te_total_units_weights.png",
+        "plots/market_share_change_te_trim_rank_weights.png",
         # Trim distribution plots
         get_plot_trim_distns,
         # Facts

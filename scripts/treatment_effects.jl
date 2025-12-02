@@ -69,6 +69,15 @@ with_logging() do
             snakemake.output["decreasing"],
             Empirics.event_study(decreasing_config),
         )
+
+        overall_config = Config(
+            registrations = registrations,
+            dealer_demographics = dealer_demographics,
+        )
+        JLD2.save_object(
+            snakemake.output["overall"],
+            Empirics.event_study(overall_config),
+        )
     elseif snakemake.wildcards["cut"] == "urban"
         dealer_demographics.urban =
             dealer_demographics.share_urban .> median(dealer_demographics.share_urban)

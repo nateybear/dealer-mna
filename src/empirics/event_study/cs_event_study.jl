@@ -3,10 +3,10 @@ using RCall
 
 import ..Dealers, ..snakemake
 
-@kwdef struct CSEventStudyConfig <: AbstractEventStudyConfig
+struct CSEventStudyConfig <: AbstractEventStudyConfig
     registrations::AbstractDataFrame
     dealer_demographics::DataFrame
-    covariates::Vector{Symbol} = DEFAULT_DEMOGRAPHICS
+    covariates::Vector{Symbol}
 end
 
 function CSEventStudyConfig(;
