@@ -37,6 +37,10 @@ function pop_weighted(d, col, distance_weight = LinearWeight())
     return mean(z[!, col], w(z.population .* distance_weight.(z.distance)))
 end
 
+function change_population(x, distance_weight = LinearWeight())
+    return pop_weighted(x, :population_pct_change, distance_weight)
+end
+
 function median_income(x, distance_weight = LinearWeight())
     return pop_weighted(x, :median_earnings, distance_weight)
 end

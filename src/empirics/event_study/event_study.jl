@@ -14,6 +14,7 @@ onlyunique = only ∘ unique
 const DEFAULT_PERIODS = setdiff(VALID_PERIODS, [-1])
 const DEFAULT_DEMOGRAPHICS = [
     :total_population,
+    :change_population,
     :median_income,
     :share_urban,
     :share_black,
@@ -79,9 +80,9 @@ function parse_event_study_config(str)
     if str == "callawaysantanna"
         CSEventStudyConfig
     elseif str == "weights"
-        DIEventStudyConfig$(covariate_spec = WithRegressionWeights(),)
+        (; kwargs...) -> DIYEventStudyConfig(; kwargs..., covariate_spec = WithRegressionWeights())
     elseif str == "none"
-        DIEventStudyConfig$(covariate_spec = NoCovariates(),)
+        (; kwargs...) -> DIYEventStudyConfig(; kwargs..., covariate_spec = NoCovariates())
     else
         error("Unknown event study specification: $str")
     end

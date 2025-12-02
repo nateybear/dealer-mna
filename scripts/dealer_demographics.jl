@@ -15,6 +15,7 @@ with_logging() do
         DataFrame(
             uid = d.uid,
             total_population = Empirics.total_population(d),
+            change_population = Empirics.change_population(d),
             median_income = Empirics.median_income(d),
             share_urban = Empirics.share_urban(d),
             share_white = Empirics.share_white(d),

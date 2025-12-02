@@ -87,6 +87,12 @@ const CENSUS_VARIABLES = Dict(
     ),
 )
 
+const CENSUS_OLD_VARIABLES = Dict(
+    :P1 => Dict(
+        :select => [:zip_code, :P001001 => :population_2010]
+    ),
+)
+
 fix_zip_code!(df) = transform!(df, :NAME => (x -> last.(x, 5)) => :zip_code)
 
 function load_demographic_file(file, config)
@@ -108,6 +114,8 @@ function load_demographic_file(file, config)
     return df
 end
 
+pct_change(old, new) = (new - old) / old
+
 with_logging() do
     cd("data/Demographics") do
         for zip in readdir("raw") |> filter(endswith(".zip"))
@@ -122,12 +130,17 @@ with_logging() do
         census_files = @> string.("DECENNIALDHC2020.", keys(CENSUS_VARIABLES), "-Data.csv") zip(
             values(CENSUS_VARIABLES)
         )
+        census_old = @> string.("DECENNIALSF12010.", keys(CENSUS_OLD_VARIABLES), "-Data.csv") zip(
+            values(CENSUS_OLD_VARIABLES)
+        )
         return mapreduce(
             splat(load_demographic_file),
             innerjoin$(; on = :zip_code),
-            union(acs_files, census_files),
+            union(acs_files, census_files, census_old),
         )
     end
+
+    transform!(zip_demographics, [:population_2010, :population] => ByRow(pct_change) => :population_pct_change)
 
     CSV.write(snakemake.output[1], zip_demographics)
 end

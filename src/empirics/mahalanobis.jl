@@ -2,6 +2,7 @@ using StatsBase: cov
 
 const mahalanobis_cols = [
     :total_population,
+    :change_population,
     :median_income,
     :share_urban,
     :share_black,
