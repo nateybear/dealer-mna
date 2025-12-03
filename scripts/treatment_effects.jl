@@ -84,7 +84,7 @@ with_logging() do
         config = Config(
             registrations = registrations,
             dealer_demographics = dealer_demographics,
-            interaction_style = Empirics.WithIncludedInteraction(Term(:urban) + ContantTerm(1))
+            interaction_style = Empirics.WithIncludedInteraction(Term(:urban) + ConstantTerm(1))
         )
         JLD2.save_object(snakemake.output[1], Empirics.event_study(config))
     elseif snakemake.wildcards["cut"] == "exiting_seller"
