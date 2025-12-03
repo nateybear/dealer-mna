@@ -118,12 +118,12 @@ rule data_new_registrations:
         )
 
 
+# trick price table by using unmatched registrations instead of matched registrations
 rule data_price_table:
     input:
         "scripts/price_table.jl",
         "src/registrations/normalize_price.jl",
-        new_registrations="data/arrow/new_registrations.arrow",
-        popular_models="data/arrow/popular_models.arrow",
+        new_registrations="data/arrow/unmatched_registrations.arrow",
     output:
         "data/price_table.arrow",
     log:
@@ -216,7 +216,7 @@ def get_all_manufacturers(wildcards):
 checkpoint data_statistics:
     input:
         "scripts/statistics.jl",
-        "src/empirics/event_study.jl",
+        "src/empirics/event_study/event_study.jl",
     output:
         "data/statistics.txt",
     log:

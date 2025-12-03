@@ -37,6 +37,12 @@ with_logging() do
 
     groups = ["treated_buyer", "treated_seller", "control_buyer", "control_seller"]
     registrations = read_arrow(getindex.(Ref(snakemake.input), groups))
+    # remove registrations that we filtered out above
+    registrations = subset(
+        registrations,
+        [:D, :dealer_uid] => ByRow((d, duid) -> !d || in(duid, df.dealer_uid)),
+        view = true,
+    )
     dealer_demographics = read_arrow(snakemake.input["dealer_demographics"])
 
     addsplines!(df)
