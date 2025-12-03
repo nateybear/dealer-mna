@@ -53,12 +53,6 @@ with_logging() do
 
                 @info "  Change in market share: $(change_market_share)"
 
-                # change in market share is always positive,
-                # but for sellers it should be < 0
-                if group == "seller"
-                    change_market_share *= -1
-                end
-
                 push!(
                     out,
                     (;

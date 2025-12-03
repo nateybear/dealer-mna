@@ -14,6 +14,9 @@ with_logging() do
         t = transactions,
     )
 
+    # cheap? use a hashset to avoid duplicates
+    hashset = Set{UInt64}()
+
     iter = if haskey(snakemake.params, "dealer_uids")
         dealer_uids = DataFrame(
             transaction_uid = collect(keys(snakemake.params["dealer_uids"])),
@@ -38,6 +41,11 @@ with_logging() do
                 continue
             end
             treated_registrations.D .= true
+            subset!(
+                treated_registrations,
+                AsTable(:) => ByRow(r -> !in!(hash(r), hashset)),
+                threads = false,
+            )
             Arrow.write(out_writer, treated_registrations)
         end
     end

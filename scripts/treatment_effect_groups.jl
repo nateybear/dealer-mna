@@ -28,8 +28,12 @@ function addsplines!(df, col = :change_market_share)
 end
 
 with_logging() do
-    df = read_arrow(snakemake.input["group_market_share_changes"])
-    df = transform(df, [:dealer_uid, :transaction_uid] .=> ByRow(UUID), renamecols = false)
+    df = @> read_arrow(snakemake.input["group_market_share_changes"]) begin
+        transform([:dealer_uid, :transaction_uid] .=> ByRow(UUID), renamecols = false)
+        subset(:change_market_share => ByRow(!iszero))
+        groupby(:dealer_uid)
+        subset(:change_market_share => (x -> abs.(x) .== maximum(abs, x)))
+    end
 
     groups = ["treated_buyer", "treated_seller", "control_buyer", "control_seller"]
     registrations = read_arrow(getindex.(Ref(snakemake.input), groups))
