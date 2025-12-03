@@ -15,7 +15,9 @@ function market_share(
     group_remap = Dict();
     weight = LinearWeight(50mi),
 )
-    focal_dealer = pluck(State.df, :uid => ByRow(==(focal_uid)))
+    focal_dealer = fuzzytravel(minimum(period)) do
+        NamedTuple(pluck(State.df, :uid => ByRow(==(focal_uid))))
+    end
     # cases: empty group is just compute a market share in the period
     # group_remap contains focal_uid: compare share of current gid to new gid
     # group_remap does not: compare share of focal gid before and after remap
@@ -65,7 +67,9 @@ function hhi(
     group_remap = Dict();
     weight = LinearWeight(50mi),
 )
-    focal_dealer = pluck(State.df, :uid => ByRow(==(focal_uid)))
+    focal_dealer = fuzzytravel(minimum(period)) do
+        NamedTuple(pluck(State.df, :uid => ByRow(==(focal_uid))))
+    end
     _hhi(group_sales) =
         let shares = values(group_sales) ./ sum(values(group_sales))
             10_000sum(shares .^ 2)
