@@ -1,5 +1,6 @@
 using DealerMnA
 using Plots
+using StatsPlots
 
 !isempty(ARGS) && snakemake!(ARGS[1])
 

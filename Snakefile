@@ -817,6 +817,7 @@ rule plot_treated_control_overlap:
             "scripts/plot_treated_control_overlap.jl",
             input=input,
             output=output,
+            wildcards=wildcards,
             log=log,
         )
 
