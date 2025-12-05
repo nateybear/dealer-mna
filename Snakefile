@@ -336,6 +336,7 @@ rule data_treated_registrations_related:
             output=output,
             log=log,
             wildcards=wildcards,
+            params=params,
         )
 
 
@@ -366,6 +367,7 @@ rule data_control_registrations_related:
             output=output,
             log=log,
             wildcards=wildcards,
+            params=params,
         )
 
 
