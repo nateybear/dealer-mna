@@ -7,9 +7,11 @@ using UUIDs
 with_logging() do
     Dealers.load_from_disk!(snakemake.input["dealers_init"])
     transactions = JLD2.load_object(snakemake.input["transactions"])
+    transaction_uids = read_csv(snakemake.input["transaction_uids"])
+    mapcols!(ByRow(UUID), transaction_uids)
     uid = UUID(snakemake.wildcards["transaction_uid"])
     t = first(t for t in transactions if t.uid == uid)
-    transacted_uids = Dealers.State.df.uid[Dealers.dealer_idxs(t)]
+    transacted_uids = transaction_uids.dealer_uid
     Dealers.timetravel(t, before = true) do
         buyer_uids =
             subset(

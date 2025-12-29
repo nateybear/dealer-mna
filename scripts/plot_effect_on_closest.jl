@@ -21,13 +21,13 @@ function same_group(tuid, dealer_uid)
     end
 end
 
-function prepare_transaction_uids(transaction_uids, extras)
+function prepare_transaction_uids(transaction_uids, extras, group)
     transform!(
         transaction_uids,
         [:transaction_uid, :dealer_uid] =>
             ByRow(
                 (tuid, duid) ->
-                    readlines("data/closest_dealerships/$(tuid)_$(duid).txt") |>
+                    readlines("data/closest_dealerships/$(tuid)_$(duid)_$(group).txt") |>
                     enumerate |>
                     collect,
             ) => :closest_dealer_uid,
@@ -35,13 +35,7 @@ function prepare_transaction_uids(transaction_uids, extras)
     transaction_uids = DataFrames.flatten(transaction_uids, :closest_dealer_uid)
     transaction_uids.closest_dealer_index = first.(transaction_uids.closest_dealer_uid)
     transaction_uids.closest_dealer_uid = last.(transaction_uids.closest_dealer_uid)
-    transaction_uids.reg_uid =
-        transaction_uids.transaction_uid .* "_" .*
-        transaction_uids.closest_dealer_uid .* "_" .*
-        transaction_uids.dealer_uid
 
-    transaction_uids.treated_reg_uid =
-        transaction_uids.transaction_uid .* "_" .* transaction_uids.dealer_uid
     transform!(
         transaction_uids,
         [:dealer_uid, :transaction_uid, :closest_dealer_uid] .=> ByRow(UUID),
@@ -53,20 +47,25 @@ function prepare_transaction_uids(transaction_uids, extras)
         [:transaction_uid, :closest_dealer_uid] =>
             ByRow(same_group) => :same_group,
     )
-    transform!(transaction_uids, :distance => ByRow(log))
+    transform!(
+        transaction_uids,
+        :distance => ByRow(x -> iszero(x) ? log(1e-6) : log(x)) => :distance_log,
+    )
     subset!(transaction_uids, :same_group => ByRow(!))
 
-    sales_extras = pluck(extras, :stat => ByRow(==(:total_sales)))
-    fes = sales_extras.fes
-    select!(fes, :reg_uid, :diff_in_diff => :sales_change)
+    select!(extras, :dealer_uid, :diff_in_diff => :sales_change)
 
-    return innerjoin(transaction_uids, fes, on = :treated_reg_uid => :reg_uid)
+    return @> transaction_uids begin
+        innerjoin(extras, on = :dealer_uid)
+        groupby(:closest_dealer_uid)
+        subset(:distance => d -> d .== minimum(d)) # take closest if dealer appears twice
+    end
 end
 
-test_derivative(diffs, V) = function (distance_log) # partial effect is β_sales + distance * β_{sales × distance}
+function test_derivative(results, distance_log) # partial effect is β_sales + distance * β_{sales × distance}
     ∇ = [0.0, 0.0, 1.0, distance_log]
-    derivative = sum(∇ .* diffs.diff)
-    se_derivative = sqrt(∇'V * ∇)
+    derivative = sum(∇ .* results.did_estimate.array)
+    se_derivative = sqrt(∇'results.did_stderr.array * ∇)
     sign = if derivative > 0
         derivative > 1.96se_derivative ? :pos : :zero
     else
@@ -114,44 +113,27 @@ function E_log_distance(df)
     return E(1e6, df) # optimal h calculation is unstable here
 end
 
-function fitted(diffs, V) # assume order is 1, distance_log, sales_change, interaction (which should always be true)
-    diffs.interaction ==
-    ["1", "distance_log", "sales_change", "distance_log & sales_change"] ||
-        error("wrong variable order!")
-    function (sales_change, distance_log)
-        ∇ = [1.0, distance_log, sales_change, distance_log * sales_change]
-        return (
-            estimate = sum(∇ .* diffs.diff),
-            se_estimate = sqrt(∇'V * ∇),
-        )
-    end
+function fitted(results, sales_change, distance_log)
+    ∇ = [1.0, distance_log, sales_change, distance_log * sales_change]
+    return (
+        estimate = sum(∇ .* results.did_estimate.array),
+        se_estimate = sqrt(∇'results.did_stderr.array * ∇),
+    )
 end
 
 with_logging() do
     Dealers.load_from_disk!(snakemake.input["dealers_init"])
-    coeftable = read_arrow(snakemake.input["treatment_effects"])
+
+    results = JLD2.load_object(snakemake.input["treatment_effect"])
+
     transaction_uids = prepare_transaction_uids(
         read_csv(snakemake.input["transaction_uids"]),
-        JLD2.load_object(snakemake.input["overall_extras"]),
+        JLD2.load_object(snakemake.input["overall_effects"])[:total_sales].extras,
+        snakemake.wildcards["group"],
     )
-    extras = JLD2.load_object(snakemake.input["extras"])
-    sales_extras = pluck(extras, :stat => ByRow(==(:total_sales)))
-
-    diffs = @> coeftable begin
-        subset(:T => ByRow(in([-3, 2])))
-        sort(:T, rev = true)
-        groupby(:interaction)
-        combine(:total_sales => splat(-) => :diff)
-    end
-
-    V = let c = reshape(unique(coeftable.interaction), 1, :)
-        coef_mask = coeftable.interaction .== c
-        ∇ = (-(coeftable.T .== -3) .+ (coeftable.T .== 2)) .* coef_mask
-        ∇'sales_extras.V * ∇
-    end
 
     x_grid = DataFrame(
-        sales_change = range(extrema(transaction_uids.sales_change)..., length = 500)
+        sales_change = range(1.05 .* extrema(transaction_uids.sales_change)..., length = 500)
     )
     transform!(
         x_grid,
@@ -159,11 +141,15 @@ with_logging() do
     )
     transform!(
         x_grid,
-        [:sales_change, :distance_log] => ByRow(fitted(diffs, V)) => AsTable,
-        :distance_log => ByRow(test_derivative(diffs, V)) => AsTable,
+        [:sales_change, :distance_log] => ByRow(fitted$(results)) => AsTable,
+        :distance_log => ByRow(test_derivative$(results)) => AsTable,
     )
 
-    scatter_df = innerjoin(transaction_uids, sales_extras.fes, on = :reg_uid)
+    scatter_df = innerjoin(
+        transaction_uids,
+        results.extras,
+        on = :closest_dealer_uid => :dealer_uid,
+    )
     subset!(scatter_df, :diff_in_diff => ByRow(<(5e6) ∘ abs)) # knock a few outliers so lines look more sensible
     scatter(
         scatter_df.sales_change,
@@ -171,7 +157,7 @@ with_logging() do
         label = nothing,
         size = (800, 600),
         xlabel = "Change in Transacted Sales (\$)",
-        ylabel = "Change in Nearest Dealer Sales (\$)",
+        ylabel = "Change in Nearest ($(titlecase(snakemake.wildcards["group"]))) Dealer Sales (\$)",
         left_margin = 5Plots.mm,
     )
 
@@ -197,6 +183,38 @@ with_logging() do
         label = nothing,
         linestrokewidth = 4,
         alpha = 0.4,
+    )
+
+    avg_deriv = test_derivative(
+        results,
+        mean(transaction_uids.distance_log),
+    )
+
+    # find best corner to place annotation
+    x_pos = extrema(scatter_df.sales_change)
+    y_pos = extrema(scatter_df.diff_in_diff)
+    corners = collect(Iterators.product(x_pos, y_pos))
+    text_positions = collect(Iterators.product((:left, :right), (:bottom, :top)))
+    counts = map(corners) do (x_c, y_c)
+        x_counts = x_c < mean(scatter_df.sales_change) ?
+            scatter_df.sales_change .<= mean(scatter_df.sales_change) :
+            scatter_df.sales_change .> mean(scatter_df.sales_change)
+        y_counts = y_c < mean(scatter_df.diff_in_diff) ?
+            scatter_df.diff_in_diff .<= mean(scatter_df.diff_in_diff) :
+            scatter_df.diff_in_diff .> mean(scatter_df.diff_in_diff)
+        return sum(x_counts .& y_counts)
+    end
+    best_corner = corners[argmin(counts)]
+    best_text_pos = text_positions[argmin(counts)]
+
+    annotate!(
+        best_corner...,
+        text(
+            "Avg. Deriv.: $(round(avg_deriv.derivative, digits = 4)) ($(round(avg_deriv.se_derivative, digits = 4)))",
+            12,
+            :black,
+            best_text_pos...,
+        ),
     )
 
     png(snakemake.output[1])

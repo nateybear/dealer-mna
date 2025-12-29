@@ -8,7 +8,7 @@ using Base.Iterators: flatmap
 !isempty(ARGS) && snakemake!(ARGS[1])
 
 function add_minus_one(periods, estimates, stderrs)
-    if -1 in es_result.periods
+    if -1 in periods
         return DataFrame(
             T = collect(periods),
             estimate = collect(estimates),
@@ -25,7 +25,7 @@ function add_minus_one(periods, estimates, stderrs)
     end
 end
 
-const Result{N, K} = Empirics.EventStudyResult{N, <:AbstractDataFrame, <:K}
+const Result{N, K} = Empirics.EventStudyResult{N, <:Union{Nothing, AbstractDataFrame}, <:K}
 
 function iter_series(es_result::Result{N, AbstractFloat}, label = "") where {N}
     return [(
@@ -63,7 +63,7 @@ function iter_series(es_results::AbstractVector{<:Empirics.EventStudyResult}, la
 end
 
 # only do a binary cut here :)
-function event_study_plot!(es_result)
+function event_study_plot!(es_result, labels = "")
     plot() # create an empty plot
     hline!([0], color = :black, label = nothing)
     vline!([-0.5], color = :black, label = nothing)
@@ -71,7 +71,7 @@ function event_study_plot!(es_result)
     min_y = 0
     max_y = 0
 
-    for (i, (plot_df, label)) in enumerate(iter_series(es_result))
+    for (i, (plot_df, label)) in enumerate(iter_series(es_result, labels))
         plot!(
             plot_df.T,
             plot_df.estimate,
@@ -93,6 +93,9 @@ end
 
 with_logging() do
     statistic = Symbol(snakemake.wildcards["statistic"])
-    es_result::Empirics.EventStudyResult = JLD2.load_object(snakemake.input["treatment_effect"])[statistic]
-    event_study_plot!(es_result)
+    results = [
+        JLD2.load_object(snakemake.input["treatment_effect_increasing"])[statistic],
+        JLD2.load_object(snakemake.input["treatment_effect_decreasing"])[statistic],
+    ]
+    event_study_plot!(results, ["Increasing Concentration", "Decreasing Concentration"])
 end

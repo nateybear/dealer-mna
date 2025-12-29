@@ -4,11 +4,18 @@ struct MetroFixedEffect <: AbstractTimeFixedEffect end
 struct ManufacturerFixedEffect <: AbstractTimeFixedEffect end
 struct MetroManufacturerFixedEffect <: AbstractTimeFixedEffect end
 struct NormalFixedEffect <: AbstractTimeFixedEffect end
+struct SyntheticPairFixedEffect <: AbstractTimeFixedEffect end
+
+### CONTROL SUN & ABRAHAM AGGREGATION ###
+abstract type AbstractAggregationStyle end
+struct SunAbraham <: AbstractAggregationStyle end
+struct TwoWayFixedEffects <: AbstractAggregationStyle end
 
 fes(::MetroFixedEffect) = fe(:t) & fe(:msa) + fe(:dealer_uid)
 fes(::ManufacturerFixedEffect) = fe(:t) & fe(:manufacturer) + fe(:dealer_uid)
 fes(::NormalFixedEffect) = fe(:t) + fe(:dealer_uid)
 fes(::MetroManufacturerFixedEffect) = fe(:t) & fe(:msa) + fe(:manufacturer) + fe(:dealer_uid)
+fes(::SyntheticPairFixedEffect) = fe(:t) & fe(:manufacturer) + fe(:pair_id)
 
 ### ALLOW EVENT STUDY INTERACTIONS ###
 abstract type AbstractInteractionStyle end
@@ -50,17 +57,29 @@ _make_multi_formula(t::Tuple) = t
 _make_multi_formula(t) = (t,)
 
 import Base.Iterators: product
-function event_terms(::NoInteraction, cohorts)
+function event_terms(::NoInteraction, cohorts, ::SunAbraham)
     all_cohorts = product(cohorts, DEFAULT_PERIODS)
     mapreduce(+, all_cohorts) do (critical_cohort, critical_τ)
         return cohort_term(critical_cohort) & ev_term(critical_τ)
     end
 end
 
-function event_terms(interaction::WithInteractionStyle, cohorts)
+function event_terms(interaction::WithInteractionStyle, cohorts, ::SunAbraham)
     all_interactions = product(cohorts, DEFAULT_PERIODS, _make_multi_formula(interaction.term))
     mapreduce(+, all_interactions) do (critical_cohort, critical_τ, term)
         return cohort_term(critical_cohort) & ev_term(critical_τ) & term
+    end
+end
+
+event_terms(::NoInteraction, _, ::TwoWayFixedEffects) =
+    mapreduce(+, DEFAULT_PERIODS) do critical_τ
+        return ev_term(critical_τ)
+    end
+
+function event_terms(interaction::WithInteractionStyle, _, ::TwoWayFixedEffects)
+    all_interactions = product(DEFAULT_PERIODS, _make_multi_formula(interaction.term))
+    mapreduce(+, all_interactions) do (critical_τ, term)
+        return ev_term(critical_τ) & term
     end
 end
 
@@ -108,19 +127,41 @@ function attachregressionweights!(panel, _, ::Union{NoCovariates, WithRegression
 end
 function attachregressionweights!(panel, demographics, w::WithRegressionWeights)
     create_manufacturer_weights!(panel)
+    create_synthetic_pairs!(panel, demographics, w.covariates)
+    return nothing
+end
 
-    distance = make_distance_fn(demographics, w.covariates)
+# Create synthetic control pairs following Brand et al. approach
+function create_synthetic_pairs!(panel, demographics, covariates)
+    distance = make_distance_fn(demographics, covariates)
 
-    for subdf in groupby(panel, [:manufacturer, :t])
-        # use views to mutate in place
-        treated = subset(subdf, :D, view = true)
-        control = subset(subdf, :D => ByRow(!), view = true)
-        control.weight .= 0.0
-        for t in eachrow(treated)
-            weights = map(c -> pdf(Normal(), distance(t, c)), eachrow(control))
-            control.weight .+= (weights ./ sum(weights)) .* t.weight
+    # Separate treated and control observations
+    control_panel = DataFrame()
+
+    for group in groupby(panel, [:t, :manufacturer])
+        treated_rows = subset(group, :D, view = true)
+        control_rows = subset(group, :D => ByRow(!))
+
+        treated_rows.pair_id = string.(treated_rows.dealer_uid)
+
+        if isempty(control_rows)
+            @error "No control dealers available for time $(group.t[1]) and manufacturer $(group.manufacturer[1])"
+            continue
+        end
+
+        for t in eachrow(treated_rows)
+            distances = [distance(t, c) for c in eachrow(control_rows)]
+            weights = pdf.(Normal(), distances)
+            weights = weights ./ sum(weights)
+            new_controls = deepcopy(control_rows)
+            new_controls.pair_id .= t.pair_id
+            new_controls.weight .= weights .* t.weight
+            append!(control_panel, new_controls)
         end
     end
+
+    subset!(panel, :D)
+    append!(panel, control_panel)
 
     return nothing
 end
@@ -145,11 +186,48 @@ extract_interaction(Name) =
         "1"
     end
 
-function EventStudyResult(
-    panel::DataFrame,
-    reg_result::FixedEffectModel,
-    ::WithInteractionStyle,
-)
+weighted_mean(vals, weights) = sum(vals .* weights) / sum(weights)
+
+function collect_dids(reg_result, panel)
+    treated = subset(panel, :D)
+    actual_treated = treated[!, reg_result.responsename]
+    treated.D .= 0
+    pred_control = predict(reg_result, treated)
+    treated.residual = actual_treated .- pred_control
+
+    return @> treated begin
+        subset(:τ => ByRow(in((-4, -3, 2, 3)))) # only need to difference residuals of treated dealers
+        transform(:τ => ByRow(sign), renamecols = false)
+        groupby([:dealer_uid, :manufacturer, :τ])
+        combine(
+            [:residual, :weight] => weighted_mean => :residual,
+            :weight => sum => :weight,
+        )
+        transform(:τ => ByRow(t -> t > 0 ? "after" : "before") => :period)
+        unstack([:dealer_uid, :manufacturer, :weight], :period, :residual, fill = 0)
+        transform([:after, :before] => (-) => :diff_in_diff)
+        groupby(:dealer_uid)
+        combine(
+            ([col, :weight] => weighted_mean => col for col in [:before, :after, :diff_in_diff])...,
+            renamecols = false,
+        )
+    end
+end
+
+function aggregate_table_interaction(panel, reg_result, ::TwoWayFixedEffects)
+    table = DataFrame(coeftable(reg_result))
+    table.τ = extract_τ.(table.Name)
+    table.interaction = extract_interaction.(table.Name)
+
+    estimates = table.Estimate
+    V_direct = vcov(reg_result)
+
+    interactions = unique(table.interaction)
+
+    return table, interactions, estimates, V_direct
+end
+
+function aggregate_table_interaction(panel, reg_result, ::SunAbraham)
     table = DataFrame(coeftable(reg_result))
     table.τ = extract_τ.(table.Name)
     table.cohort = extract_cohort.(table.Name)
@@ -158,8 +236,8 @@ function EventStudyResult(
     subset!(table, Symbol("Std. Error") => ByRow(!isnan)) # some excluded terms
 
     cohort_props = @> panel begin
-        subset(:cohort => ByRow(>(Date(2000)))) 
-        groupby(:cohort) 
+        subset(:cohort => ByRow(>(Date(2000))))
+        groupby(:cohort)
         combine(proprow => :weight)
     end
 
@@ -182,6 +260,19 @@ function EventStudyResult(
     table = combine(gtable, nrow)
     interactions = unique(table.interaction)
 
+    return table, interactions, estimates, V_agg
+end
+
+function EventStudyResult(
+    panel::DataFrame,
+    reg_result::FixedEffectModel,
+    ::WithInteractionStyle,
+    aggregation_style,
+)
+    table, interactions, estimates, V_agg = aggregate_table_interaction(
+        panel, reg_result, aggregation_style
+    )
+
     ∇(i) =
         let c = reshape(interactions, 1, :)
             (table.τ .== i) .* (table.interaction .== c)
@@ -197,67 +288,66 @@ function EventStudyResult(
         (interactions, interactions),
     )
 
-    did_nabla = sum(∇.(2:3))/2 - sum(∇.(-4:-3))/2
+    did_nabla = sum(∇.(2:3)) / 2 - sum(∇.(-4:-3)) / 2
 
     return EventStudyResult(
         estimates = Tuple(est.(∇.(DEFAULT_PERIODS))),
         std_errs = Tuple(V.(∇.(DEFAULT_PERIODS))),
         did_estimate = est(did_nabla),
         did_stderr = V(did_nabla),
+        extras = collect_dids(reg_result, panel),
     )
 end
 
-weighted_mean(vals, weights) = sum(vals .* weights) / sum(weights)
+function aggregate_table_no_interaction(panel, reg_result, ::TwoWayFixedEffects)
+    table = DataFrame(coeftable(reg_result))
+    table.τ = extract_τ.(table.Name)
 
-# in this particular case we can compute diff-in-diff estimates directly
-function EventStudyResult(
-    panel::DataFrame,
-    reg_result::FixedEffectModel,
-    ::NoInteraction,
-)
+    estimates = table.Estimate
+    V = vcov(reg_result)
+
+    return table, estimates, V
+end
+
+function aggregate_table_no_interaction(panel, reg_result, ::SunAbraham)
     table = DataFrame(coeftable(reg_result))
     table.τ = extract_τ.(table.Name)
     table.cohort = extract_cohort.(table.Name)
+    nan_mask = .!isnan.(table[!, "Std. Error"])
+    subset!(table, Symbol("Std. Error") => ByRow(!isnan)) # some excluded terms
 
     cohort_props = @> panel begin
-        subset(:cohort => ByRow(>(Date(2000)))) 
-        groupby(:cohort) 
+        subset(:cohort => ByRow(>(Date(2000))))
+        groupby(:cohort)
         combine(proprow => :weight)
     end
 
-    table = innerjoin(table, cohort_props, on = :cohort)
+    # rebalance because of excluded terms
+    table = combine(groupby(table, :τ)) do subdf
+        out = innerjoin(subdf, cohort_props, on = :cohort)
+        out.weight .= out.weight ./ sum(out.weight)
+        return out
+    end
+
     group_mask = let c = reshape(unique(table.τ), 1, :)
         (table.τ .== c) .* table.weight
     end
 
     estimates = group_mask'table.Estimate
-    V = group_mask' * vcov(reg_result) * group_mask
+    V_agg = group_mask' * vcov(reg_result)[nan_mask, nan_mask] * group_mask
 
-    γ = unique(fe(reg_result, keepkeys = true))
+    return table, estimates, V_agg
+end
 
-    maybe_cols(x...) =
-        mapreduce(vcat, x) do col
-            col in names(γ) ? [Symbol(col)] : Symbol[]
-        end
+function EventStudyResult(
+    panel::DataFrame,
+    reg_result::FixedEffectModel,
+    ::NoInteraction,
+    aggregation_style,
+)
+    table, estimates, V = aggregate_table_no_interaction(panel, reg_result, aggregation_style)
 
-    outcol = Symbol(reg_result.responsename)
-
-    diff_in_diffs = @> γ begin
-        innerjoin(panel, on = [:t, :dealer_uid, maybe_cols("manufacturer", "msa")...])
-        transform(names(γ, r"^fe_") => (+) => :fe_total)
-        transform([outcol, :fe_total] => (-) => :residual)
-        subset(:τ => ByRow(in((-3, 2)))) # only need to difference residuals of treated dealers
-        sort(:τ, rev = true)
-        groupby([:dealer_uid, :manufacturer])
-        combine(
-            :residual => splat(-) => :diff,
-            :weight => mean => :weight,
-        )
-        groupby(:dealer_uid)
-        combine([:diff, :weight] => weighted_mean => :diff_in_diff)
-    end
-
-    ∇ = [-1/2, -1/2, 0, 0, 0, 1/2, 1/2]
+    ∇ = [-1 / 2, -1 / 2, 0, 0, 0, 1 / 2, 1 / 2]
     difference = ∇'estimates
     se_difference = sqrt(∇' * V * ∇)
 
@@ -266,6 +356,11 @@ function EventStudyResult(
         std_errs = Tuple(sqrt.(diag(V))),
         did_estimate = difference,
         did_stderr = se_difference,
-        extras = diff_in_diffs,
+        extras = collect_dids(reg_result, panel),
     )
+end
+
+# Fallback methods for backward compatibility (default to SunAbraham)
+function EventStudyResult(panel, reg_result, interaction_style)
+    return EventStudyResult(panel, reg_result, interaction_style, SunAbraham())
 end

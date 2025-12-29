@@ -90,7 +90,7 @@ function control_dealers(t; dealer_uid = nothing, dealer_demographics)
         init = Set{UUID}(),
     ) do e
         e.when > Date(2020) && return Set{UUID}()
-        radioactive = dealer_idxs(e) ∪ i_extra
+        radioactive = dealer_idxs(e)
         too_close = Set{Int}()
         blackout = blackout_period(e)
         if !ismissing(blackout) && eventtime(t) in blackout
@@ -117,7 +117,7 @@ function control_dealers(t; dealer_uid = nothing, dealer_demographics)
                 end
             end
         end
-        return State.df.uid[radioactive ∪ too_close]
+        return State.df.uid[radioactive ∪ too_close ∪ i_extra]
     end
 
     return subset(
@@ -133,12 +133,14 @@ end
 # and compile a unique list of control dealer uids, windows, and franchises
 function iter_control_dealers(ts::AbstractVector; dealer_demographics)
     out = DefaultDict{UUID, Set{Tuple{Date, Set{String}}}}(Set{Tuple{Date, Set{String}}})
+    extra_uids = UUID[] # uids we shouldn't consider control dealers
     for t in ts
         t, dealer_uid = t isa Tuple ? t : (t, nothing)
 
         i_extra = if isnothing(dealer_uid)
             Set{Int}()
         else
+            push!(extra_uids, dealer_uid)
             findfirst(==(dealer_uid), State.df.uid)
         end
 
@@ -151,9 +153,11 @@ function iter_control_dealers(ts::AbstractVector; dealer_demographics)
         ismissing(blackout_period(t)) && continue
         controls = control_dealers(t; dealer_uid, dealer_demographics)
         for uid in controls.uid
-            windows = out[uid]
-            for window in eventtime.(eventtime(t), VALID_PERIODS)
-                push!(windows, (window, franchises))
+            if uid ∉ extra_uids
+                windows = out[uid]
+                for window in eventtime.(Ref(t), VALID_PERIODS)
+                    push!(windows, (window, franchises))
+                end
             end
         end
     end

@@ -1,4 +1,5 @@
 using StatsBase: cov
+using LinearAlgebra: qr
 
 const mahalanobis_cols = [
     :total_population,
@@ -14,7 +15,7 @@ const mahalanobis_cols = [
 
 function make_distance_fn(dealer_demographics, cols = mahalanobis_cols)
     X = Matrix(select(dealer_demographics, cols))
-    Σ = cov(X)
+    Σ = qr(cov(X))
     return (d1, d2) -> begin
         d1 = Vector(d1[cols])
         d2 = Vector(d2[cols])

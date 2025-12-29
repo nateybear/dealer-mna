@@ -22,6 +22,7 @@ with_logging() do
             transaction_uid = collect(keys(snakemake.params["dealer_uids"])),
             dealer_uid = collect(values(snakemake.params["dealer_uids"])),
         )
+        dealer_uids = flatten(dealer_uids, :dealer_uid)
         transform!(dealer_uids, :transaction_uid => ByRow(UUID) => :transaction_uid)
         transform!(dealer_uids, :dealer_uid => ByRow(readlines) => :dealer_uid)
         dealer_uids = @> dealer_uids flatten(:dealer_uid) transform(

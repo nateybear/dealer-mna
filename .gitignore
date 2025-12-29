@@ -35,3 +35,5 @@ data/*
 /data
 
 .snakemake
+plots
+tables

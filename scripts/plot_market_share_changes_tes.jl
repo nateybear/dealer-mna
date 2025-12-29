@@ -28,17 +28,14 @@ function addsplines!(df, col = :change_market_share)
     return nothing
 end
 
-parseindex(s) = parse(Int64, match(r"^ns_(\d).*$", s).captures[1])
-parsespline(s) = "ns_$(parseindex(s))"
-
-function calc_se(V, idx, values)
-    ∇ = zeros(size(V, 1))
-    for (i, val) in zip(idx, values)
-        if !ismissing(val)
-            ∇[i] = val
-        end
-    end
-    return sqrt(only(∇'V * ∇))
+function calc_se(tes, idx, values)
+    labels = replace.(idx, "_difference" => "")
+    μ = tes.did_estimate[labels].array
+    V = tes.did_stderr[labels, labels].array
+    return (
+        est = μ'values,
+        se = sqrt(values'V * values),
+    )
 end
 
 difference(x) = vcat(diff(x), missing)
@@ -83,36 +80,34 @@ function spans_from_labels(xs::Vector, labels::Vector)
 end
 
 with_logging() do
-    df = read_arrow(snakemake.input["group_market_share_changes"])
+    df = @> read_arrow(snakemake.input["group_market_share_changes"]) begin
+        transform([:dealer_uid, :transaction_uid] .=> ByRow(UUID), renamecols = false)
+        groupby(:dealer_uid)
+        subset(:change_market_share => (x -> abs.(x) .== maximum(abs, x)))
+        unique(:dealer_uid) # if multiple maxima select the first
+    end
     calcsplines!(df.change_market_share)
     col = Symbol(snakemake.wildcards["col"])
     tes = JLD2.load_object(snakemake.input["treatment_effect"])[col]
 
-    x_grid = DataFrame(x = range(extrema(df.change_market_share)..., length = 500))
+    x_grid = DataFrame(x = range(1.05 .* extrema(df.change_market_share)..., length = 500))
     addsplines!(x_grid, :x)
     transform!(x_grid, names(x_grid, r"ns_") .=> difference)
+    dropmissing!(x_grid)
 
     fitted_values = @> x_grid begin
         stack(names(x_grid, r"ns_"))
         transform(
-            :variable => ByRow(parsespline) => :spline,
-            :variable => ByRow(contains("difference")) => :isdifference,
-        )
-        innerjoin(diffs, on = :spline => :interaction)
-        transform(
-            [:value, :diff] => ByRow(passmissing(*)) => :contribution,
-            :variable => ByRow(parseindex) => :idx,
+            :variable => ByRow(contains("difference")) => :isdifference
         )
         groupby([:x, :isdifference])
         combine(
-            :contribution => sum ∘ skipmissing => :y, [:idx, :value] => calc_se$V => :se
+            [:variable, :value] => (calc_se$tes) => AsTable
         )
     end
 
-    df = @> df begin
-        subset(:change_market_share => ByRow(!iszero))
-        innerjoin(col_extras.fes, on = :reg_uid)
-    end
+    df = innerjoin(df, tes.extras, on = :dealer_uid)
+
     scatter(
         df.change_market_share,
         df.diff_in_diff,
@@ -124,10 +119,20 @@ with_logging() do
     )
 
     deriv = subset(fitted_values, :isdifference => ByRow(identity))
-    deriv = deriv[1:(end - 1), :] # drop last value (nothing)
-    transform!(deriv, [:y, :se] => ByRow(test_deriv) => :sign)
+    transform!(deriv, [:est, :se] => ByRow(test_deriv) => :sign)
     shaded_regions = spans_from_labels(deriv.x, deriv.sign)
-
+    
+    avg_deriv = mapreduce(vcat, eachrow(df)) do r
+        i = searchsortedfirst(x_grid.x, r.change_market_share)
+        return x_grid[[i], :]
+    end
+    avg_deriv = combine(
+        avg_deriv, 
+        names(avg_deriv, r"_difference") .=> mean, 
+        renamecols = false
+    )
+    avg_deriv = @> avg_deriv stack() combine([:variable, :value] => (calc_se$tes) => AsTable) round.(digits=4) getindex(1, :)
+        
     for (xstart, xstop, sign) in shaded_regions
         @show xstart xstop sign
         if sign == :pos
@@ -145,12 +150,44 @@ with_logging() do
     fitted = subset(fitted_values, :isdifference => ByRow(!))
     plot!(
         fitted.x,
-        fitted.y,
+        fitted.est,
         ribbon = 1.96fitted_values.se,
         color = :grey,
         label = nothing,
         linestrokewidth = 4,
         alpha = 0.4,
+    )
+
+    # find the most empty corner to place the average derivative annotation
+    x_pos = extrema(df.change_market_share)
+    y_pos = extrema(df.diff_in_diff)
+    corners = collect(Iterators.product(x_pos, y_pos))
+    text_positions = collect(Iterators.product(
+        (:left, :right),
+        (:bottom, :top),
+    ))
+    counts = map(corners) do (x_c, y_c)
+        x_counts = x_c < mean(df.change_market_share) ?
+            df.change_market_share .<= mean(df.change_market_share) :
+            df.change_market_share .>= mean(df.change_market_share)
+
+        y_counts = y_c < mean(df.diff_in_diff) ?
+            df.diff_in_diff .<= mean(df.diff_in_diff) :
+            df.diff_in_diff .>= mean(df.diff_in_diff)
+
+        return sum(x_counts .& y_counts)
+    end
+    best_corner = corners[argmin(counts)]
+    best_text_pos = text_positions[argmin(counts)]
+
+    annotate!(
+        best_corner...,
+        text(
+            "Avg. Deriv.: $(avg_deriv.est) ($(avg_deriv.se))",
+            12,
+            :black,
+            best_text_pos...,
+        ),
     )
 
     png(snakemake.output[1])

@@ -19,7 +19,8 @@ wildcard_constraints:
     folder="[a-z_]+",
     buy_sell="[a-z]+",
     i="[0-9]+",
-    specification="(callawaysantanna|weights|none)",
+    specification="(callawaysantanna|twfe|sunabraham|synthetic)",
+    who="(treated_dealers|affiliated)",
 
 
 # ============================================================================
@@ -159,18 +160,12 @@ def get_related_dealer_map(wildcards):
     transaction_uids = get_transaction_uids()
     group = wildcards.group
 
-    if group == "buyer":
+    if group == "affiliated":
+        affiliates = lambda t: checkpoints.data_affiliated_dealerships.get(
+            transaction_uid=t.transaction_uid
+        ).output
         return {
-            t.transaction_uid: checkpoints.data_affiliated_dealerships.get(
-                transaction_uid=t.transaction_uid
-            ).output.buyer_group
-            for t in transaction_uids.itertuples()
-        }
-    elif group == "seller":
-        return {
-            t.transaction_uid: checkpoints.data_affiliated_dealerships.get(
-                transaction_uid=t.transaction_uid
-            ).output.seller_group
+            t.transaction_uid: [affiliates(t).buyer_group, affiliates(t).seller_group]
             for t in transaction_uids.itertuples()
         }
     elif group == "closest_franchise":
@@ -183,7 +178,7 @@ def get_related_dealer_map(wildcards):
                     dealer_uid=t.dealer_uid,
                     dealer_type="franchise",
                 ).output[0]
-                dealer_map[t.transaction_uid] = closest_file
+                dealer_map[t.transaction_uid] = [closest_file]
             except (FileNotFoundError, OSError):
                 # Checkpoint file doesn't exist yet, skip for now
                 pass
@@ -198,7 +193,7 @@ def get_related_dealer_map(wildcards):
                     dealer_uid=t.dealer_uid,
                     dealer_type="any",
                 ).output[0]
-                dealer_map[t.transaction_uid] = closest_file
+                dealer_map[t.transaction_uid] = [closest_file]
             except (FileNotFoundError, OSError):
                 # Checkpoint file doesn't exist yet, skip for now
                 pass
@@ -312,7 +307,7 @@ rule data_control_registrations:
 
 rule data_treated_registrations_related:
     wildcard_constraints:
-        group="(buyer|seller|closest_franchise|closest_any)",
+        group="(affiliated|closest_franchise|closest_any)",
     input:
         "src/empirics/registrations.jl",
         "src/empirics/Empirics.jl",
@@ -322,7 +317,7 @@ rule data_treated_registrations_related:
         price_table="data/price_table.arrow",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
-        dealer_uids=lambda w: get_related_dealer_map(w).values(),
+        dealer_uids=lambda w: chain.from_iterable(get_related_dealer_map(w).values()),
     output:
         "data/treated/{group}.arrow",
     log:
@@ -342,7 +337,7 @@ rule data_treated_registrations_related:
 
 rule data_control_registrations_related:
     wildcard_constraints:
-        group="(buyer|seller|closest_franchise|closest_any)",
+        group="(affiliated|closest_franchise|closest_any)",
     input:
         "src/empirics/registrations.jl",
         "src/empirics/Empirics.jl",
@@ -353,7 +348,7 @@ rule data_control_registrations_related:
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
         dealer_demographics="data/dealer_demographics.arrow",
-        dealer_uids=lambda w: get_related_dealer_map(w).values(),
+        dealer_uids=lambda w: chain.from_iterable(get_related_dealer_map(w).values()),
     output:
         "data/control/{group}.arrow",
     log:
@@ -402,9 +397,9 @@ def get_all_related_dealerships(wildcards):
 # these generate sets of uids for each transaction
 checkpoint data_affiliated_dealerships:
     input:
-        "data/transaction_uids.csv",
         "scripts/affiliated_dealerships.jl",
         transactions="data/transactions_for_analysis.jld2",
+        transaction_uids="data/transaction_uids.csv",
         dealers_init="data/dealers_init.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
@@ -461,6 +456,7 @@ checkpoint data_related_dealerships:
         "data/related_dealerships.txt",
     shell:
         "touch {output}"
+
 
 rule data_zip_demographics:
     input:
@@ -545,11 +541,11 @@ rule data_treatment_effect_cuts:
         expand(
             "data/treatment_effects/{cut}_{specification}.jld2",
             cut=["urban", "exiting_seller"],
-            specification=["weights", "controls"],
+            specification=["twfe", "sunabraham", "synthetic"],
         ),
 
 
-rule data_group_market_share_changes:
+rule data_group_market_share_changes_affiliated:
     input:
         "scripts/group_market_share_changes.jl",
         "data/statistics.txt",
@@ -561,7 +557,7 @@ rule data_group_market_share_changes:
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
     output:
-        "data/group_market_share_changes.arrow",
+        "data/group_market_share_changes_affiliated.arrow",
     log:
         "logs/group_market_share_changes.log",
     run:
@@ -573,20 +569,39 @@ rule data_group_market_share_changes:
         )
 
 
+rule data_group_market_share_changes_treated_dealers:
+    input:
+        "scripts/transactions_market_share_change.jl",
+        "src/empirics/market_share.jl",
+        dealers_init="data/dealers_init.jld2",
+        transaction_uids="data/transaction_uids.csv",
+        transactions_for_analysis="data/transactions_for_analysis.jld2",
+    output:
+        "data/group_market_share_changes_treated_dealers.arrow",
+    log:
+        "logs/group_market_share_changes_treated_dealers.log",
+    run:
+        julia(
+            "scripts/transactions_market_share_change.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 rule data_treatment_effect_groups:
     input:
         "scripts/treatment_effect_groups.jl",
         "data/related_dealerships.txt",
-        treated_buyer="data/treated/buyer.arrow",
-        control_buyer="data/control/buyer.arrow",
-        treated_seller="data/treated/seller.arrow",
-        control_seller="data/control/seller.arrow",
-        group_market_share_changes="data/group_market_share_changes.arrow",
+        transactions_for_analysis="data/transactions_for_analysis.jld2",
+        treated="data/treated/{who}.arrow",
+        control="data/control/{who}.arrow",
+        group_market_share_changes="data/group_market_share_changes_{who}.arrow",
         dealer_demographics="data/dealer_demographics.arrow",
     output:
-        "data/treatment_effects/groups_{specification}.jld2",
+        "data/treatment_effects/groups_{who}_{specification}.jld2",
     log:
-        "logs/treatment_effects_groups_{specification}.log",
+        "logs/treatment_effects_groups_{who}_{specification}.log",
     run:
         julia(
             "scripts/treatment_effect_groups.jl",
@@ -603,6 +618,7 @@ rule data_treatment_effect_closest:
     input:
         "scripts/treatment_effect_closest.jl",
         get_related_dealerships,
+        transactions_for_analysis="data/transactions_for_analysis.jld2",
         treated_registrations="data/treated/closest_{group}.arrow",
         control_registrations="data/control/closest_{group}.arrow",
         transaction_uids="data/transaction_uids.csv",
@@ -661,7 +677,8 @@ rule data_facts:
 rule plot_event_study_overall:
     input:
         "scripts/event_study_plot.jl",
-        treatment_effect="data/treatment_effects/overall_{specification}.jld2",
+        treatment_effect_increasing="data/treatment_effects/overall_increasing_{specification}.jld2",
+        treatment_effect_decreasing="data/treatment_effects/overall_decreasing_{specification}.jld2",
     output:
         "plots/event_study/overall_{specification}_{statistic}.png",
     log:
@@ -676,17 +693,17 @@ rule plot_event_study_overall:
         )
 
 
-rule plot_diff_in_diff_cornerplot:
+rule table_diff_in_diff_correlations:
     input:
-        "scripts/plot_diff_in_diff_cornerplot.jl",
-        treatment_effect="data/treatment_effects/overall_weights.jld2",
+        "scripts/table_diff_in_diff_correlations.jl",
+        treatment_effect="data/treatment_effects/overall_{specification}.jld2",
     output:
-        "plots/diff_in_diff_cornerplot.png",
+        "tables/diff_in_diff_correlations_{specification}.tex",
     log:
-        "logs/plot_diff_in_diff_cornerplot.log",
+        "logs/table_diff_in_diff_correlations_{specification}.log",
     run:
         julia(
-            "scripts/plot_diff_in_diff_cornerplot.jl",
+            "scripts/table_diff_in_diff_correlations.jl",
             input=input,
             output=output,
             log=log,
@@ -713,15 +730,32 @@ rule plot_dealer_group_size_histogram:
         )
 
 
+rule plot_hist_market_share_changes:
+    input:
+        "scripts/plot_hist_market_share_changes.jl",
+        transactions_market_share_change="data/group_market_share_changes_treated_dealers.arrow",
+    output:
+        "plots/hist_market_share_changes.png",
+    log:
+        "logs/hist_market_share_changes.log",
+    run:
+        julia(
+            "scripts/plot_hist_market_share_changes.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 rule plot_market_share_change_te:
     input:
         "scripts/plot_market_share_changes_tes.jl",
-        group_market_share_changes="data/group_market_share_changes.arrow",
-        treatment_effect="data/treatment_effects/groups_{specification}.jld2",
+        group_market_share_changes="data/group_market_share_changes_{who}.arrow",
+        treatment_effect="data/treatment_effects/groups_{who}_{specification}.jld2",
     output:
-        "plots/market_share_change_te_{col}_{specification}.png",
+        "plots/market_share_change_te_{col}_{who}_{specification}.png",
     log:
-        "logs/plot_market_share_change_te_{col}_{specification}.log",
+        "logs/plot_market_share_change_te_{col}_{who}_{specification}.log",
     run:
         julia(
             "scripts/plot_market_share_changes_tes.jl",
@@ -730,21 +764,6 @@ rule plot_market_share_change_te:
             log=log,
             wildcards=wildcards,
         )
-
-
-rule plot_market_share_changes_tes:
-    input:
-        expand(
-            "plots/market_share_change_te_{col}_{specification}.png",
-            col=[
-                "mean_price",
-                "median_markup",
-                "mean_baseprice",
-                "total_units",
-                "trim_rank",
-            ],
-            specification=["weights"],
-        ),
 
 
 rule plot_trim_distn_manufacturer:
@@ -907,15 +926,36 @@ rule plot_effect_on_closest:
     input:
         "scripts/plot_effect_on_closest.jl",
         dealers_init="data/dealers_init.jld2",
-        treatment_effects="data/treatment_effects/closest_{group}_weights.jld2",
-        overall_effects="data/treatment_effects/overall_weights.jld2",
+        treatment_effect="data/treatment_effects/closest_{group}_{specification}.jld2",
+        overall_effects="data/treatment_effects/overall_{specification}.jld2",
         transaction_uids="data/transaction_uids.csv",
     output:
-        "plots/effect_on_closest_{group}.png",
+        "plots/effect_on_closest_{group}_{specification}.png",
     log:
-        "logs/plot_effect_on_closest_{group}.log",
+        "logs/plot_effect_on_closest_{group}_{specification}.log",
     run:
-        julia("scripts/plot_effect_on_closest.jl", input=input, output=output, log=log)
+        julia(
+            "scripts/plot_effect_on_closest.jl",
+            input=input,
+            output=output,
+            log=log,
+            wildcards=wildcards,
+        )
+
+rule table_diff_in_diff:
+    input:
+        "scripts/table_diff_in_diff.jl",
+        treatment_effects=expand(
+            "data/treatment_effects/overall_{direction}_{specification}.jld2",
+            specification=["twfe", "sunabraham", "synthetic"],
+            direction=["increasing", "decreasing"],
+        ),
+    output:
+        "tables/diff_in_diff.tex",
+    log:
+        "logs/table_diff_in_diff.log",
+    run:
+        julia("scripts/table_diff_in_diff.jl", input=input, output=output, log=log)
 
 
 rule table_body_make_count:
@@ -940,18 +980,6 @@ rule table_pq_crosstabs:
         "logs/table_pq_crosstabs.log",
     run:
         julia("scripts/table_pq_crosstabs.jl", input=input, output=output, log=log)
-
-
-rule table_diff_in_diff:
-    input:
-        "scripts/table_diff_in_diff.jl",
-        treatment_effects="data/treatment_effects/overall_weights.jld2",
-    output:
-        "tables/diff_in_diff.tex",
-    log:
-        "logs/table_diff_in_diff.log",
-    run:
-        julia("scripts/table_diff_in_diff.jl", input=input, output=output, log=log)
 
 
 rule table_triple_diff:
@@ -1013,23 +1041,23 @@ rule all:
     input:
         # Tables
         "tables/body_make_count.tex",
-        "tables/pq_crosstabs.tex",
-        "tables/diff_in_diff.tex",
-        "tables/triple_diff_urban.tex",
-        "tables/triple_diff_exiting_seller.tex",
-        #"tables/effect_on_closest.tex",
         "tables/trim_variation.tex",
         "tables/msa_concentration.tex",
+        "tables/diff_in_diff.tex",
         # Main plots
         "plots/dealer_group_size_histogram.png",
         "plots/dealer_group_size_cumulative.png",
-        "plots/diff_in_diff_cornerplot.png",
+        expand(
+            "tables/diff_in_diff_correlations_{specification}.tex",
+            specification=["twfe", "sunabraham", "synthetic"],
+        ),
         "plots/hist_odometer.png",
         "plots/registrations_spatial.png",
         "plots/sales_prices_quarterly.png",
         "plots/transaction_group_sizes.png",
         "plots/hhi_timeline.png",
         "plots/hhi_cross_sectional.png",
+        "plots/hist_market_share_changes.png",
         expand(
             "plots/treated_control_overlap_{demographic}.png",
             demographic=[
@@ -1041,7 +1069,11 @@ rule all:
                 "share_hispanic",
             ],
         ),
-        expand("plots/effect_on_closest_{group}.png", group=["franchise", "any"]),
+        expand(
+            "plots/effect_on_closest_{group}_{specification}.png",
+            group=["franchise", "any"],
+            specification=["twfe", "synthetic"],
+        ),
         # Event study plots
         expand(
             [
@@ -1050,14 +1082,21 @@ rule all:
                 "plots/event_study/overall_{specification}_total_sales.png",
                 "plots/event_study/overall_{specification}_trim_rank.png",
             ],
-            specification=["weights", "none", "callawaysantanna"],
+            specification=["sunabraham", "twfe", "callawaysantanna", "synthetic"],
         ),
         # Market share change plots
-        "plots/market_share_change_te_mean_price_weights.png",
-        "plots/market_share_change_te_median_markup_weights.png",
-        "plots/market_share_change_te_mean_baseprice_weights.png",
-        "plots/market_share_change_te_total_units_weights.png",
-        "plots/market_share_change_te_trim_rank_weights.png",
+        expand(
+            [
+                "plots/market_share_change_te_mean_price_{who}_{specification}.png",
+                "plots/market_share_change_te_median_markup_{who}_{specification}.png",
+                "plots/market_share_change_te_mean_baseprice_{who}_{specification}.png",
+                "plots/market_share_change_te_total_units_{who}_{specification}.png",
+                "plots/market_share_change_te_trim_rank_{who}_{specification}.png",
+                "plots/market_share_change_te_unique_trims_{who}_{specification}.png",
+            ],
+            specification=["twfe", "synthetic"],
+            who=["affiliated", "treated_dealers"],
+        ),
         # Trim distribution plots
         get_plot_trim_distns,
         # Facts

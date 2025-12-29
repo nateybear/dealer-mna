@@ -1,71 +1,83 @@
 using DealerMnA
-using StatsBase: mean
 
 using LinearAlgebra
 using LaTeXTabulars
 using LaTeXStrings
+using DataStructures: DefaultDict
+using Printf
 
 !isempty(ARGS) && snakemake!(ARGS[1])
 
 function fit_plus_std(x, y; digits = 3)
-    let significant = abs(x) > 1.96y, x = round(x; digits), y = round(y; digits)
-        LaTeXString(
-            "\\makecell{$x$(significant ? "\\textsuperscript{***}" : "") \\\\ ($y)\\\\[0.25em]}"
-        )
+    significant = abs(x) > 1.96y
+    formatstring = "%.$(digits)g"
+    x = @eval @sprintf($formatstring, $x)
+    y = @eval @sprintf($formatstring, $y)
+    return LaTeXString(
+        "\\makecell{$x$(significant ? "\\textsuperscript{***}" : "") \\\\ ($y)\\\\[0.25em]}"
+    )
+end
+
+titleize(s) = @> s string replace("_" => " ") titlecase
+
+function spec_to_dataframe(dict, specifications)
+    specifications = collect(pairs(specifications))
+    outcomes = sort(collect(keys(first(values(dict)))))
+    out = DataFrame(;
+        Outcome = titleize.(outcomes),
+        (Symbol.(last.(specifications)) .=> Ref(repeat([L""], length(outcomes))))...,
+    )
+    for (i, outcome) in enumerate(outcomes)
+        for (spec_key, spec_name) in specifications
+            out[i, spec_name] = fit_plus_std(
+                dict[spec_key][outcome].did_estimate,
+                dict[spec_key][outcome].did_stderr,
+            )
+        end
     end
+    return out
 end
 
 with_logging() do
-    df = read_arrow(snakemake.input["treatment_effects"])
-    extras = JLD2.load_object(snakemake.input["extras"])
-    cols = [:mean_price, :total_units, :trim_rank, :mean_baseprice, :median_markup]
-    table = DataFrame(
-        map(cols) do col
-            extra = pluck(extras, :stat => ByRow(==(col)))
-            offset = mean(extra.fes.fe_treated - extra.fes.fe_synthetic)
-            before = @> df begin
-                subset(:T => ByRow(==(-3)))
-                select(col => "estimate", "$(col)_se" => "se")
-                eachrow()
-                only()
-            end
-            after = @> df begin
-                subset(:T => ByRow(==(2)))
-                select(col => "estimate", "$(col)_se" => "se")
-                eachrow()
-                only()
-            end
-            difference = after.estimate - before.estimate
-            ∇ = [0, -1, 0, 0, 0, 1, 0]
-            se_difference = sqrt(∇' * extra.V * ∇)
-            before.estimate += offset
-            after.estimate += offset
-            before = fit_plus_std(before.estimate, before.se)
-            after = fit_plus_std(after.estimate, after.se)
-            difference = fit_plus_std(difference, se_difference)
-            return (; col, before, after, difference)
-        end,
+    dict = DefaultDict{String, Dict}(Dict{String, Any})
+    specifications = Dict(
+        "twfe" => "TWFE",
+        "sunabraham" => "Sun-Abraham",
+        "synthetic" => "Synthetic Control",
     )
+    directions = ["increasing", "decreasing"]
+    for (direction, specification) in Iterators.product(directions, keys(specifications))
+        filename = filter(snakemake.input["treatment_effects"]) do f
+            occursin(direction, f) && occursin(specification, f)
+        end
+        filename = only(filename)
+        dict[direction][specification] = JLD2.load_object(filename)
+    end
 
-    titleize(col) = replace(string(col), "_" => " ") |> titlecase
-    table.col = titleize.(table.col)
+    increasing_table = spec_to_dataframe(
+        dict["increasing"],
+        specifications,
+    )
+    decreasing_table = spec_to_dataframe(
+        dict["decreasing"],
+        specifications,
+    )
 
     open(snakemake.output[1], "w") do io
         latex_tabular(
             io,
-            Tabular("l|" * "c"^3),
+            Tabular("l|" * "c"^length(specifications)),
             [
                 Rule(:top),
-                ["", "Before", "After", "Difference"],
+                names(increasing_table),
                 Rule(:mid),
-                collect.(eachrow(table))...,
+                ["Increasing Concentration"],
                 Rule(:mid),
-                # give number of observations (thanks GPT)
-                [
-                    "Number of observations",
-                    string(nrow(extras.fes[1])),
-                    "",
-                ],
+                collect.(eachrow(increasing_table))...,
+                Rule(:mid),
+                ["Decreasing Concentration"],
+                Rule(:mid),
+                collect.(eachrow(decreasing_table))...,
                 Rule(:bottom),
             ],
         )
