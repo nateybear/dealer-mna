@@ -1086,6 +1086,7 @@ rule all:
                 "trim_rank",
                 "unique_trims",
                 "median_markup",
+                "mean_baseprice",
             ],
         ),
         # Market share change plots
@@ -1097,6 +1098,7 @@ rule all:
                 "mean_baseprice",
                 "median_markup",
                 "total_units",
+                "total_sales",
                 "trim_rank",
                 "unique_trims",
             ],
