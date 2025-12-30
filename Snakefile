@@ -942,6 +942,7 @@ rule plot_effect_on_closest:
             wildcards=wildcards,
         )
 
+
 rule table_diff_in_diff:
     input:
         "scripts/table_diff_in_diff.jl",
@@ -1076,26 +1077,29 @@ rule all:
         ),
         # Event study plots
         expand(
-            [
-                "plots/event_study/overall_{specification}_mean_price.png",
-                "plots/event_study/overall_{specification}_total_units.png",
-                "plots/event_study/overall_{specification}_total_sales.png",
-                "plots/event_study/overall_{specification}_trim_rank.png",
-            ],
+            "plots/event_study/overall_{specification}_{statistic}.png",
             specification=["sunabraham", "twfe", "callawaysantanna", "synthetic"],
+            statistic=[
+                "mean_price",
+                "total_units",
+                "total_sales",
+                "trim_rank",
+                "unique_trims",
+                "median_markup",
+            ],
         ),
         # Market share change plots
         expand(
-            [
-                "plots/market_share_change_te_mean_price_{who}_{specification}.png",
-                "plots/market_share_change_te_median_markup_{who}_{specification}.png",
-                "plots/market_share_change_te_mean_baseprice_{who}_{specification}.png",
-                "plots/market_share_change_te_total_units_{who}_{specification}.png",
-                "plots/market_share_change_te_trim_rank_{who}_{specification}.png",
-                "plots/market_share_change_te_unique_trims_{who}_{specification}.png",
-            ],
+            "plots/market_share_change_te_{statistic}_{who}_{specification}.png",
             specification=["twfe", "synthetic"],
             who=["affiliated", "treated_dealers"],
+            statistic=[
+                "mean_baseprice",
+                "median_markup",
+                "total_units",
+                "trim_rank",
+                "unique_trims",
+            ],
         ),
         # Trim distribution plots
         get_plot_trim_distns,

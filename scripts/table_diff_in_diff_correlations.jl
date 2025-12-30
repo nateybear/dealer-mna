@@ -21,7 +21,7 @@ with_logging() do
         test = CorrelationTest(combined.diff_in_diff, combined.diff_in_diff_1)
         significant = pvalue(test) < 0.05 ? "^{***}" : ""
         statistic = round(test.r, digits = 3)
-        out[a, b] = LaTeXString("$(statistic)$(significant)")
+        out[a, b] = LaTeXString("\$$(statistic)$(significant)\$")
     end
     tablenames = titleize.(names(out, 1))
     open(snakemake.output[1], "w") do io

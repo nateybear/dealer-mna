@@ -97,5 +97,5 @@ with_logging() do
         JLD2.load_object(snakemake.input["treatment_effect_increasing"])[statistic],
         JLD2.load_object(snakemake.input["treatment_effect_decreasing"])[statistic],
     ]
-    event_study_plot!(results, ["Increasing Concentration", "Decreasing Concentration"])
+    event_study_plot!(results, ["Increasing Share", "Decreasing Share"])
 end

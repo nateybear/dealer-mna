@@ -97,6 +97,12 @@ with_logging() do
     trims_grouped = @> price_table groupby([:make, :model, :model_year]) combine(nrow)
     push!(facts, "numtrimspermodel" => round(mean(trims_grouped.nrow), digits = 2))
 
+    # NUMBER OF TRAVELERS
+    push!(facts, "numclosestbuyer" => round(100mean(registrations.normed_distance .== 1), digits = 2))
+    travelers = subset(registrations, :normed_distance => ByRow(>(1)), view = true)
+    push!(facts, "avgdisttravelers" => round(mean(travelers.actual_distance), digits = 2))
+    push!(facts, "fartravelers" => round(100mean(travelers.actual_distance .> 100), digits = 2))
+
     open(snakemake.output[1], "w") do io
         print(io, process_facts(facts))
     end
