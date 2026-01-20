@@ -4,8 +4,7 @@ using StatsBase: cov
 using LinearAlgebra
 using Optim
 import Random: shuffle!, seed!
-
-using Base.Threads
+using OhMyThraeds
 
 seed!(78704)
 
