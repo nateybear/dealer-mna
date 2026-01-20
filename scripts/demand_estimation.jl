@@ -33,8 +33,8 @@ if rank == 0
     θ = glorot_initialization(model)
     W = let
         ξ, z_j = Demand.ξ̂(model, params)
-        moments = reshape(sum(ξ .* z_j, dims = (1, 2, 3)), :)
-        inv(vcov(moments))
+        moments = reshape(ξ .* z_j, prod(Base.size(ξ)[1:3]), :)
+        inv(cov(moments))
     end
     zips = Registrations.zips().zip_code
     result = optimize(
