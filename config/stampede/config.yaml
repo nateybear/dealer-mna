@@ -5,7 +5,8 @@ default-resources:
   cpus_per_task: 1
   runtime: 1800
   slurm_partition: icx
-  mem_mb_per_cpu: 8000
+  mem_mb_per_cpu: 4000
+  nodes: 6
 config:
   threads: 1
 jobs: 15
