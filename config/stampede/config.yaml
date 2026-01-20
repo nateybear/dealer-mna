@@ -1,13 +1,12 @@
 executor: slurm
 rerun-incomplete: true
 default-resources:
-  tasks: 340
-  cpus_per_task: 1
+  tasks: 1
+  cpus_per_task: 80
   runtime: 1800
   slurm_partition: icx
-  mem_mb_per_cpu: 4000
-  nodes: 6
+  mem_mb_per_cpu: 8000
+  nodes: 1
 config:
-  threads: 1
-  mpi: "ibrun"
+  threads: 80
 jobs: 15
