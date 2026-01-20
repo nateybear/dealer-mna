@@ -1,6 +1,5 @@
 executor: slurm
 rerun-incomplete: true
-mpi: "ibrun"
 default-resources:
   tasks: 340
   cpus_per_task: 1
@@ -10,4 +9,5 @@ default-resources:
   nodes: 6
 config:
   threads: 1
+  mpi: "ibrun"
 jobs: 15
