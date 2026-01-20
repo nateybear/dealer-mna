@@ -1,5 +1,5 @@
-function δ(params::AbstractVector, model::DemandModel)::SparseArray{Float32, 5}
-    guesses::Vector{Float32} = @pull delta params model # only j * t * f (lacking trims)
+function δ(params::AbstractVector, model::DemandModel)::SparseArray{Float32, 4}
+    guesses::Vector{Float32} = @pull delta params model # only t * j * f (lacking trims)
 
     deltas = similar(model.product_info, Float32)
 
@@ -17,23 +17,30 @@ function δ(params::AbstractVector, model::DemandModel)::SparseArray{Float32, 5}
         deltas[idxs] .*= 1 .+ quantile.(Gamma(abs.(θ)...), ks)
     end
 
-    return reshape(deltas, 1, size(deltas)...) # 1 × T × J × K × F
+    return deltas # T × J × K × F
 end
 
 # demographic/product attribute interaction, demographic/price and random coeff interaction, distance disutility
 function μ(params, model::AbstractDemandModel, zip_code)::SparseArray{Float32, 5}
-    Πᵦ::Matrix{Float32} = reshape(@pull(demo_product_params, params, model), n_demographics(model), n_product_attributes(model)) # (n_demo × n_product)
+    Πᵦ::Matrix{Float32} = reshape(
+        @pull(demo_product_params, params, model),
+        n_demographics(model),
+        n_product_attributes(model),
+    ) # (n_demo × n_product)
     Πₚ = @pull demo_price_params params model # (n_demo)
     η = @pull dist_params params model # (2)
     Π = hcat(Πᵦ, Πₚ) # n_demo x (n_product + 1)
 
     x_j = x_matrix(model) # T × J × K × F × (n_product + price)
+    x_j = reshape(x_j, 1, size(x_j)...) # 1 × T × J × K × F × (n_product + price)
     D_i::Vector{Float32} = collect(model.agent_data[zip_code][DEMOGRAPHIC_ATTRIBUTES]) # n_demo-vector
 
     dist_f = model.distances[zip_code, :] # 1 x F
 
     # start with demographic utility over price and product attributes
-    out::SparseArray{Float32, 5} = tensorcontract(x_j, (1, 2, 3, 4, 5, -1), SparseArray(Π'D_i), (-1,))
+    out::SparseArray{Float32, 5} = tensorcontract(
+        x_j, (1, 2, 3, 4, 5, -1), SparseArray(Π'D_i), (-1,)
+    )
 
     # add distance disutility
     @inbounds for (uid, dist) in zip(names(dist_f, 1), dist_f)
@@ -55,7 +62,9 @@ function μ(params, model::AbstractDemandModel, zip_code)::SparseArray{Float32, 
 
         # Copy existing entries and add random utility
         @inbounds for s in 1:S
-            out_keys = Base.KeySet{CartesianIndex{5}, Dict{CartesianIndex{5}, Float32}}(nonzero_keys(out))
+            out_keys = Base.KeySet{CartesianIndex{5}, Dict{CartesianIndex{5}, Float32}}(
+                nonzero_keys(out)
+            )
             for idx in out_keys
                 (_, i...) = Tuple(idx)
                 expanded_out[s, i...] = Float32(out[idx])
@@ -88,71 +97,52 @@ function randomutility(params, model::DemandModel{RandomCoefType})::SparseArray{
     return out
 end
 
-function with_blas_single_threading(f)
-    old = BLAS.get_num_threads()
-    BLAS.set_num_threads(1)
-    try
-        f()
-    finally
-        BLAS.set_num_threads(old)
-    end
-end
-
 # loglikelihood for all models, trims, quarters, dealers
 function loglikelihood(
-    model::AbstractDemandModel, 
-    params::AbstractVector, 
-    stochastic::Bool = true
+    model::AbstractDemandModel,
+    params::AbstractVector,
+    z::String,
 )::Float32
-    zips::Vector{String} = if stochastic
-        sample(collect(keys(model.agent_data)), length(model.agent_data) ÷ 10, replace = false) # sample 10% of zip codes for likelihood calculation
-    else
-        collect(keys(model.agent_data))
-    end
-
-    # mean utilities and trim adjustments (1 × T × J × F × K)
+    # mean utilities and trim adjustments (T × J × K × F, dropping nothing)
     δ̂ = δ(params, model)
+    δ̂ = reshape(δ̂, 1, size(δ̂)...)
 
     mean_vec = SparseArray{Float32, 1}(ones(Float32, size(model.u.draws)))
     mean_vec /= Float32(size(model.u.draws, 1))
 
-    with_blas_single_threading() do
-        Folds.mapreduce(+, zips, WorkStealingEx(simd = true)) do z
-            # utility up to idiosyncratic error (S x T × J × F × K)
-            μ̂ = μ(params, model, z)
+    # utility up to idiosyncratic error (S x T × J × K × F)
+    μ̂ = μ(params, model, z)
 
-            grid = if size(μ̂, 1) > 1
-                out = similar(μ̂)
-                @inbounds for s in 1:size(μ̂, 1)
-                    for idx in nonzero_keys(δ̂)
-                        (_, i...) = Tuple(idx)
-                        out[s, i...] = δ̂[1, i...]
-                    end
-                end
-                out + μ̂
-            else
-                δ̂ + μ̂
+    grid = if size(μ̂, 1) > 1
+        out = similar(μ̂)
+        @inbounds for s in 1:size(μ̂, 1)
+            for idx in nonzero_keys(δ̂)
+                (_, i...) = Tuple(idx)
+                out[s, i...] = δ̂[1, i...]
             end
-
-            # choice probabilities (S x T × J × F × K)
-            CCPs!(model, grid)
-
-            # Take mean across first dimension
-            grid = tensorcontract(mean_vec, (-1,), grid, (-1, 2, 3, 4, 5))
-
-            # log mean choice probabilities
-            grid_keys::Vector{CartesianIndex{4}} = collect(nonzero_keys(grid))
-            grid[grid_keys] = log.(grid[grid_keys])
-            grid_reshape::SparseArray{Float32, 1} = reshape(grid, :)
-
-            # pull counts for zip z
-            iz = searchsortedfirst(collect(keys(model.counts_lookup.z)), z)
-            counts::SparseArray{Float32, 1} = reshape(model.counts[iz, :, :, :, :], :)
-
-            # log likelihood of all models, trims, quarters, firms for zip z
-            Float32(dot(counts, grid_reshape))
         end
+        out + μ̂
+    else
+        δ̂ + μ̂
     end
+
+    # choice probabilities (S x T × J × K × F)
+    CCPs!(model, grid)
+
+    # Take mean across first dimension
+    grid = tensorcontract(mean_vec, (-1,), grid, (-1, 2, 3, 4, 5))
+
+    # log mean choice probabilities
+    grid_keys::Vector{CartesianIndex{4}} = collect(nonzero_keys(grid))
+    @inbounds grid[grid_keys] = log.(grid[grid_keys])
+    grid_reshape::SparseArray{Float32, 1} = reshape(grid, :)
+
+    # pull counts for zip
+    iz = searchsortedfirst(collect(keys(model.counts_lookup.z)), z)
+    counts::SparseArray{Float32, 1} = reshape(model.counts[iz, :, :, :, :], :)
+
+    # log likelihood of all models, trims, quarters, firms for zip
+    return Float32(dot(counts, grid_reshape))
 end
 
 function CCPs!(model, grid)
@@ -166,4 +156,66 @@ function CCPs!(model, grid)
         end
     end
     return nothing
+end
+
+function ξ̂(model::AbstractDemandModel, params::AbstractVector)::Tuple{SparseArray{Float32, 3}, SparseArray{Float32, 4}}
+    # mean utilities and trim adjustments (T × J × F, dropping K)
+    δ̂ = δ(params, model)[:, :, 1, :]
+
+    x_j = x_matrix(model)[:, :, 1, :, :] # T × J × F × (n_product + price), dropping K
+    z_j = z_matrix(model)[:, :, 1, :, :]
+
+    βₓ = @pull mean_product_params params model # (n_product)
+    βₚ = only(@pull mean_price_params params model) # (1)
+
+    # not decomposing for now
+    # ρ = only(@pull rho params model)
+    # γ = @pull group_fes params model # (n_group_fes)
+
+    # Ω, i_Ω = Ω_matrix(model.ownership, model.adjacency)
+    # @inbounds @simd for idx in i_Ω
+    #     t, j, f, g = idx.I
+    #     Ω[t, j, f, g] = model.ownership[t, f, g] + ρ * model.adjacency[t, j, f, g]
+    # end
+
+    residualize!(δ̂, model.trimfree_lookup) # this is in-place
+
+    # below are copies, since indexing sparse arrays creates new arrays
+    @inbounds for i_demo in axes(x_j, 4)[1:(end-1)]
+        x_j[:, :, :, i_demo] = residualize!(x_j[:, :, :, i_demo], model.trimfree_lookup)
+        z_j[:, :, :, i_demo] .= x_j[:, :, :, i_demo]
+    end
+    x_j[:, :, :, size(x_j, 4)] = residualize!(x_j[:, :, :, size(x_j, 4)], model.trimfree_lookup)
+    z_j[:, :, :, size(z_j, 4)] = residualize!(z_j[:, :, :, size(z_j, 4)], model.trimfree_lookup)
+
+    linear_params = tensorcontract(x_j, (1, 2, 3, -1), SparseArray(vcat(βₓ, βₚ)), (-1,))
+
+    # @inbounds for i in axes(Ω, 4)
+    #     @info "Iteration $i of $(size(Ω, 4)) residualizing Ω matrix"
+    #     linear_params += residualize!(Ω[:, :, :, i], model.trimfree_lookup) * γ[i]
+    # end
+
+    return δ̂ - linear_params, z_j
+end
+
+function Π̂(model::AbstractDemandModel, params::AbstractVector, W = I)::Float32
+    ξ, z_j = ξ̂(model, params)
+    moments = reshape(sum(ξ .* z_j, dims = (1, 2, 3)), :)
+    return 0.5f0 * only(moments' * W * moments)
+end
+
+function residualize!(X, lookup)
+    i_iter = 0
+    while true
+        i_iter += 1
+        X_old = copy(X)
+        for t in values(lookup.t)
+            @inbounds X[t] .-= mean(X[t])
+        end
+        for j in values(lookup.j)
+            @inbounds X[j] .-= mean(X[j])
+        end
+        rdiff = norm(X - X_old) / norm(X_old)
+        rdiff < 1e-4 && return X
+    end
 end

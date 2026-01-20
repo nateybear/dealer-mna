@@ -1,0 +1,11 @@
+executor: slurm
+rerun-incomplete: true
+default-resources:
+  tasks: 340
+  cpus_per_task: 1
+  runtime: 1800
+  slurm_partition: icx
+  mem_mb_per_cpu: 8000
+config:
+  threads: 1
+jobs: 15

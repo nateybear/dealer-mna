@@ -20,6 +20,11 @@ struct DemandModel{T <: AbstractCoefType} <: AbstractDemandModel
     agent_data::Dict{String, AgentInfo} # demographics for each zip code, sorted by zip
     counts::SparseArray{Int16, 5} # z, t, j, k, f
     counts_lookup::CountsLookup
+    ownership::SparseArray{Bool, 3} # t, f, g
+    ownership_lookup::OwnershipLookup
+    adjacency::SparseArray{Float32, 4} # t, j, f, g
+    adjacency_lookup::AdjacencyLookup
+    trimfree_lookup::TrimFreeLookup
 end
 function DemandModel{T}(;
     distances,
@@ -28,10 +33,15 @@ function DemandModel{T}(;
     agent_data,
     counts,
     counts_lookup,
+    ownership,
+    ownership_lookup,
+    adjacency,
+    adjacency_lookup,
+    trimfree_lookup,
 ) where {T <: AbstractCoefType}
     u = T(
         100, # number of simulation draws
-        size(product_info, 1), # number of (quarter, dealer, model, trim) combinations
+        size(product_info, 1), # number of (quarter, model, trim, dealer) combinations
         prod(size(product_info)[2:4]),
     )
     return DemandModel{T}(
@@ -42,10 +52,15 @@ function DemandModel{T}(;
         agent_data,
         counts,
         counts_lookup,
+        ownership,
+        ownership_lookup,
+        adjacency,
+        adjacency_lookup,
+        trimfree_lookup,
     )
 end
 
-# number of (quarter, dealer, model) combinations
+# number of (quarter, model, dealer) combinations
 n_delta(model::DemandModel) = length(keys(model.product_lookup.tjf))
 n_trim_params(model::DemandModel) = 2length(unique(model.product_lookup.make))
 n_demographics(_) = length(DEMOGRAPHIC_ATTRIBUTES) # median income, urban, pct_black, pct_hispanic
@@ -58,6 +73,7 @@ n_dist_params(_) = 2 # distance disutility
 n_mean_product_params(x) = n_product_attributes(x)
 n_mean_price_params(_) = 1 # price
 n_rho(_) = 1
+n_group_fes(model) = size(model.adjacency, 4)
 
 const ORDER = [
     n_delta,
@@ -68,7 +84,8 @@ const ORDER = [
     n_dist_params,
     n_mean_product_params,
     n_mean_price_params,
-    n_rho,
+    # n_rho,
+    # n_group_fes
 ]
 
 total_n_params(model::DemandModel) = sum(f(model) for f in ORDER)
@@ -92,7 +109,27 @@ end
         info = model.product_info[idx]
         out[Tuple(idx)..., :] .= [info[PRODUCT_ATTRIBUTES]..., info.p]
     end
-    return reshape(out, 1, size(out)...)
+    return out
+end
+
+@memoize function z_matrix(model)
+    out = SparseArray{Float32}(
+        undef, (size(model.product_info)..., n_product_attributes(model) + 1)
+    ) # splat product info into last dimension
+    for idx in nonzero_keys(model.product_info)
+        info = model.product_info[idx]
+        out[Tuple(idx)..., :] .= [info[PRODUCT_ATTRIBUTES]..., info.p_hausman]
+    end
+    return out
+end
+
+@memoize function Ω_matrix(ownership, adjacency)
+    Ω = similar(adjacency)
+    tj_combos = unique(idx.I[1:2] for idx in nonzero_keys(adjacency))
+    for (t, j) in tj_combos
+        @inbounds Ω[t, j, :, :] .= ownership[t, :, :] + adjacency[t, j, :, :]
+    end
+    return Ω, collect(nonzero_keys(Ω))
 end
 
 function glorot_initialization(model)

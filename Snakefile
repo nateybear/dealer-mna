@@ -118,6 +118,22 @@ rule data_new_registrations:
             log=log,
         )
 
+rule data_dealers_init_filtered:
+    input:
+        "scripts/dealers_init_filtered.jl",
+        new_registrations="data/arrow/new_registrations.arrow",
+        dealers_init="data/dealers_init.jld2",
+    output:
+        "data/dealers_init_filtered.jld2",
+    log:
+        "logs/new_registrations.log",
+    run:
+        julia(
+            "scripts/dealers_init_filtered.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
 
 # trick price table by using unmatched registrations instead of matched registrations
 rule data_price_table:
@@ -144,6 +160,21 @@ checkpoint data_all_manufacturers:
     run:
         julia("scripts/all_manufacturers.jl", input=input, output=output, log=log)
 
+rule data_demand_estimates:
+    input:
+        "scripts/demand_estimation.jl",
+        model="data/model_frames.jld2",
+    output:
+        "data/demand_estimates.jld2",
+    log:
+        "logs/demand_estimation.log",
+    run:
+        julia(
+            "scripts/demand_estimation.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
 
 # ============================================================================
 # CHECKPOINT AGGREGATION HELPERS
@@ -225,7 +256,7 @@ rule data_transactions_for_analysis:
         *julia_dealers,
         "src/empirics/Empirics.jl",
         "scripts/transactions_for_analysis.jl",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         price_table="data/price_table.arrow",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
@@ -247,7 +278,7 @@ checkpoint data_transaction_uids:
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
     output:
         "data/transaction_uids.csv",
     log:
@@ -262,7 +293,7 @@ rule data_treated_registrations:
         "src/empirics/Empirics.jl",
         "scripts/treated_registrations.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         price_table="data/price_table.arrow",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
@@ -286,7 +317,7 @@ rule data_control_registrations:
         "src/empirics/Empirics.jl",
         "scripts/control_registrations.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         price_table="data/price_table.arrow",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
@@ -313,7 +344,7 @@ rule data_treated_registrations_related:
         "src/empirics/Empirics.jl",
         "scripts/treated_registrations.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         price_table="data/price_table.arrow",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
@@ -343,7 +374,7 @@ rule data_control_registrations_related:
         "src/empirics/Empirics.jl",
         "scripts/control_registrations.jl",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         price_table="data/price_table.arrow",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
@@ -400,7 +431,7 @@ checkpoint data_affiliated_dealerships:
         "scripts/affiliated_dealerships.jl",
         transactions="data/transactions_for_analysis.jld2",
         transaction_uids="data/transaction_uids.csv",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
     output:
@@ -427,7 +458,7 @@ checkpoint data_closest_dealerships:
     input:
         "data/transaction_uids.csv",
         "scripts/closest_dealerships.jl",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         transactions="data/transactions_for_analysis.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
@@ -473,7 +504,7 @@ rule data_dealer_demographics:
     input:
         "scripts/dealer_demographics.jl",
         "data/zip_demographics.csv",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
     output:
         "data/dealer_demographics.arrow",
     log:
@@ -487,7 +518,7 @@ rule data_treatment_effect_overall:
         glob.glob("src/empirics/*.jl"),
         "scripts/treatment_effects.jl",
         dealer_demographics="data/dealer_demographics.arrow",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
         treated_registrations="data/treated/treated_dealers.arrow",
@@ -516,7 +547,7 @@ rule data_treatment_effect_cut:
         "scripts/treatment_effects.jl",
         "data/related_dealerships.txt",  # Ensure checkpoints are run first
         dealer_demographics="data/dealer_demographics.arrow",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
         treated_registrations="data/treated/treated_dealers.arrow",
@@ -552,7 +583,7 @@ rule data_group_market_share_changes_affiliated:
         "data/related_dealerships.txt",
         "src/empirics/market_share.jl",
         get_all_related_dealerships,
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         transaction_uids="data/transaction_uids.csv",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
@@ -573,7 +604,7 @@ rule data_group_market_share_changes_treated_dealers:
     input:
         "scripts/transactions_market_share_change.jl",
         "src/empirics/market_share.jl",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         transaction_uids="data/transaction_uids.csv",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
     output:
@@ -622,7 +653,7 @@ rule data_treatment_effect_closest:
         treated_registrations="data/treated/closest_{group}.arrow",
         control_registrations="data/control/closest_{group}.arrow",
         transaction_uids="data/transaction_uids.csv",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         treatment_effect_overall="data/treatment_effects/overall_{specification}.jld2",
         dealer_demographics="data/dealer_demographics.arrow",
     output:
@@ -643,7 +674,7 @@ rule data_model_frames:
     input:
         "scripts/data_model_frames.jl",
         "data/statistics.txt",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
         price_table="data/price_table.arrow",
     output:
@@ -662,7 +693,7 @@ rule data_facts:
         new_registrations="data/arrow/new_registrations.arrow",
         price_table="data/price_table.arrow",
         popular_models="data/arrow/popular_models.arrow",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         transaction_uids="data/transaction_uids.csv",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         dealer_demographics="data/dealer_demographics.arrow",
@@ -713,7 +744,7 @@ rule table_diff_in_diff_correlations:
 rule plot_dealer_group_size_histogram:
     input:
         "scripts/dealer_group_size_histogram.jl",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
         popular_models="data/arrow/popular_models.arrow",
     output:
@@ -847,7 +878,7 @@ rule plot_registrations_spatial:
     input:
         "scripts/plot_registrations_spatial.jl",
         new_registrations="data/arrow/new_registrations.arrow",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
     output:
         "plots/registrations_spatial.png",
     log:
@@ -878,7 +909,7 @@ rule plot_sales_prices_quarterly:
 rule plot_transaction_group_sizes:
     input:
         "scripts/plot_transaction_group_sizes.jl",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
     output:
         "plots/transaction_group_sizes.png",
@@ -896,7 +927,7 @@ rule plot_transaction_group_sizes:
 rule plot_hhi_longitudinal_cross_sectional:
     input:
         "scripts/plot_hhi_longitudinal_cross_sectional.jl",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         new_registrations="data/arrow/new_registrations.arrow",
     output:
         longitudinal="plots/hhi_timeline.png",
@@ -925,7 +956,7 @@ rule plot_effect_on_closest:
         group="(franchise|any)",
     input:
         "scripts/plot_effect_on_closest.jl",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         treatment_effect="data/treatment_effects/closest_{group}_{specification}.jld2",
         overall_effects="data/treatment_effects/overall_{specification}.jld2",
         transaction_uids="data/transaction_uids.csv",
@@ -1028,7 +1059,7 @@ rule table_trim_variation:
 rule table_msa_concentration:
     input:
         "scripts/table_msa_concentration.jl",
-        dealers_init="data/dealers_init.jld2",
+        dealers_init="data/dealers_init_filtered.jld2",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
     output:
         "tables/msa_concentration.tex",
@@ -1096,6 +1127,7 @@ rule all:
             who=["affiliated", "treated_dealers"],
             statistic=[
                 "mean_baseprice",
+                "mean_price",
                 "median_markup",
                 "total_units",
                 "total_sales",
@@ -1204,7 +1236,8 @@ def julia(scriptfile, **rule):
                 f"julia --project=. -e 'using DaemonMode; runargs()' {scriptfile} '{f.name}'"
             )
         else:
+            threads = config.get("threads", "auto")
             # run the script with the temp file as input
-            shell(f"julia --project=. --threads=auto {scriptfile} < '{f.name}'")
+            shell(f"julia --project=. --threads={threads} {scriptfile} < '{f.name}'")
         # delete the temp file
         os.remove(f.name)

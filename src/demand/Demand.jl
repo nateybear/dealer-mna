@@ -21,11 +21,17 @@ using DataStructures: DefaultOrderedDict # maintain insertion order
 using Memoize
 using LinearAlgebra
 using StatsBase
-using Base.Threads: @threads
+using Base.Threads: @threads, @spawn
 using SparseArrayKit
-using TensorOperations: tensorcontract, tensorproduct
+using TensorOperations: tensorcontract, tensorproduct, @tensor
 using Folds
 using FoldsThreads
+using Graphs
+using Combinatorics
+import ArchGDAL as AG
+
+# include("keyedsparsearray.jl")
+# __init__() = _generate_method_overrides()
 
 const PRODUCT_ATTRIBUTES = [:domestic]
 const DEMOGRAPHIC_ATTRIBUTES = [:median_earnings_inv, :urban_pct, :black_pct, :hispanic_pct]
@@ -44,6 +50,7 @@ const DOMESTIC_MAKES = Set([
 ProductInfo = @NamedTuple begin
     domestic::Bool
     p::Float32
+    p_hausman::Float32
     n::Int16
     g::UUID
 end
@@ -62,50 +69,69 @@ end
 
 ProductLookup = @NamedTuple begin
     t::Lookup{4, Tuple{Int64, Int64}} # (year, quarter)
-    f::Lookup{4, UUID}                # dealer uid
     j::Lookup{4, Tuple{String, String, Int64}} # (make, model, model_year)
     k::Lookup{4, Float32}             # trim rank
+    f::Lookup{4, UUID}                # dealer uid
     make::Lookup{4, String}           # make
-    tjf::Lookup{4, Tuple{Tuple{Int64, Int64}, UUID, Tuple{String, String, Int64}}} # (t, f, j)
+    tjf::Lookup{4, Tuple{Tuple{Int64, Int64}, Tuple{String, String, Int64}, UUID}} # (t, j, f)
 end
-function new_product_lookup(df)
-    out = ProductLookup((;
-        t = Lookup{4, Tuple{Int64, Int64}}(),
-        j = Lookup{4, Tuple{String, String, Int64}}(),
-        f = Lookup{4, UUID}(),
-        k = Lookup{4, Float32}(),
-        make = Lookup{4, String}(),
-        tjf = Lookup{4, Tuple{Tuple{Int64, Int64}, UUID, Tuple{String, String, Int64}}}(),
-    ))
-    for idx in (:t, :j, :k, :f)
-        for val in sort(unique(df[!, idx]))
-            empty!(out[idx][val]) # force key creation to preserve order
-        end
-    end
-    return out
+
+function _ProductLookup(kwargs)
+    return ProductLookup(
+        merge(
+            kwargs,
+            (;
+                make = Lookup{4, String}(),
+                tjf = Lookup{4, Tuple{Tuple{Int64, Int64}, Tuple{String, String, Int64}, UUID}}()),
+        ),
+    )
 end
 
 CountsLookup = @NamedTuple begin
+    z::Lookup{5, String}               # zip code
     t::Lookup{5, Tuple{Int64, Int64}} # (year, quarter)
-    f::Lookup{5, UUID} # dealer uid
     j::Lookup{5, Tuple{String, String, Int64}} # (make, model, model_year)
     k::Lookup{5, Float32} # trim rank
-    z::Lookup{5, String}               # zip code
+    f::Lookup{5, UUID} # dealer uid
 end
-function new_counts_lookup(df)
-    out = CountsLookup((;
-        t = Lookup{5, Tuple{Int64, Int64}}(),
-        f = Lookup{5, UUID}(),
-        j = Lookup{5, Tuple{String, String, Int64}}(),
-        k = Lookup{5, Float32}(),
-        z = Lookup{5, String}(),
-    ))
-    for idx in (:t, :j, :k, :f, :z)
+
+OwnershipLookup = @NamedTuple begin
+    t::Lookup{3, Tuple{Int64, Int64}} # (year, quarter)
+    f::Lookup{3, UUID}                # dealer uid
+    g::Lookup{3, UUID}                # group id
+end
+
+AdjacencyLookup = @NamedTuple begin
+    t::Lookup{4, Tuple{Int64, Int64}} # (year, quarter)
+    j::Lookup{4, Tuple{String, String, Int64}} # (make, model, model_year)
+    f::Lookup{4, UUID}                # dealer uid
+    g::Lookup{4, UUID}                # group id
+end
+
+TrimFreeLookup = @NamedTuple begin
+    t::Lookup{3, Tuple{Int64, Int64}}
+    j::Lookup{3, Tuple{String, String, Int64}}
+    f::Lookup{3, UUID}
+end
+
+function new_lookup(T, df::DataFrame, cols...)
+    out = T((; (col => Lookup{length(cols), eltype(df[!, col])}() for col in cols)...))
+    for idx in cols
         for val in sort(unique(df[!, idx]))
             empty!(out[idx][val]) # force key creation to preserve order
         end
     end
     return out
+end
+function new_lookup(T; kwargs...)
+    k_max, v_max = argmax(pairs(kwargs)) do (_, v)
+        length(v)
+    end
+    df = insertcols(
+        DataFrame(k_max => v_max),
+        (k => first(Iterators.cycle(v), length(v_max)) for (k, v) in pairs(kwargs) if k ≠ k_max)...,
+    )
+    return new_lookup(T, df, keys(kwargs)...)
 end
 
 # so this works with sparse arrays
