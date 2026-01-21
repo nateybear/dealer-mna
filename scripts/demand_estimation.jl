@@ -8,7 +8,11 @@ import Random: shuffle!, seed!
 
 seed!(78704)
 
-snakemake!()
+if isempty(ARGS)
+    snakemake!()
+else
+    snakemake!(ARGS[1])
+end
 
 using MPI
 MPI.Init()

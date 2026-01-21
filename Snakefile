@@ -1241,8 +1241,11 @@ def julia(scriptfile, **rule):
             )
         else:
             threads = config.get("threads", "auto")
-            runner = f"{config["mpi"]} julia" if config.get("mpi", "") else "julia"
             # run the script with the temp file as input
-            shell(f"{runner} --project=. --threads={threads} {scriptfile} < '{f.name}'")
+            if config.get("mpi", ""):
+                cmd = f"{config["mpi"]} julia --project=. --threads={threads} {scriptfile} '{f.name}'"
+            else:
+                cmd = f"julia --project=. --threads={threads} {scriptfile} < '{f.name}'"
+            shell(cmd)
         # delete the temp file
         os.remove(f.name)
