@@ -28,7 +28,7 @@ MPI.Barrier(comm)
 struct StopSignal end
 
 stop!() = for i in 1:(syze - 1)
-        MPI.Send(StopSignal(), i, 0, comm)
+        MPI.send(StopSignal(), i, 0, comm)
     end
 
 with_logging() do
@@ -53,12 +53,12 @@ with_logging() do
         ) do params
             shuffle!(zips)
             for i in 1:(syze - 1)
-                MPI.Send(params, i, 0, comm)
-                MPI.Send(zips[i], i, 0, comm)
+                MPI.send(params, i, 0, comm)
+                MPI.send(zips[i], i, 0, comm)
             end
             objective = Demand.Π̂(model, params, W)
             for i in 1:(syze - 1)
-                signal = MPI.Recv{Union{Float32, StopSignal}}(i, 0, comm)
+                signal, _ = MPI.recv(i, 0, comm)
                 if signal isa StopSignal
                     @info "Process $i signaled to stop"
                     stop!()
@@ -70,23 +70,26 @@ with_logging() do
             return objective
         end
         stop!()
-        JLD2.save_object(snakemake.output["result"], result)
+        JLD2.save_object(snakemake.output[1], result)
     else
         while true
-            params = MPI.Recv{Union{Vector{Float32}, StopSignal}}(0, 0, comm)
+            params, _ = MPI.recv(0, 0, comm)
             if params isa StopSignal
                 @info "Received stop signal from master"
                 break
             end
-            z = MPI.Recv{String}(0, 0, comm)
+            z, _ = MPI.recv(0, 0, comm)
             try
                 likelihood = Demand.loglikelihood(model, params, z)
-                MPI.Send(likelihood, 0, 0, comm)
+                MPI.send(likelihood, 0, 0, comm)
             catch e
                 @error "Error in worker process $rank: $e"
-                MPI.Send(StopSignal(), 0, 0, comm)
+                MPI.send(StopSignal(), 0, 0, comm)
                 break
             end
         end
     end
 end
+
+MPI.Barrier(comm)
+MPI.Finalize()
