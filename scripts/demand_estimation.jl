@@ -44,7 +44,7 @@ with_logging() do
                 store_trace = true,
                 show_trace = true,
                 show_every = 1,
-                iterations = 1_000_000,
+                iterations = 50_000,
             ),
         ) do params
             shuffle!(zips)
