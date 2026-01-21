@@ -32,7 +32,7 @@ with_logging() do
         @info "Starting optimization with $(syze) processes"
         θ = glorot_initialization(model)
         W = let
-            ξ, z_j = Demand.ξ̂(model, params)
+            ξ, z_j = Demand.ξ̂(model, θ)
             moments = reshape(ξ .* z_j, prod(Base.size(ξ)[1:3]), :)
             inv(cov(moments))
         end
