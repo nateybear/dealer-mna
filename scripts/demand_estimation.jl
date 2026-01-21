@@ -17,19 +17,19 @@ model = DemandModel{FixedCoefType}(; JLD2.load_object(snakemake.input["model"]).
 
 comm = MPI.COMM_WORLD
 rank = MPI.Comm_rank(comm)
-size = MPI.Comm_size(comm)
+syze = MPI.Comm_size(comm)
 
 MPI.Barrier(comm)
 
 struct StopSignal end
 
-stop!() = for i in 1:(size - 1)
+stop!() = for i in 1:(syze - 1)
         MPI.Send(StopSignal(), i, 0, comm)
     end
 
 with_logging() do
     if rank == 0
-        @info "Starting optimization with $(size) processes"
+        @info "Starting optimization with $(syze) processes"
         θ = glorot_initialization(model)
         W = let
             ξ, z_j = Demand.ξ̂(model, params)
@@ -48,12 +48,12 @@ with_logging() do
             ),
         ) do params
             shuffle!(zips)
-            for i in 1:(size - 1)
+            for i in 1:(syze - 1)
                 MPI.Send(params, i, 0, comm)
                 MPI.Send(zips[i], i, 0, comm)
             end
             objective = Demand.Π̂(model, params, W)
-            for i in 1:(size - 1)
+            for i in 1:(syze - 1)
                 signal = MPI.Recv{Union{Float32, StopSignal}}(i, 0, comm)
                 if signal isa StopSignal
                     @info "Process $i signaled to stop"
