@@ -38,7 +38,7 @@ with_logging() do
         W = let
             ξ, z_j = Demand.ξ̂(model, θ)
             moments = reshape(ξ .* z_j, prod(Base.size(ξ)[1:3]), :)
-            inv(cov(moments))
+            Float32.(inv(cov(moments)))
         end
         zips = Registrations.zips().zip_code
         result = optimize(
