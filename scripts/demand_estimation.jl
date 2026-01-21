@@ -43,7 +43,7 @@ with_logging() do
             Optim.Options(
                 store_trace = true,
                 show_trace = true,
-                show_every = 10,
+                show_every = 1,
                 iterations = 1_000_000,
             ),
         ) do params
