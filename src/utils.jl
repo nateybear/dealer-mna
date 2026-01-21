@@ -19,7 +19,7 @@ function snakemake!(infile = stdin)
     return nothing
 end
 
-__init__() = snakemake!()
+# __init__() = snakemake!()
 
 #### wrap logging
 import LoggingExtras

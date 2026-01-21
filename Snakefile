@@ -168,12 +168,15 @@ rule data_demand_estimates:
         "data/demand_estimates.jld2",
     log:
         "logs/demand_estimation.log",
+    params:
+        tmpdir="/scratch/09405/nch772/tmp"
     run:
         julia(
             "scripts/demand_estimation.jl",
             input=input,
             output=output,
             log=log,
+            params=params,
         )
 
 # ============================================================================
@@ -1225,7 +1228,8 @@ def julia(scriptfile, **rule):
     rule_dict = {k: process_args(v) for k, v in rule.items()}
     # write dumps(rule) to a temp file
     # use tempfile package
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
+    tmpdir = rule.get("params", {}).get("tmpdir", None)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json", dir=tmpdir) as f:
         f.write(dumps(rule_dict).encode())
         f.flush()
         # make sure to close the file
