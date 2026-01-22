@@ -12,11 +12,17 @@ end
 
 snakemake = nothing
 
-function snakemake!(infile = stdin)
+function snakemake!(infile)
     in_dict = infile == stdin && Base.isinteractive() ? Dict() : JSON3.read(infile, Dict)
     snek = Snakemake(; (Symbol(k) => v for (k, v) in in_dict)...)
     setproperty!(@__MODULE__, :snakemake, snek)
     return nothing
+end
+
+snakemake!() = if isempty(ARGS)
+    snakemake!(stdin)
+else
+    snakemake!(ARGS[1])
 end
 
 # __init__() = snakemake!()

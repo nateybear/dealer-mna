@@ -29,6 +29,7 @@ using FoldsThreads
 using Graphs
 using Combinatorics
 import ArchGDAL as AG
+import FiniteDiff: finite_difference_gradient, GradientCache
 
 # include("keyedsparsearray.jl")
 # __init__() = _generate_method_overrides()

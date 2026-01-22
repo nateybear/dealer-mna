@@ -90,14 +90,22 @@ const ORDER = [
 
 total_n_params(model::DemandModel) = sum(f(model) for f in ORDER)
 
-macro pull(name, params, model)
+macro indexof(name, params, model)
     fname = Symbol("n_$(string(name))")
     quote
         i = findfirst(==($fname), ORDER)
         n_before = mapreduce(+, first(ORDER, i - 1), init = 0) do f
             f($(esc(model)))
         end
-        @view $(esc(params))[n_before .+ (1:$fname($(esc(model))))]
+        n_current = $fname($(esc(model)))
+        n_before .+ (1:n_current)
+    end
+end
+
+macro pull(name, params, model)
+    quote
+        i = @indexof($name, $(esc(params)), $(esc(model)))
+        @view $(esc(params))[i]
     end
 end
 
@@ -114,13 +122,45 @@ end
 
 @memoize function z_matrix(model)
     out = SparseArray{Float32}(
-        undef, (size(model.product_info)..., n_product_attributes(model) + 1)
+        undef, (size(model.product_info)..., n_product_attributes(model) + 2)
     ) # splat product info into last dimension
     for idx in nonzero_keys(model.product_info)
         info = model.product_info[idx]
-        out[Tuple(idx)..., :] .= [info[PRODUCT_ATTRIBUTES]..., info.p_hausman]
+        out[Tuple(idx)..., :] .= [info[PRODUCT_ATTRIBUTES]..., info.p_hausman, 1.0f0]
     end
     return out
+end
+
+function residualize!(X, lookup)
+    i_iter = 0
+    while true
+        i_iter += 1
+        X_old = copy(X)
+        for t in values(lookup.t)
+            @inbounds X[t] .-= mean(X[t])
+        end
+        for j in values(lookup.j)
+            @inbounds X[j] .-= mean(X[j])
+        end
+        rdiff = norm(X - X_old) / norm(X_old)
+        rdiff < 1e-4 && return X
+    end
+end
+
+@memoize function x_residualized(model)
+    x_j = deepcopy(x_matrix(model))
+    @inbounds for i_demo in axes(x_j, 5)
+        x_j[:, :, :, :, i_demo] = residualize!(x_j[:, :, :, :, i_demo], model.product_lookup)
+    end
+    return x_j
+end
+
+@memoize function z_residualized(model)
+    z_j = deepcopy(z_matrix(model))
+    @inbounds for i_demo in axes(z_j, 5)[1:(end-1)]
+        z_j[:, :, :, :, i_demo] = residualize!(z_j[:, :, :, :, i_demo], model.product_lookup)
+    end
+    return z_j
 end
 
 @memoize function Ω_matrix(ownership, adjacency)

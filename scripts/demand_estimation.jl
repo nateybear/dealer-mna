@@ -8,11 +8,7 @@ import Random: shuffle!, seed!
 
 seed!(78704)
 
-if isempty(ARGS)
-    snakemake!()
-else
-    snakemake!(ARGS[1])
-end
+snakemake!()
 
 using MPI
 MPI.Init()
@@ -25,9 +21,45 @@ syze = MPI.Comm_size(comm)
 
 MPI.Barrier(comm)
 
+struct LikelihoodRequest
+    params::Vector{Float32}
+    z::String
+end
+
+struct GradientRequest
+    params::Vector{Float32}
+    z::String
+end
+
 struct StopSignal end
 
-stop!() = for i in 1:(syze - 1)
+function parent_scatter(T, zips, W, params)
+    shuffle!(zips)
+    for i in 1:(syze - 1)
+        MPI.send(T(params, zips[i]), i, 0, comm)
+    end
+    out = parent_handle(T, model, params, W)
+    for i in 1:(syze - 1)
+        msg, _ = MPI.recv(i, 0, comm)
+        if msg isa StopSignal
+            @info "Process $i signaled to stop"
+            stop!()
+            error("Stopping optimization as requested by process $i")
+        else
+            out -= msg
+        end
+    end
+    return out
+end
+
+parent_handle(::Type{LikelihoodRequest}, model, W, params) = Demand.Π̂(model, params, W)
+parent_handle(::Type{GradientRequest}, model, W, params) = Demand.dΠ̂(model, params, W)
+
+child_handle(r::LikelihoodRequest) = Demand.loglikelihood(model, r.params, r.z)
+child_handle(r::GradientRequest) = Demand.dloglikelihood(model, r.params, r.z)
+
+stop!() =
+    for i in 1:(syze - 1)
         MPI.send(StopSignal(), i, 0, comm)
     end
 
@@ -41,7 +73,13 @@ with_logging() do
             Float32.(inv(cov(moments)))
         end
         zips = Registrations.zips().zip_code
+        f = OnceDifferentiable(
+            parent_scatter$(LikelihoodRequest, zips, W),
+            parent_scatter$(GradientRequest, zips, W),
+            θ,
+        )
         result = optimize(
+            f,
             θ,
             Adam(),
             Optim.Options(
@@ -50,38 +88,19 @@ with_logging() do
                 show_every = 1,
                 iterations = 50_000,
             ),
-        ) do params
-            shuffle!(zips)
-            for i in 1:(syze - 1)
-                MPI.send(params, i, 0, comm)
-                MPI.send(zips[i], i, 0, comm)
-            end
-            objective = Demand.Π̂(model, params, W)
-            for i in 1:(syze - 1)
-                signal, _ = MPI.recv(i, 0, comm)
-                if signal isa StopSignal
-                    @info "Process $i signaled to stop"
-                    stop!()
-                    error("Stopping optimization as requested by process $i")
-                else
-                    objective -= signal
-                end
-            end
-            return objective
-        end
+        )
         stop!()
         JLD2.save_object(snakemake.output[1], result)
     else
         while true
-            params, _ = MPI.recv(0, 0, comm)
-            if params isa StopSignal
+            msg, _ = MPI.recv(0, 0, comm)
+            if msg isa StopSignal
                 @info "Received stop signal from master"
                 break
             end
-            z, _ = MPI.recv(0, 0, comm)
             try
-                likelihood = Demand.loglikelihood(model, params, z)
-                MPI.send(likelihood, 0, 0, comm)
+                result = child_handle(msg)
+                MPI.send(result, 0, 0, comm)
             catch e
                 @error "Error in worker process $rank: $e"
                 MPI.send(StopSignal(), 0, 0, comm)
