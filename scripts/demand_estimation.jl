@@ -86,7 +86,7 @@ with_logging() do
                 store_trace = true,
                 show_trace = true,
                 show_every = 1,
-                iterations = 50_000,
+                iterations = 8_000,
             ),
         )
         stop!()
