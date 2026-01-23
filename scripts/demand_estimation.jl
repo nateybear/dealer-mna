@@ -49,6 +49,7 @@ function parent_scatter(T, zips, W, params)
             out -= msg
         end
     end
+    normalize!(out, T)
     return out
 end
 
@@ -57,6 +58,14 @@ parent_handle(::Type{GradientRequest}, model, W, params) = Demand.dΠ̂(model, p
 
 child_handle(r::LikelihoodRequest) = Demand.loglikelihood(model, r.params, r.z)
 child_handle(r::GradientRequest) = Demand.dloglikelihood(model, r.params, r.z)
+
+normalize!(out, ::Type{LikelihoodRequest}) = nothing
+function normalize!(out, ::Type{GradientRequest})
+    g = norm(out)
+    if g > 1
+        out ./= g
+    end
+end
 
 stop!() =
     for i in 1:(syze - 1)
@@ -75,19 +84,30 @@ with_logging() do
             θ,
             inplace = false,
         )
-        result = optimize(
-            f,
-            θ,
-            Adam(alpha = 0.0001f0, beta_mean = 0.9f0, beta_var = 0.99f0, epsilon=1f-8),
-            Optim.Options(
-                store_trace = true,
-                show_trace = true,
-                show_every = 1,
-                iterations = 8_000,
-            ),
-        )
-        stop!()
-        JLD2.save_object(snakemake.output[1], result)
+        i = 0
+        lr_max = 5f-5
+        lr_min = 1f-6
+        T = 100
+	while true
+            i += 1
+            lr = lr_min + 0.5 * (lr_max - lr_min) * (1 + cos(i * pi / T))
+            @info "In loop $i"
+            result = optimize(
+                f,
+                θ,
+                Adam(alpha = Float32(lr), beta_mean = 0.9f0, beta_var = 0.99f0, epsilon=1f-8),
+                Optim.Options(
+                    store_trace = true,
+                    show_trace = true,
+                    show_every = 1,
+                    iterations = 100,
+                ),
+            )    
+            JLD2.save_object(snakemake.output[1], result)
+            p, ext = splitext(snakemake.output[1])
+            JLD2.save_object("$(p)_$(i)$(ext)", result)
+            θ = result.minimizer
+        end
     else
         while true
             msg, _ = MPI.recv(0, 0, comm)
