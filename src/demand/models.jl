@@ -131,17 +131,22 @@ end
     return out
 end
 
+@memoize function collect_lookups(lookup)
+    t_lookup = collect.(values(lookup.t))
+    j_lookup = collect.(values(lookup.j))
+    return t_lookup, j_lookup
+end
+
 function residualize!(X, lookup)
     i_iter = 0
+    t_lookup, j_lookup = collect_lookups(lookup)
     while true
         i_iter += 1
         X_old = copy(X)
-        for t in values(lookup.t)
-            t = collect(t)
+        for t in t_lookup
             @inbounds X[t] .-= mean(X[t])
         end
-        for j in values(lookup.j)
-            j = collect(j)
+        for j in j_lookup
             @inbounds X[j] .-= mean(X[j])
         end
         rdiff = norm(X - X_old) / norm(X_old)
