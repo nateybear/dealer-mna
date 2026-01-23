@@ -137,13 +137,19 @@ function residualize!(X, lookup)
         i_iter += 1
         X_old = copy(X)
         for t in values(lookup.t)
+            t = collect(t)
             @inbounds X[t] .-= mean(X[t])
         end
         for j in values(lookup.j)
+            j = collect(j)
             @inbounds X[j] .-= mean(X[j])
         end
         rdiff = norm(X - X_old) / norm(X_old)
-        rdiff < 1e-4 && return X
+        if rdiff < 1e-4
+            @info "Terminating after $i_iter iterations"
+            return X
+        end
+        i_iter % 10 == 0 && @info "Residualizing hit $i_iter iterations"
     end
 end
 
@@ -157,7 +163,7 @@ end
 
 @memoize function z_residualized(model)
     z_j = deepcopy(z_matrix(model))
-    @inbounds for i_demo in axes(z_j, 5)[1:(end-1)]
+    @inbounds for i_demo in axes(z_j, 5)[1:(end - 1)]
         z_j[:, :, :, :, i_demo] = residualize!(z_j[:, :, :, :, i_demo], model.product_lookup)
     end
     return z_j
@@ -173,12 +179,13 @@ end
 end
 
 function glorot_initialization(model)
-    out = Float32.(
-        rand(
-            Uniform(-6 / total_n_params(model), 6 / total_n_params(model)),
-            total_n_params(model),
+    out =
+        Float32.(
+            rand(
+                Uniform(-6 / total_n_params(model), 6 / total_n_params(model)),
+                total_n_params(model),
+            )
         )
-    )
     i_Θ = @indexof trim_params out model
     out[i_Θ] .= 1.0f0
     return out

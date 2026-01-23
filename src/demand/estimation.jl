@@ -4,7 +4,9 @@ function δ(params::AbstractVector, model::DemandModel)::SparseArray{Float32, 4}
     deltas = similar(model.product_info, Float32)
 
     @inbounds for (idxs, delta) in zip(values(model.product_lookup.tjf), guesses)
-        deltas[idxs] .= delta
+        for idx in idxs
+            deltas[idx] = delta
+        end
     end
 
     # adjust by trim parameters (trim ≥ 0)
@@ -14,7 +16,9 @@ function δ(params::AbstractVector, model::DemandModel)::SparseArray{Float32, 4}
     @inbounds for (θ, idxs) in zip(partition(θs, 2), values(model.product_lookup.make))
         iks = nth.(Tuple.(idxs), 3) # get trim ranks for these indices
         @inline ks = nth.(Ref(keys(model.product_lookup.k)), iks)
-        deltas[idxs] .*= 1 .+ quantile.(Gamma(θ...), ks)
+        for (idx, k) in zip(idxs, ks)
+            deltas[idx] *= 1 + quantile(Gamma(θ...), k)
+        end
     end
 
     return deltas # T × J × K × F
@@ -207,9 +211,7 @@ function optimalW(model::AbstractDemandModel, params::AbstractVector)::AbstractM
     ξ = ξ̂(model, params)
     Z = z_residualized(model)
     m = mapreduce(hcat, axes(Z, 5)) do i_demo
-        map(nonzero_keys(ξ)) do idx
-            @inbounds ξ[idx] * Z[Tuple(idx)..., i_demo]
-        end
+        [@inbounds ξ[idx] * Z[Tuple(idx)..., i_demo] for idx in nonzero_keys(ξ)]
     end
     return Float32.(inv(cov(m)))
 end
@@ -258,7 +260,7 @@ function dΠ̂(model::AbstractDemandModel, params::AbstractVector, W = I)::Abstr
             col = z_var
             ∇m[row, col] = sum(
                 @inbounds X[Tuple(idx)..., x_var] * Z[Tuple(idx)..., z_var]
-                for idxs in nonzero_keys(model.product_info)
+                for idx in nonzero_keys(model.product_info)
             )
         end
     end
@@ -313,6 +315,8 @@ function dloglikelihood(
     i_θ = @indexof trim_params params model
     θs = @pull trim_params params model
 
+    nth = last ∘ first
+
     # grad for delta
     @inbounds for (i, iter) in enumerate(pairs(model.product_lookup.tjf))
         (tjf, idxs) = iter
@@ -322,8 +326,10 @@ function dloglikelihood(
         iks = nth.(Tuple.(idxs), 3) # get trim ranks for these indices
         ks = nth.(Ref(keys(model.product_lookup.k)), iks)
         trim_factor = 1 .+ quantile.(Gamma(θ...), ks)
-        t = idxs[1].I[1]
-        out[i_δ[i]] = sum(trim_factor .* (counts[idxs] .- t_counts[t] * grid[idxs]))
+        t = first(idxs).I[1]
+        out[i_δ[i]] = sum(
+            tf * (counts[idx] - t_counts[t] * grid[idx]) for (tf, idx) in zip(trim_factor, idxs)
+        )
     end
 
     # grad for trim params
@@ -381,4 +387,6 @@ function dloglikelihood(
                 (counts[idx] - t_counts[first(idx.I)] * grid[idx])
         end
     end
+
+    return out
 end

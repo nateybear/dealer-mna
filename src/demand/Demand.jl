@@ -63,10 +63,8 @@ AgentInfo = NamedTuple{
 
 # for a given key, return the list of Cartesian indices in the sparse array
 # where that key appears
-Lookup{N, T} = DefaultOrderedDict{T, Vector{CartesianIndex{N}}}
-function Lookup{N, T}() where {N, T}
-    return DefaultOrderedDict{T, Vector{CartesianIndex{N}}}(Vector{CartesianIndex{N}})
-end
+Lookup{N, T} = DefaultOrderedDict{T, Set{CartesianIndex{N}}}
+Lookup{N, T}() where {N, T} = DefaultOrderedDict{T, Set{CartesianIndex{N}}}(Set{CartesianIndex{N}})
 
 ProductLookup = @NamedTuple begin
     t::Lookup{4, Tuple{Int64, Int64}} # (year, quarter)

@@ -107,7 +107,7 @@ macro index(lookup, vals...)
             $(getval(v)),
         )) for (i, v) in enumerate(vals)
     ]
-    push_ops = [:(union!($(esc(lookup)).$(v)[$(getval(v))], [i])) for v in vals]
+    push_ops = [:(push!($(esc(lookup)).$(v)[$(getval(v))], i)) for v in vals]
     quote
         $(assignments...)
         i = CartesianIndex($(index_vars...))
@@ -223,8 +223,8 @@ function load_model_frames()
     @info "Filling product info matrix"
     for row in eachrow(firm_product_data)
         i = @index product_lookup t j k f
-        union!(product_lookup.make[first(row.j)], [i]) # add make after the fact
-        union!(product_lookup.tjf[(row.t, row.j, row.f)], [i]) # add (t, j, f) after the fact
+        push!(product_lookup.make[first(row.j)], i) # add make after the fact
+        push!(product_lookup.tjf[(row.t, row.j, row.f)], i) # add (t, j, f) after the fact
         domestic = first(row.j) in DOMESTIC_MAKES
         product_info_matrix[i] = (;
             domestic,
@@ -342,18 +342,24 @@ function load_model_frames()
     )
 
     for t in keys(product_lookup.t)
-        trimfree_idxs = unique(CartesianIndex(t, j, f) for (t, j, _, f) in Tuple.(product_lookup.t[t]))
-        trimfree_lookup.t[t] = trimfree_idxs
+        trimfree_idxs = unique(
+            CartesianIndex(t, j, f) for (t, j, _, f) in Tuple.(product_lookup.t[t])
+        )
+        trimfree_lookup.t[t] = Set(trimfree_idxs)
     end
 
     for j in keys(product_lookup.j)
-        trimfree_idxs = unique(CartesianIndex(t, j, f) for (t, j, _, f) in Tuple.(product_lookup.j[j]))
-        trimfree_lookup.j[j] = trimfree_idxs
+        trimfree_idxs = unique(
+            CartesianIndex(t, j, f) for (t, j, _, f) in Tuple.(product_lookup.j[j])
+        )
+        trimfree_lookup.j[j] = Set(trimfree_idxs)
     end
 
     for f in keys(product_lookup.f)
-        trimfree_idxs = unique(CartesianIndex(t, j, f) for (t, j, _, f) in Tuple.(product_lookup.f[f]))
-        trimfree_lookup.f[f] = trimfree_idxs
+        trimfree_idxs = unique(
+            CartesianIndex(t, j, f) for (t, j, _, f) in Tuple.(product_lookup.f[f])
+        )
+        trimfree_lookup.f[f] = Set(trimfree_idxs)
     end
 
     return (
