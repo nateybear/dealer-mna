@@ -173,10 +173,13 @@ end
 end
 
 function glorot_initialization(model)
-    return Float32.(
+    out = Float32.(
         rand(
             Uniform(-6 / total_n_params(model), 6 / total_n_params(model)),
             total_n_params(model),
         )
     )
+    i_Θ = @indexof trim_params out model
+    out[i_Θ] .= 1.0f0
+    return out
 end
