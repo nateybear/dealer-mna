@@ -67,11 +67,7 @@ with_logging() do
     if rank == 0
         @info "Starting optimization with $(syze) processes"
         θ = glorot_initialization(model)
-        W = let
-            ξ, z_j = Demand.ξ̂(model, θ)
-            moments = reshape(ξ .* z_j, prod(Base.size(ξ)[1:3]), :)
-            Float32.(inv(cov(moments)))
-        end
+        W = Float32.(inv(cov(Demand.moments(params, θ))))
         zips = Registrations.zips().zip_code
         f = OnceDifferentiable(
             parent_scatter$(LikelihoodRequest, zips, W),
@@ -99,8 +95,8 @@ with_logging() do
                 break
             end
             try
-                result = child_handle(msg)
-                MPI.send(result, 0, 0, comm)
+                resp = child_handle(msg)
+                MPI.send(resp, 0, 0, comm)
             catch e
                 @error "Error in worker process $rank: $e"
                 MPI.send(StopSignal(), 0, 0, comm)
