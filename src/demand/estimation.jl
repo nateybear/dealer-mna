@@ -203,6 +203,17 @@ function moments(model::AbstractDemandModel, params::AbstractVector)::AbstractVe
     end
 end
 
+function optimalW(model::AbstractDemandModel, params::AbstractVector)::AbstractMatrix
+    ξ = ξ̂(model, params)
+    Z = z_residualized(model)
+    m = mapreduce(hcat, axes(Z, 5)) do i_demo
+        map(nonzero_keys(ξ)) do idx
+            @inbounds ξ[idx] * Z[Tuple(idx)..., i_demo]
+        end
+    end
+    return Float32.(inv(cov(m)))
+end
+
 function Π̂(model::AbstractDemandModel, params::AbstractVector, W = I)::Float32
     m = moments(model, params)
     return 0.5f0 * only(m' * W * m)
@@ -349,7 +360,8 @@ function dloglikelihood(
         for i_D in axes(D_i, 1)
             row = i_Π[i_D, i_X]
             out[row] = sum(
-                D_i[i_D] * X[Tuple(idx)..., i_X] * (counts[idx] - t_counts[first(idx.I)] * grid[idx])
+                D_i[i_D] * X[Tuple(idx)..., i_X] *
+                (counts[idx] - t_counts[first(idx.I)] * grid[idx])
                 for idx in nonzero_keys(model.product_info)
             )
         end
@@ -361,9 +373,11 @@ function dloglikelihood(
     @inbounds for (uid, dist) in zip(names(dist_f, 1), dist_f)
         idxs = model.product_lookup.f[uid]
         @inbounds for idx in idxs
-            out[i_η[1]] -= exp(η[1] .+ η[2] * dist) *
+            out[i_η[1]] -=
+                exp(η[1] .+ η[2] * dist) *
                 (counts[idx] - t_counts[first(idx.I)] * grid[idx])
-            out[i_η[2]] -= dist * exp(η[1] .+ η[2] * dist) *
+            out[i_η[2]] -=
+                dist * exp(η[1] .+ η[2] * dist) *
                 (counts[idx] - t_counts[first(idx.I)] * grid[idx])
         end
     end

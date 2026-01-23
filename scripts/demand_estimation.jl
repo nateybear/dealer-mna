@@ -67,12 +67,13 @@ with_logging() do
     if rank == 0
         @info "Starting optimization with $(syze) processes"
         θ = glorot_initialization(model)
-        W = Float32.(inv(cov(Demand.moments(params, θ))))
+        W = Demand.optimalW(params, θ)
         zips = Registrations.zips().zip_code
         f = OnceDifferentiable(
             parent_scatter$(LikelihoodRequest, zips, W),
             parent_scatter$(GradientRequest, zips, W),
             θ,
+            inplace = false,
         )
         result = optimize(
             f,
