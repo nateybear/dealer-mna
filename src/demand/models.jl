@@ -140,16 +140,17 @@ end
 function residualize!(X, lookup)
     i_iter = 0
     t_lookup, j_lookup = collect_lookups(lookup)
+    X_old = similar(X)
     while true
         i_iter += 1
-        X_old = copy(X)
+        copy!(X_old, X)
         for t in t_lookup
-            @inbounds X[t] .-= mean(X[t])
+            @inbounds X[t] .-= @fastmath mean(X[t])
         end
         for j in j_lookup
-            @inbounds X[j] .-= mean(X[j])
+            @inbounds X[j] .-= @fastmath mean(X[j])
         end
-        rdiff = norm(X - X_old) / norm(X_old)
+        rdiff = @fastmath norm(X - X_old) / norm(X_old)
         if rdiff < 1e-4
             @info "Terminating after $i_iter iterations"
             return X
