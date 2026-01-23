@@ -38,7 +38,7 @@ function parent_scatter(T, zips, W, params)
     for i in 1:(syze - 1)
         MPI.send(T(params, zips[i]), i, 0, comm)
     end
-    out = parent_handle(T, model, params, W)
+    out = parent_handle(T, model, W, params)
     for i in 1:(syze - 1)
         msg, _ = MPI.recv(i, 0, comm)
         if msg isa StopSignal
