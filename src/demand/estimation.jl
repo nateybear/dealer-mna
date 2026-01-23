@@ -14,7 +14,7 @@ function δ(params::AbstractVector, model::DemandModel)::SparseArray{Float32, 4}
     @inbounds for (θ, idxs) in zip(partition(θs, 2), values(model.product_lookup.make))
         iks = nth.(Tuple.(idxs), 3) # get trim ranks for these indices
         @inline ks = nth.(Ref(keys(model.product_lookup.k)), iks)
-        deltas[idxs] .*= 1 .+ quantile.(Gamma(abs.(θ)...), ks)
+        deltas[idxs] .*= 1 .+ quantile.(Gamma(θ...), ks)
     end
 
     return deltas # T × J × K × F
@@ -229,7 +229,7 @@ function dΠ̂(model::AbstractDemandModel, params::AbstractVector, W = I)::Abstr
         θ = nth(partition(θs, 2), imake)
         iks = nth.(Tuple.(idxs), 3) # get trim ranks for these indices
         ks = nth.(Ref(keys(model.product_lookup.k)), iks)
-        trim_factor = 1 .+ quantile.(Gamma(abs.(θ)...), ks)
+        trim_factor = 1 .+ quantile.(Gamma(θ...), ks)
         @inbounds for col in axes(∇m, 2)
             row = i_δ[i]
             ∇m[row, col] = sum(t * Z[Tuple(idx)..., col] for (t, idx) in zip(trim_factor, idxs))
@@ -264,7 +264,7 @@ function dΠ̂(model::AbstractDemandModel, params::AbstractVector, W = I)::Abstr
         end
         @inbounds for (k, idxs_k) in pairs(k_dict)
             i_θᵢ = nth(partition(i_θ, 2), i)
-            grad = finite_difference_gradient(θ -> quantile.(Gamma(abs.(θ)...), k), θ, cache)
+            grad = finite_difference_gradient(θ -> quantile.(Gamma(θ...), k), θ, cache)
             @inbounds for col in axes(Z, 5)
                 ∇m[i_θᵢ, col] += sum(δs[idx] * grad * Z[Tuple(idx)..., col] for idx in idxs_k)
             end
@@ -310,7 +310,7 @@ function dloglikelihood(
         θ = nth(partition(θs, 2), imake)
         iks = nth.(Tuple.(idxs), 3) # get trim ranks for these indices
         ks = nth.(Ref(keys(model.product_lookup.k)), iks)
-        trim_factor = 1 .+ quantile.(Gamma(abs.(θ)...), ks)
+        trim_factor = 1 .+ quantile.(Gamma(θ...), ks)
         t = idxs[1].I[1]
         out[i_δ[i]] = sum(trim_factor .* (counts[idxs] .- t_counts[t] * grid[idxs]))
     end
@@ -327,7 +327,7 @@ function dloglikelihood(
         end
         @inbounds for (k, idxs_k) in pairs(k_dict)
             i_θᵢ = nth(partition(i_θ, 2), i)
-            grad = finite_difference_gradient(θ -> quantile.(Gamma(abs.(θ)...), k), θ, cache)
+            grad = finite_difference_gradient(θ -> quantile.(Gamma(θ...), k), θ, cache)
             out[i_θᵢ] = sum(
                 δs[idx] * grad * (counts[idx] - t_counts[first(idx.I)] * grid[idx])
                 for idx in idxs_k
