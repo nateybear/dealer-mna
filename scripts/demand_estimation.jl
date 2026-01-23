@@ -78,7 +78,7 @@ with_logging() do
         result = optimize(
             f,
             θ,
-            Adam(),
+            Adam(alpha = 0.0001f0, beta_mean = 0.9f0, beta_var = 0.99f0, epsilon=1f-8),
             Optim.Options(
                 store_trace = true,
                 show_trace = true,

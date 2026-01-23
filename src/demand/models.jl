@@ -154,7 +154,7 @@ function residualize!(X, lookup)
 end
 
 @memoize function x_residualized(model)
-    x_j = deepcopy(x_matrix(model))
+    x_j = copy(x_matrix(model))
     @inbounds for i_demo in axes(x_j, 5)
         x_j[:, :, :, :, i_demo] = residualize!(x_j[:, :, :, :, i_demo], model.product_lookup)
     end
@@ -162,7 +162,7 @@ end
 end
 
 @memoize function z_residualized(model)
-    z_j = deepcopy(z_matrix(model))
+    z_j = copy(z_matrix(model))
     @inbounds for i_demo in axes(z_j, 5)[1:(end - 1)]
         z_j[:, :, :, :, i_demo] = residualize!(z_j[:, :, :, :, i_demo], model.product_lookup)
     end
