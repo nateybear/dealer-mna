@@ -1,5 +1,5 @@
 using DealerMnA
-import .Demand: DemandModel, FixedCoefType, glorot_initialization
+import .Demand: DemandModel, FixedCoefType, initial_parameters
 using StatsBase: cov
 using LinearAlgebra
 LinearAlgebra.BLAS.set_num_threads(1)
@@ -61,7 +61,7 @@ child_handle(r::GradientRequest) = Demand.dloglikelihood(model, r.params, r.z)
 
 normalize!(out, ::Type{LikelihoodRequest}) = nothing
 function normalize!(out, ::Type{GradientRequest})
-    g = norm(out)
+    g = norm(out) / 10
     if g > 1
         out ./= g
     end
@@ -75,20 +75,20 @@ stop!() =
 with_logging() do
     if rank == 0
         @info "Starting optimization with $(syze) processes"
-        θ = glorot_initialization(model)
-        W = Demand.optimalW(model, θ)
+        θ = initial_parameters(model)
         zips = Registrations.zips().zip_code
-        f = OnceDifferentiable(
-            parent_scatter$(LikelihoodRequest, zips, W),
-            parent_scatter$(GradientRequest, zips, W),
-            θ,
-            inplace = false,
-        )
         i = 0
         lr_max = 5f-5
         lr_min = 1f-6
         T = 100
 	while true
+            W = Demand.optimalW(model, θ)
+            f = OnceDifferentiable(
+                parent_scatter$(LikelihoodRequest, zips, W),
+                parent_scatter$(GradientRequest, zips, W),
+                θ,
+                inplace = false,
+            )
             i += 1
             lr = lr_min + 0.5 * (lr_max - lr_min) * (1 + cos(i * pi / T))
             @info "In loop $i"

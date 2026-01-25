@@ -17,7 +17,7 @@ function δ(params::AbstractVector, model::DemandModel)::SparseArray{Float32, 4}
         iks = nth.(Tuple.(idxs), 3) # get trim ranks for these indices
         @inline ks = nth.(Ref(keys(model.product_lookup.k)), iks)
         for (idx, k) in zip(idxs, ks)
-            deltas[idx] *= 1 + quantile(Gamma(θ...), k)
+            deltas[idx] *= 1 + quantile(Gamma(exp.(θ)...), k)
         end
     end
 
@@ -242,7 +242,7 @@ function dΠ̂(model::AbstractDemandModel, params::AbstractVector, W = I)::Abstr
         θ = nth(partition(θs, 2), imake)
         iks = nth.(Tuple.(idxs), 3) # get trim ranks for these indices
         ks = nth.(Ref(keys(model.product_lookup.k)), iks)
-        trim_factor = 1 .+ quantile.(Gamma(θ...), ks)
+        trim_factor = 1 .+ quantile.(Gamma(exp.(θ)...), ks)
         @inbounds for col in axes(∇m, 2)
             row = i_δ[i]
             ∇m[row, col] = sum(t * Z[Tuple(idx)..., col] for (t, idx) in zip(trim_factor, idxs))
@@ -277,7 +277,7 @@ function dΠ̂(model::AbstractDemandModel, params::AbstractVector, W = I)::Abstr
         end
         @inbounds for (k, idxs_k) in pairs(k_dict)
             i_θᵢ = nth(partition(i_θ, 2), i)
-            grad = finite_difference_gradient(θ -> quantile.(Gamma(θ...), k), θ, cache)
+            grad = finite_difference_gradient(θ -> quantile.(Gamma(exp.(θ)...), k), θ, cache)
             @inbounds for col in axes(Z, 5)
                 ∇m[i_θᵢ, col] += sum(δs[idx] * grad * Z[Tuple(idx)..., col] for idx in idxs_k)
             end
@@ -325,7 +325,7 @@ function dloglikelihood(
         θ = nth(partition(θs, 2), imake)
         iks = nth.(Tuple.(idxs), 3) # get trim ranks for these indices
         ks = nth.(Ref(keys(model.product_lookup.k)), iks)
-        trim_factor = 1 .+ quantile.(Gamma(θ...), ks)
+        trim_factor = 1 .+ quantile.(Gamma(exp.(θ)...), ks)
         t = first(idxs).I[1]
         out[i_δ[i]] = sum(
             tf * (counts[idx] - t_counts[t] * grid[idx]) for (tf, idx) in zip(trim_factor, idxs)
@@ -344,7 +344,7 @@ function dloglikelihood(
         end
         @inbounds for (k, idxs_k) in pairs(k_dict)
             i_θᵢ = nth(partition(i_θ, 2), i)
-            grad = finite_difference_gradient(θ -> quantile.(Gamma(θ...), k), θ, cache)
+            grad = finite_difference_gradient(θ -> quantile.(Gamma(exp.(θ)...), k), θ, cache)
             out[i_θᵢ] = sum(
                 δs[idx] * grad * (counts[idx] - t_counts[first(idx.I)] * grid[idx])
                 for idx in idxs_k

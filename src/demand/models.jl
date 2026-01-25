@@ -184,15 +184,18 @@ end
     return Ω, collect(nonzero_keys(Ω))
 end
 
-function glorot_initialization(model)
+function initial_parameters(model)
     out =
         Float32.(
             rand(
-                Uniform(-6 / total_n_params(model), 6 / total_n_params(model)),
+                Uniform(-2, 2),
                 total_n_params(model),
             )
         )
-    i_Θ = @indexof trim_params out model
-    out[i_Θ] .= 1.0f0
+    out[@indexof trim_params out model] .= log(3.0f0)
+    out[@indexof mean_price_params out model] .= -1f0
+    out[@indexof dist_params out model] ./= 1f4
+    all_price_params = @indexof demo_price_params out model # going to leave 1/income unscaled
+    out[all_price_params[2:end]] ./= 1f3
     return out
 end
