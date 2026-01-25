@@ -80,8 +80,8 @@ with_logging() do
         i = 0
         lr_max = 5f-5
         lr_min = 1f-6
-        T = 100
-	while true
+        T = 80
+	while i < T
             W = Demand.optimalW(model, θ)
             f = OnceDifferentiable(
                 parent_scatter$(LikelihoodRequest, zips, W),
