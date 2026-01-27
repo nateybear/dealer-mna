@@ -70,7 +70,6 @@ n_demo_price_params(x) = n_demographics(x) # median income, urban
 n_random_coefs(::DemandModel{RandomCoefType}) = 1 # price
 n_random_coefs(::DemandModel{FixedCoefType}) = 0
 n_dist_params(_) = 2 # distance disutility
-n_mean_product_params(x) = 0
 n_mean_price_params(_) = 1 # price
 n_rho(_) = 1
 n_group_fes(model) = size(model.adjacency, 4)
@@ -82,7 +81,6 @@ const ORDER = [
     n_demo_price_params,
     n_random_coefs,
     n_dist_params,
-    n_mean_product_params,
     n_mean_price_params,
     # n_rho,
     # n_group_fes
@@ -115,14 +113,16 @@ end
     ) # splat product info into last dimension
     for idx in nonzero_keys(model.product_info)
         info = model.product_info[idx]
-        out[Tuple(idx)..., 1] = info.p
+        out[Tuple(idx)..., :] .= [model.product_info[idx][PRODUCT_ATTRIBUTES]..., info.p]
     end
     return out
 end
 
+@memoize p_matrix(model) = x_matrix(model)[:, :, :, :, end:end]
+
 @memoize function z_matrix(model)
     out = SparseArray{Float32}(
-        undef, (size(model.product_info)..., n_product_attributes(model) + 2)
+        undef, (size(model.product_info)..., 2)
     ) # splat product info into last dimension
     for idx in nonzero_keys(model.product_info)
         info = model.product_info[idx]
@@ -160,7 +160,7 @@ function residualize!(X, lookup)
 end
 
 @memoize function x_residualized(model)
-    x_j = copy(x_matrix(model))
+    x_j = x_matrix(model)[:, :, :, :, end:end]
     @inbounds for i_demo in axes(x_j, 5)
         x_j[:, :, :, :, i_demo] = residualize!(x_j[:, :, :, :, i_demo], model.product_lookup)
     end

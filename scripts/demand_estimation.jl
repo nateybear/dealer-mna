@@ -76,15 +76,20 @@ child_handle(r::GradientRequest) = Demand.dloglikelihood(model, r.params, r.z)
 
 normalize!(out, ::Type{LikelihoodRequest}) = nothing
 function normalize!(out, ::Type{GradientRequest})
-    i = Demand.@indexof delta out model
-    normalize!(@view out[i])
-    j = last(i) + 1
-    normalize!(@view out[j:end]) 
+    delta_idxs = Demand.@indexof delta out model
+    normalize!(@view out[delta_idxs])
+
+    trim_idxs = Demand.@indexof trim_params out model
+    normalize!(@view out[trim_idxs], threshold = 50) 
+
+    other_idxs = setdiff(1:length(out), delta_idxs, trim_idxs)
+    normalize!(@view out[other_idxs], threshold = 10)
+
     return nothing
 end
 
-function normalize!(out)
-    g = norm(out) 
+function normalize!(out; threshold = 1)
+    g = norm(out) / threshold 
     if g > 1
         out ./= g
     end

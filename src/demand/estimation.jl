@@ -174,8 +174,7 @@ function ξ̂(model::AbstractDemandModel, params::AbstractVector)::SparseArray{F
 
     x_j = x_residualized(model) # T × J × F × (n_product + price), dropping K
 
-    βₓ = @pull mean_product_params params model # (n_product)
-    βₚ = only(@pull mean_price_params params model) # (1)
+    β = @pull mean_price_params params model # (1)
 
     # not decomposing for now
     # ρ = only(@pull rho params model)
@@ -187,7 +186,7 @@ function ξ̂(model::AbstractDemandModel, params::AbstractVector)::SparseArray{F
     #     Ω[t, j, f, g] = model.ownership[t, f, g] + ρ * model.adjacency[t, j, f, g]
     # end
 
-    linear_params = tensorcontract(x_j, (1, 2, 3, 4, -1), SparseArray(vcat(βₓ, βₚ)), (-1,))
+    linear_params = tensorcontract(x_j, (1, 2, 3, 4, -1), SparseArray(β), (-1,))
 
     # @inbounds for i in axes(Ω, 4)
     #     @info "Iteration $i of $(size(Ω, 4)) residualizing Ω matrix"
@@ -250,10 +249,8 @@ function dΠ̂(model::AbstractDemandModel, params::AbstractVector, W = I)::Abstr
     end
 
     # grad for beta
-    X = x_matrix(model)
-    i_β = @indexof mean_product_params params model
-    i_β_price = only(@indexof mean_price_params params model)
-    i_β = vcat(i_β, i_β_price)
+    X = p_matrix(model)
+    i_β = @indexof mean_price_params params model
     @inbounds for z_var in axes(Z, 5)
         @inbounds for x_var in axes(X, 5)
             row = i_β[x_var]
