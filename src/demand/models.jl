@@ -70,7 +70,7 @@ n_demo_price_params(x) = n_demographics(x) # median income, urban
 n_random_coefs(::DemandModel{RandomCoefType}) = 1 # price
 n_random_coefs(::DemandModel{FixedCoefType}) = 0
 n_dist_params(_) = 2 # distance disutility
-n_mean_product_params(x) = n_product_attributes(x)
+n_mean_product_params(x) = 0
 n_mean_price_params(_) = 1 # price
 n_rho(_) = 1
 n_group_fes(model) = size(model.adjacency, 4)
@@ -115,7 +115,7 @@ end
     ) # splat product info into last dimension
     for idx in nonzero_keys(model.product_info)
         info = model.product_info[idx]
-        out[Tuple(idx)..., :] .= [info[PRODUCT_ATTRIBUTES]..., info.p]
+        out[Tuple(idx)..., 1] = info.p
     end
     return out
 end
@@ -126,7 +126,7 @@ end
     ) # splat product info into last dimension
     for idx in nonzero_keys(model.product_info)
         info = model.product_info[idx]
-        out[Tuple(idx)..., :] .= [info[PRODUCT_ATTRIBUTES]..., info.p_hausman, 1.0f0]
+        out[Tuple(idx)..., :] .= [info.p_hausman, 1.0f0]
     end
     return out
 end
