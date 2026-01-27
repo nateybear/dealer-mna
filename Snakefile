@@ -164,12 +164,14 @@ rule data_demand_estimates:
     input:
         "scripts/demand_estimation.jl",
         model="data/model_frames.jld2",
+        params_restart=lambda _: config.get("params_restart", []),
     output:
         "data/demand_estimates.jld2",
     log:
         "logs/demand_estimation.log",
     params:
-        tmpdir="/scratch/09405/nch772/tmp"
+        tmpdir="/scratch/09405/nch772/tmp",
+        objective=lambda _: config.get("objective", "combined"),
     run:
         julia(
             "scripts/demand_estimation.jl",

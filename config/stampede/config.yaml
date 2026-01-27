@@ -8,6 +8,7 @@ default-resources:
   mem_mb_per_cpu: 4000
   nodes: 6
 config:
+  params_init: "data/demand_estimates_init.jld2"
   threads: 1
   mpi: "ibrun"
 jobs: 15

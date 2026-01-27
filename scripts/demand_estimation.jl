@@ -38,7 +38,7 @@ function parent_scatter(T, zips, W, params)
     for i in 1:(syze - 1)
         MPI.send(T(params, zips[i]), i, 0, comm)
     end
-    out = parent_handle(T, model, W, params)
+    out = parent_handle(T, model, W, zips[syze], params)
     for i in 1:(syze - 1)
         msg, _ = MPI.recv(i, 0, comm)
         if msg isa StopSignal
@@ -53,15 +53,38 @@ function parent_scatter(T, zips, W, params)
     return out
 end
 
-parent_handle(::Type{LikelihoodRequest}, model, W, params) = Demand.Π̂(model, params, W)
-parent_handle(::Type{GradientRequest}, model, W, params) = Demand.dΠ̂(model, params, W)
+function parent_handle(::Type{LikelihoodRequest}, model, W, z, params)
+    islikelihood = snakemake.params["objective"] == "likelihood"
+    if islikelihood
+        -Demand.loglikelihood(model, params, z)
+    else
+        Demand.Π̂(model, params, W)
+    end
+end
+
+function parent_handle(::Type{GradientRequest}, model, W, z, params)
+    islikelihood = snakemake.params["objective"] == "likelihood"
+    if islikelihood
+        -Demand.dloglikelihood(model, params, z)
+    else
+        Demand.dΠ̂(model, params, W)
+    end
+end
 
 child_handle(r::LikelihoodRequest) = Demand.loglikelihood(model, r.params, r.z)
 child_handle(r::GradientRequest) = Demand.dloglikelihood(model, r.params, r.z)
 
 normalize!(out, ::Type{LikelihoodRequest}) = nothing
 function normalize!(out, ::Type{GradientRequest})
-    g = norm(out) / 10
+    i = Demand.@indexof delta out model
+    normalize!(@view out[i])
+    j = last(i) + 1
+    normalize!(@view out[j:end]) 
+    return nothing
+end
+
+function normalize!(out)
+    g = norm(out) 
     if g > 1
         out ./= g
     end
@@ -75,13 +98,19 @@ stop!() =
 with_logging() do
     if rank == 0
         @info "Starting optimization with $(syze) processes"
-        θ = initial_parameters(model)
+        θ = if haskey(snakemake.input, "params_restart") && 
+                !isempty(snakemake.input["params_restart"]) &&
+                isfile(snakemake.input["params_restart"])
+            JLD2.load_object(snakemake.input["params_restart"]).minimizer
+        else
+            initial_parameters(model)
+        end
         zips = Registrations.zips().zip_code
         i = 0
         lr_max = 5f-5
         lr_min = 1f-6
-        T = 80
-	while i < T
+        T = 16 
+        while i < T
             W = Demand.optimalW(model, θ)
             f = OnceDifferentiable(
                 parent_scatter$(LikelihoodRequest, zips, W),
@@ -100,12 +129,13 @@ with_logging() do
                     store_trace = true,
                     show_trace = true,
                     show_every = 1,
-                    iterations = 100,
+                    iterations = 500,
                 ),
             )    
             JLD2.save_object(snakemake.output[1], result)
             p, ext = splitext(snakemake.output[1])
-            JLD2.save_object("$(p)_$(i)$(ext)", result)
+            obj = snakemake.params["objective"]
+            JLD2.save_object("$(p)_$(obj)_$(i)$(ext)", result)
             θ = result.minimizer
         end
     else
