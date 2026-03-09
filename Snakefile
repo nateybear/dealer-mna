@@ -978,6 +978,29 @@ rule plot_effect_on_closest:
             wildcards=wildcards,
         )
 
+rule toy_model:
+    input:
+        "scripts/toy_model.jl",
+    output:
+        jld2="data/toy_model.jld2",
+        png_c_L_c_H="plots/toy_model_c_L_c_H.png",
+        png_v_L_v_H="plots/toy_model_v_L_v_H.png",
+        png_c_L_v_L="plots/toy_model_c_L_v_L.png",
+        png_c_H_v_H="plots/toy_model_c_H_v_H.png",
+        profit_plot="plots/toy_model_profit.png",
+        surplus_plot="plots/toy_model_surplus.png",
+        mu_plot="plots/toy_model_mu.png",
+        lambda_plot="plots/toy_model_lambda.png",
+        wL_plot="plots/toy_model_wL.png",
+        piR_plot="plots/toy_model_piR.png",
+        qH_plot="plots/toy_model_qH.png",
+        wH_plot="plots/toy_model_wH.png",
+
+    log:
+        "logs/toy_model.log",
+    run:
+        julia("scripts/toy_model.jl", input=input, output=output, log=log)
+
 
 rule table_diff_in_diff:
     input:
