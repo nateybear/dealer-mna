@@ -3,7 +3,7 @@ using Plots
 using StatsBase
 using Splines2
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 const NS = Ref{Function}()
 

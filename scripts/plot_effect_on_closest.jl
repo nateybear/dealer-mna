@@ -6,7 +6,7 @@ using StatsBase: mean, weights
 
 import .Geometry: distance
 
-isempty(ARGS) || snakemake!(ARGS[1])
+snakemake!()
 
 function miles(d1::UUID, d2::UUID)
     dealers = subset(Dealers.State.df, :uid => ByRow(in((d1, d2))), view = true)

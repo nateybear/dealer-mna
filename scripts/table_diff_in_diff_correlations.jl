@@ -7,7 +7,7 @@ using Combinatorics
 using LaTeXStrings
 using LaTeXTabulars
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 titleize(x) = titlecase(replace(string(x), "_" => " "))
 
@@ -27,7 +27,7 @@ with_logging() do
     open(snakemake.output[1], "w") do io
         latex_tabular(
             io,
-            Tabular("r|" * "c"^(size(out, 1) - 1)),
+            Tabular("r|" * "c"^(Base.size(out, 1) - 1)),
             [
                 Rule(:top),
                 ["", tablenames[2:end]...],

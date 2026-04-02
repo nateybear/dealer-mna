@@ -6,7 +6,7 @@ using LaTeXTabulars
 wmean(x, w) = mean(x, weights(w))
 wstd(x, w) = std(x, weights(w))
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 function format(row, digits = 2)
     # make, avg. price, num trims, std price within, std price across, std ratio

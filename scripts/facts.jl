@@ -5,7 +5,7 @@ using Base.Iterators
 
 using LaTeXStrings
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 process_facts(facts) =
     join(

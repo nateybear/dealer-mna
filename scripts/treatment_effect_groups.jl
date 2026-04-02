@@ -2,7 +2,7 @@ using DealerMnA
 using Splines2
 using FixedEffectModels: Term
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 const NS = Ref{Function}()
 
@@ -21,7 +21,7 @@ end
 function addsplines!(df, col = :change_market_share)
     f = calcsplines!(df[!, col])
     S = f(df[!, col])
-    for i in 1:size(S, 2)
+    for i in axes(S, 2)
         df[:, "ns_$(i)"] = S[:, i]
     end
     return nothing

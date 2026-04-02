@@ -6,7 +6,7 @@ using UUIDs
 using Unitful
 using PartialFunctions
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 with_logging() do
     Dealers.load_from_disk!(snakemake.input["dealers_init"])

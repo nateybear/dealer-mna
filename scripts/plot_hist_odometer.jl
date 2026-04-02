@@ -2,7 +2,7 @@ using DealerMnA
 using Plots
 using Loess
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 with_logging() do
     registrations = read_arrow(snakemake.input["registrations"])

@@ -612,6 +612,7 @@ rule data_group_market_share_changes_treated_dealers:
         dealers_init="data/dealers_init_filtered.jld2",
         transaction_uids="data/transaction_uids.csv",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
+        new_registrations="data/arrow/new_registrations.arrow",
     output:
         "data/group_market_share_changes_treated_dealers.arrow",
     log:

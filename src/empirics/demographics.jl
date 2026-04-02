@@ -9,7 +9,7 @@ using UUIDs
 struct UniformWeight end
 (::UniformWeight)(_) = 1
 @kwdef struct LinearWeight{T}
-    max_distance::T = 50mi
+    max_distance::T = 200mi
 end
 (l::LinearWeight)(d) = max(0, 1 - d / l.max_distance)
 

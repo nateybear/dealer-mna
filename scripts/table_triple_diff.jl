@@ -5,7 +5,7 @@ using LinearAlgebra
 using LaTeXTabulars
 using LaTeXStrings
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 function fit_plus_std(x, y; digits = 3)
     let significant = abs(x) > 1.96y, x = round(x; digits), y = round(y; digits)

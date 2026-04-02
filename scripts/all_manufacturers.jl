@@ -1,6 +1,6 @@
 using DealerMnA
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 with_logging() do
     open(snakemake.output[1], "w") do io

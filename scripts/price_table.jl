@@ -1,7 +1,7 @@
 using DealerMnA
 using Arrow
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 with_logging() do
     Arrow.write(

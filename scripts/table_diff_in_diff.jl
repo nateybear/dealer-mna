@@ -6,7 +6,7 @@ using LaTeXStrings
 using DataStructures: DefaultDict
 using Printf
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 function fit_plus_std(x, y; digits = 3)
     significant = abs(x) > 1.96y

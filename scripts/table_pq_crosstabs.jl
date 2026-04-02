@@ -5,7 +5,7 @@ using LinearAlgebra
 using LaTeXTabulars
 using LaTeXStrings
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 function compare(offset, extras, outname, before = false)
     let

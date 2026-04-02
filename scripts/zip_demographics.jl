@@ -2,7 +2,7 @@ using DealerMnA
 
 import Lazy: seq, partition
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 function overburdened_pct(cols...)
     cols = partition(2, seq(cols))

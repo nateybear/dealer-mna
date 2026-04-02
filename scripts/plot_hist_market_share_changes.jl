@@ -1,7 +1,7 @@
 using DealerMnA
 using Plots
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 with_logging() do
     transactions = read_arrow(snakemake.input["transactions_market_share_change"])

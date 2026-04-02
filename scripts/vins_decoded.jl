@@ -1,13 +1,16 @@
 using DealerMnA
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 with_logging() do
     in_writer = CSV.Chunks(
-        snakemake.input[1], stringtype = String, quotechar = '"'
+        snakemake.input[1],
+        ntasks = 1000, # about 80,000 rows per chunk
+        stringtype = String, 
+        quotechar = '"',
     )
     open(Arrow.Writer, snakemake.output[1]) do out_writer
-        for chunk in in_writer
+        for (i, chunk) in enumerate(in_writer)
             # Clean the chunk
             cleaned_chunk = @> chunk begin
                 DataFrame
@@ -28,6 +31,10 @@ with_logging() do
 
             # Write the cleaned chunk to the output
             Arrow.write(out_writer, cleaned_chunk)
+
+            if i % 5 == 0
+                @info "Processed chunk $i"
+            end
         end
     end
 end

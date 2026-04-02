@@ -7,7 +7,7 @@ import .Registrations: registrations
 import .Empirics: UniformWeight
 import .Dealers: timetravel
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 # pick a high volume that is closest to the overall
 # proportion of body classes sold (since I am 
@@ -92,7 +92,7 @@ with_logging() do
         linewidth = 2,
     )
 
-    cuts = [2, 3, 4, 5, 10]
+    cuts = [4, 5, 10]
     for i in cuts
         vline!([10_000 / i], label = "$i effective firms", linestyle = :dash, linewidth = 2)
     end

@@ -2,7 +2,7 @@ using DealerMnA
 using Plots
 using StatsBase
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 with_logging() do
     registrations = read_arrow(snakemake.input["new_registrations"])

@@ -4,7 +4,7 @@ import DataFrames: unstack
 using StatsBase: mode
 using LaTeXTabulars
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 with_logging() do
     table = @> Registrations.registrations() begin

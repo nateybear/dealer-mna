@@ -4,7 +4,7 @@ using DataStructures: counter
 using LaTeXTabulars
 using Printf
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 function cr4(gids)
     counts = gids |> counter |> values |> collect |> sort$(rev = true,) |> cumsum

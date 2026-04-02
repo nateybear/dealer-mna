@@ -4,7 +4,7 @@ using DataFrames
 using Plots
 using Lazy: @>
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 with_logging() do
     Dealers.load_from_disk!(snakemake.input["dealers_init"])

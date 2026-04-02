@@ -13,7 +13,7 @@ function market_share(
     focal_uid,
     period,
     group_remap = Dict();
-    weight = LinearWeight(50mi),
+    weight = LinearWeight(),
 )
     focal_dealer = fuzzytravel(minimum(period)) do
         NamedTuple(pluck(State.df, :uid => ByRow(==(focal_uid))))
@@ -65,7 +65,7 @@ function hhi(
     focal_uid,
     period,
     group_remap = Dict();
-    weight = LinearWeight(50mi),
+    weight = LinearWeight(),
 )
     focal_dealer = fuzzytravel(minimum(period)) do
         NamedTuple(pluck(State.df, :uid => ByRow(==(focal_uid))))

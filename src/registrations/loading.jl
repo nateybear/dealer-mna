@@ -84,6 +84,6 @@ end
 function load_registration_file_chunked(file)
     return (
         process_chunk(chunk)
-        for chunk in CSV.Chunks(file; CSV_OPTIONS...)
+        for chunk in CSV.Chunks(file; ntasks = 10, CSV_OPTIONS...) # load file in 10 chunks
     )
 end

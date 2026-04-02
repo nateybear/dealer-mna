@@ -4,7 +4,7 @@ using DataFrames
 import CSV
 using UUIDs
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 with_logging() do
     out = DataFrame(transaction_uid = String[], dealer_uid = String[])

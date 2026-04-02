@@ -2,7 +2,7 @@ using DealerMnA
 
 using DataStructures: counter
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 with_logging() do
     open(Arrow.Writer, snakemake.output["unmatched_registrations"]) do out_writer

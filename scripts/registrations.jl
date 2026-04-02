@@ -18,7 +18,7 @@ function makeunique(df, hashset)
     return df[mask, :]
 end
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 with_logging() do
     rm(snakemake.output["registrations"], force = true)

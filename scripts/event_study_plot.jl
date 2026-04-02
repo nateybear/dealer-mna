@@ -5,7 +5,7 @@ import StatsBase: std, mean, sample, median
 using NamedArrays
 using Base.Iterators: flatmap
 
-!isempty(ARGS) && snakemake!(ARGS[1])
+snakemake!()
 
 function add_minus_one(periods, estimates, stderrs)
     if -1 in periods
