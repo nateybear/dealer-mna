@@ -311,42 +311,42 @@ function (@main)(_)
         makerange(label) = range(data[label] - 0.1, data[label] + 0.1, length = RESOLUTION)
         JLD2.save_object(snakemake.output["jld2"], recovered_surplus(data))
         grids = Dict{Tuple{String, String}, Matrix{Float64}}()
-        for (label1, label2) in [("c_L", "c_H"), ("v_L", "v_H"), ("c_L", "v_L"), ("c_H", "v_H")]
-            range1 = makerange(label1)
-            range2 = makerange(label2)
-            out = zeros(RESOLUTION, RESOLUTION)
-            @info "Outer loop" label1 label2
-            value_iterator = collect(product(enumerate(range1), enumerate(range2)))
-            for ((i1, value1), (i2, value2)) in value_iterator
-                @info "Inner loop $(label1) = $value1, $(label2) = $value2"
-                d = copy(data)
-                d[label1] = value1
-                d[label2] = value2
-                out[i1, i2] = recovered_surplus(d).recovered
-            end
-            grids[(label1, label2)] = out
-        end
+        # for (label1, label2) in [("c_L", "c_H"), ("v_L", "v_H"), ("c_L", "v_L"), ("c_H", "v_H")]
+        #     range1 = makerange(label1)
+        #     range2 = makerange(label2)
+        #     out = zeros(RESOLUTION, RESOLUTION)
+        #     @info "Outer loop" label1 label2
+        #     value_iterator = collect(product(enumerate(range1), enumerate(range2)))
+        #     for ((i1, value1), (i2, value2)) in value_iterator
+        #         @info "Inner loop $(label1) = $value1, $(label2) = $value2"
+        #         d = copy(data)
+        #         d[label1] = value1
+        #         d[label2] = value2
+        #         out[i1, i2] = recovered_surplus(d).recovered
+        #     end
+        #     grids[(label1, label2)] = out
+        # end
 
-        max_recovered = maximum(maximum(grid) for grid in values(grids))
-        min_recovered = minimum(minimum(grid) for grid in values(grids))
-        @info "Making plots"
-        for ((label1, label2), grid) in grids
-            range1 = makerange(label1)
-            range2 = makerange(label2)
-            contourf(
-                range1,
-                range2,
-                grid,
-                xlabel = LaTeXString("\$" * label1 * "\$"),
-                ylabel = LaTeXString("\$" * label2 * "\$"),
-                colorbar_title = "Frac. Surplus Recovered",
-                color = :redsblues,
-                clim = (min_recovered, max_recovered),
-                levels = 50,
-                size = (800, 600),
-            )
-            png(snakemake.output["png_$(label1)_$(label2)"])
-        end
+        # max_recovered = maximum(maximum(grid) for grid in values(grids))
+        # min_recovered = minimum(minimum(grid) for grid in values(grids))
+        # @info "Making plots"
+        # for ((label1, label2), grid) in grids
+        #     range1 = makerange(label1)
+        #     range2 = makerange(label2)
+        #     contourf(
+        #         range1,
+        #         range2,
+        #         grid,
+        #         xlabel = LaTeXString("\$" * label1 * "\$"),
+        #         ylabel = LaTeXString("\$" * label2 * "\$"),
+        #         colorbar_title = "Frac. Surplus Recovered",
+        #         color = :redsblues,
+        #         clim = (min_recovered, max_recovered),
+        #         levels = 50,
+        #         size = (800, 600),
+        #     )
+        #     png(snakemake.output["png_$(label1)_$(label2)"])
+        # end
 
         @info "Tracing profit plot"
         (; vi, dm, alloc) = recovered_surplus(data)
