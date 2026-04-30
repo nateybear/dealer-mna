@@ -34,15 +34,11 @@ end
 struct StopSignal end
 
 function parent_scatter(T, zips, W, params)
-    chunksize = cld(length(zips), syze)
-    chunks = collect(Iterators.partition(zips, chunksize))
-    while length(chunks) < syze
-        push!(chunks, String[])
+    chunksize = cld(length(zips), syze - 1)
+    for (i, chunk) in enumerate(Iterators.partition(zips, chunksize))
+        MPI.send(T(params, chunk), i, 0, comm)
     end
-    for i in 1:(syze - 1)
-        MPI.send(T(params, chunks[i]), i, 0, comm)
-    end
-    out = parent_handle(T, model, W, chunks[syze], params)
+    out = parent_handle(T, model, W, params)
     for i in 1:(syze - 1)
         msg, _ = MPI.recv(i, 0, comm)
         if msg isa StopSignal
@@ -56,34 +52,34 @@ function parent_scatter(T, zips, W, params)
     return out
 end
 
-function parent_handle(::Type{LikelihoodRequest}, model, W, zs, params)
+function parent_handle(::Type{LikelihoodRequest}, model, W, params)
     islikelihood = snakemake.params["objective"] == "likelihood"
     if islikelihood
-        isempty(zs) && return 0.0f0
-        return -sum(z -> Demand.loglikelihood(model, params, z), zs)
+        return 0.0f0
     else
         # GMM moment objective is global (no zip dimension); evaluated once
         return Demand.Π̂(model, params, W)
     end
 end
 
-function parent_handle(::Type{GradientRequest}, model, W, zs, params)
+function parent_handle(::Type{GradientRequest}, model, W, params)
     islikelihood = snakemake.params["objective"] == "likelihood"
     if islikelihood
-        isempty(zs) && return zeros(Float32, length(params))
-        return -sum(z -> Demand.dloglikelihood(model, params, z), zs)
+        return zeros(Float32, length(params))
     else
         return Demand.dΠ̂(model, params, W)
     end
 end
 
-child_handle(r::LikelihoodRequest) =
-    isempty(r.zs) ? 0.0f0 :
-    sum(z -> Demand.loglikelihood(model, r.params, z), r.zs)
+function child_handle(r::LikelihoodRequest)
+    return mapreduce(Demand.loglikelihood$(model, r.params), +, r.zs, init = 0.0f0)
+end
 
-child_handle(r::GradientRequest) =
-    isempty(r.zs) ? zeros(Float32, length(r.params)) :
-    sum(z -> Demand.dloglikelihood(model, r.params, z), r.zs)
+function child_handle(r::GradientRequest)
+    return mapreduce(
+        Demand.dloglikelihood$(model, r.params), +, r.zs, init = zeros(Float32, length(r.params))
+    )
+end
 
 stop!() =
     for i in 1:(syze - 1)
@@ -93,13 +89,14 @@ stop!() =
 with_logging() do
     if rank == 0
         @info "Starting optimization with $(syze) processes"
-        θ = if haskey(snakemake.input, "params_restart") &&
+        θ =
+            if haskey(snakemake.input, "params_restart") &&
                 !isempty(snakemake.input["params_restart"]) &&
                 isfile(snakemake.input["params_restart"])
-            JLD2.load_object(snakemake.input["params_restart"]).minimizer
-        else
-            initial_parameters(model)
-        end
+                JLD2.load_object(snakemake.input["params_restart"]).minimizer
+            else
+                initial_parameters(model)
+            end
         zips = Registrations.zips().zip_code
 
         # Two-step GMM for the combined objective; one pass for likelihood.
@@ -124,8 +121,8 @@ with_logging() do
                     show_trace = true,
                     show_every = 1,
                     iterations = 5000,
-                    f_tol = 1f-9,
-                    g_tol = 1f-6,
+                    f_tol = 1.0f-9,
+                    g_tol = 1.0f-6,
                     allow_f_increases = true,
                 ),
             )

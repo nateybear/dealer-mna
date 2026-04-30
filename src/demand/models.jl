@@ -179,15 +179,8 @@ end
 # end
 
 function initial_parameters(model)
-    out =
-        Float32.(
-            rand(
-                Uniform(-2, 2),
-                total_n_params(model),
-            )
-        )
-    out[@indexof mean_price_params out model] .= -1.0f0
-    out[@indexof dist_params out model] ./= 1.0f4
+    out = -3ones(Float32, total_n_params(model))
+    out[@indexof dist_params out model] .= (rand(Float32, 2) .- 5.0f-1) / 1.0f4
     all_price_params = @indexof demo_price_params out model # going to leave 1/income unscaled
     out[all_price_params[2:end]] ./= 1.0f3
     return out
