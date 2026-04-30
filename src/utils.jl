@@ -167,11 +167,15 @@ end
 
 ##### support mapreduce with grouped dataframes
 import SplittablesBase
+import ChunkSplitters
 
 function SplittablesBase.halve(gd::GroupedDataFrame)
     let (one, two) = SplittablesBase.halve(keys(gd))
         (gd[one], gd[two])
     end
 end
+
+ChunkSplitters.is_chunkable(::GroupedDataFrame) = true
+Base.view(gd::GroupedDataFrame, idxs) = gd[idxs]
 
 pluck(df, args...; kwargs...) = only(eachrow(subset(df, args...; kwargs..., view = true)))

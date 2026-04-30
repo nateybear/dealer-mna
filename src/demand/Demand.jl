@@ -4,7 +4,7 @@ import ..Registrations
 import ..Dealers
 import ..Geometry: distance, miles
 
-import ..TRANSITION_GID, ..SINGLE_OPERATOR_GID, ..pluck
+import ..TRANSITION_GID, ..SINGLE_OPERATOR_GID, ..pluck, ..read_arrow, ..snakemake
 
 using UUIDs
 using PartialFunctions
@@ -23,7 +23,11 @@ using LinearAlgebra
 using StatsBase
 using Base.Threads: @threads, @spawn
 using SparseArrayKit
-using TensorOperations: tensorcontract, tensorproduct, @tensor
+using TensorOperations:
+    tensorcontract, tensorcontract!, tensorproduct, @tensor, contract_indices,
+    DefaultBackend
+using Bumper
+import VectorInterface: add!, inner
 using Folds
 using FoldsThreads
 using Graphs
@@ -34,27 +38,21 @@ import FiniteDiff: finite_difference_gradient, GradientCache
 # include("keyedsparsearray.jl")
 # __init__() = _generate_method_overrides()
 
-const PRODUCT_ATTRIBUTES = [:domestic]
+const PRODUCT_ATTRIBUTES = [:is_coupe, :is_suv, :is_pickup, :is_sedan]
 const DEMOGRAPHIC_ATTRIBUTES = [:median_earnings_inv, :urban_pct, :black_pct, :hispanic_pct]
 
-const DOMESTIC_MAKES = Set([
-    "CHEVROLET",
-    "CHRYSLER",
-    "DODGE",
-    "FORD",
-    "GMC",
-    "JEEP",
-    "LINCOLN",
-    "RAM",
-])
-
 ProductInfo = @NamedTuple begin
-    domestic::Bool
+    is_coupe::Bool
+    is_suv::Bool
+    is_pickup::Bool
+    is_sedan::Bool
     p::Float32
     p_hausman::Float32
     n::Int16
     g::UUID
 end
+
+ProductKey = Tuple{String, String, Int64, Float32} # (make, model, model_year, trim_rank)
 
 AgentInfo = NamedTuple{
     tuple(DEMOGRAPHIC_ATTRIBUTES..., :M),
@@ -63,16 +61,17 @@ AgentInfo = NamedTuple{
 
 # for a given key, return the list of Cartesian indices in the sparse array
 # where that key appears
-Lookup{N, T} = DefaultOrderedDict{T, Set{CartesianIndex{N}}}
-Lookup{N, T}() where {N, T} = DefaultOrderedDict{T, Set{CartesianIndex{N}}}(Set{CartesianIndex{N}})
+Lookup{N, T} = DefaultOrderedDict{T, Vector{CartesianIndex{N}}}
+function Lookup{N, T}() where {N, T}
+    return DefaultOrderedDict{T, Vector{CartesianIndex{N}}}(Vector{CartesianIndex{N}})
+end
 
 ProductLookup = @NamedTuple begin
-    t::Lookup{4, Tuple{Int64, Int64}} # (year, quarter)
-    j::Lookup{4, Tuple{String, String, Int64}} # (make, model, model_year)
-    k::Lookup{4, Float32}             # trim rank
-    f::Lookup{4, UUID}                # dealer uid
-    make::Lookup{4, String}           # make
-    tjf::Lookup{4, Tuple{Tuple{Int64, Int64}, Tuple{String, String, Int64}, UUID}} # (t, j, f)
+    t::Lookup{3, Tuple{Int64, Int64}} # (year, quarter)
+    j::Lookup{3, ProductKey} # (make, model, model_year, trim_rank)
+    f::Lookup{3, UUID}       # dealer uid
+    make::Lookup{3, String}  # make
+    tjf::Lookup{3, Tuple{Tuple{Int64, Int64}, ProductKey, UUID}} # (t, j, f)
 end
 
 function _ProductLookup(kwargs)
@@ -80,18 +79,17 @@ function _ProductLookup(kwargs)
         merge(
             kwargs,
             (;
-                make = Lookup{4, String}(),
-                tjf = Lookup{4, Tuple{Tuple{Int64, Int64}, Tuple{String, String, Int64}, UUID}}()),
+                make = Lookup{3, String}(),
+                tjf = Lookup{3, Tuple{Tuple{Int64, Int64}, ProductKey, UUID}}()),
         ),
     )
 end
 
 CountsLookup = @NamedTuple begin
-    z::Lookup{5, String}               # zip code
-    t::Lookup{5, Tuple{Int64, Int64}} # (year, quarter)
-    j::Lookup{5, Tuple{String, String, Int64}} # (make, model, model_year)
-    k::Lookup{5, Float32} # trim rank
-    f::Lookup{5, UUID} # dealer uid
+    z::Lookup{4, String}               # zip code
+    t::Lookup{4, Tuple{Int64, Int64}} # (year, quarter)
+    j::Lookup{4, ProductKey} # (make, model, model_year, trim_rank)
+    f::Lookup{4, UUID} # dealer uid
 end
 
 OwnershipLookup = @NamedTuple begin
@@ -102,15 +100,9 @@ end
 
 AdjacencyLookup = @NamedTuple begin
     t::Lookup{4, Tuple{Int64, Int64}} # (year, quarter)
-    j::Lookup{4, Tuple{String, String, Int64}} # (make, model, model_year)
+    j::Lookup{4, ProductKey} # (make, model, model_year, trim_rank)
     f::Lookup{4, UUID}                # dealer uid
     g::Lookup{4, UUID}                # group id
-end
-
-TrimFreeLookup = @NamedTuple begin
-    t::Lookup{3, Tuple{Int64, Int64}}
-    j::Lookup{3, Tuple{String, String, Int64}}
-    f::Lookup{3, UUID}
 end
 
 function new_lookup(T, df::DataFrame, cols...)

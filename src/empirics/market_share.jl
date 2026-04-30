@@ -1,5 +1,5 @@
 import ..Dealers: timetravel, fuzzytravel, State, add_distance
-using ..Geometry: distance
+using ..Geometry: distance, mi
 import ..Registrations: registrations
 import ..pluck
 
@@ -13,7 +13,7 @@ function market_share(
     focal_uid,
     period,
     group_remap = Dict();
-    weight = LinearWeight(),
+    weight = LinearWeight(150mi),
 )
     focal_dealer = fuzzytravel(minimum(period)) do
         NamedTuple(pluck(State.df, :uid => ByRow(==(focal_uid))))
@@ -31,12 +31,14 @@ function market_share(
             end
         end
         return our_sales / (our_sales + their_sales)
-    elseif collect(keys(group_remap)) == [focal_dealer.uid]
-        new_gid = only(values(group_remap))
-        my_sales = old_sales = new_sales = other_sales = 0
+    elseif focal_uid in keys(group_remap)
+        new_gid = only(unique(values(group_remap)))
+        my_sales = other_transacted_sales = old_sales = new_sales = other_sales = 0
         _market_shares(focal_dealer, period, weight) do dealer, sales
             if dealer.uid == focal_dealer.uid
                 my_sales += sales
+            elseif dealer.uid in keys(group_remap)
+                other_transacted_sales += sales
             elseif dealer.gid == focal_dealer.gid
                 old_sales += sales
             elseif dealer.gid == new_gid
@@ -45,19 +47,25 @@ function market_share(
                 other_sales += sales
             end
         end
-        return (new_sales - old_sales) / (new_sales + old_sales + my_sales + other_sales)
+        total_sales = my_sales + old_sales + new_sales + other_sales + other_transacted_sales
+        new_sales += my_sales + other_transacted_sales
+        old_sales += my_sales + other_transacted_sales
+        return (new_sales - old_sales) / total_sales, old_sales / total_sales, new_sales / total_sales, my_sales # change, old, new, sales volume
     else
         im_acquiring = only(unique(values(group_remap))) == focal_dealer.gid
-        transated_sales = other_sales = 0
+        transacted_sales = other_sales = my_sales = 0
         _market_shares(focal_dealer, period, weight) do dealer, sales
             if dealer.uid in keys(group_remap)
-                transated_sales += sales
+                transacted_sales += sales
+            elseif dealer.uid == focal_dealer.uid
+                my_sales += sales
             else
                 other_sales += sales
             end
         end
-        return (transated_sales * im_acquiring - transated_sales * !im_acquiring) /
-               (transated_sales + other_sales)
+        total_sales = transacted_sales + other_sales + my_sales
+        sales_change = (transacted_sales * im_acquiring - transacted_sales * !im_acquiring)
+        return sales_change / total_sales, my_sales / total_sales, (my_sales + transacted_sales) / total_sales # change, old, new
     end
 end
 
@@ -65,7 +73,7 @@ function hhi(
     focal_uid,
     period,
     group_remap = Dict();
-    weight = LinearWeight(),
+    weight = LinearWeight(150mi),
 )
     focal_dealer = fuzzytravel(minimum(period)) do
         NamedTuple(pluck(State.df, :uid => ByRow(==(focal_uid))))
@@ -94,7 +102,7 @@ function hhi(
         before_sales = deepcopy(group_sales)
         before_gid = fuzzytravel(minimum(period)) do
             let transacted_dealers = subset(
-                    State.df, :uid => ByRow(in(keys(group_remap))), view = true
+                    State.df, :uid => ByRow(in(keys(group_remap)))
                 )
                 only(unique(transacted_dealers.gid))
             end
@@ -105,7 +113,7 @@ function hhi(
         after_gid = only(unique(values(group_remap)))
         after_sales[after_gid] += transacted_sales
 
-        return _hhi(after_sales) - _hhi(before_sales)
+        return (_hhi(after_sales) - _hhi(before_sales)), _hhi(before_sales), _hhi(after_sales) # change, before, after
     end
 end
 
@@ -131,7 +139,7 @@ function _market_shares(
         @> registrations() begin
             subset(
                 :t => ByRow(in(period)),
-                :dlrgdn => ByRow(in(focal_dealer.gdns)),
+                :dealer_uid => ByRow(==(focal_dealer.uid)),
                 view = true,
             )
         end
@@ -153,13 +161,12 @@ function _market_shares(
     body_classes = body_class_weights.body_class
 
     # compile our group's and other groups' registrations
-    fuzzytravel(maximum(period)) do
+    fuzzytravel(minimum(period)) do
         nearby = subset(
             State.df,
             :geometry =>
                 ByRow(x -> distance(x, focal_dealer.geometry) < max_distance(weight)),
-            :active => identity,
-            view = true,
+            :active => identity
         )
 
         nearby_registrations = @> registrations() begin
@@ -168,7 +175,7 @@ function _market_shares(
                 :body_class => ByRow(in(body_classes)),
                 view = true,
             )
-            select(:dlrgdn, :body_class)
+            select(:dealer_uid, :body_class)
         end
 
         weighted_sales = @> nearby begin
@@ -176,9 +183,7 @@ function _market_shares(
                 :geometry => ByRow(x -> distance(x, focal_dealer.geometry)) => :distance
             )
             transform(:distance => ByRow(d -> weight(d)) => :distance_weight)
-            flatten(:gdns)
-            unique([:gdns, :gid])
-            innerjoin(nearby_registrations, on = :gdns => :dlrgdn)
+            innerjoin(nearby_registrations, on = :uid => :dealer_uid)
             groupby([:uid, :body_class])
             combine(nrow, :distance_weight => only ∘ unique => :distance_weight)
             innerjoin(body_class_weights, on = :body_class)

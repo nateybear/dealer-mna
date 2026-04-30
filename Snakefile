@@ -530,6 +530,7 @@ rule data_treatment_effect_overall:
         control_registrations="data/control/treated_dealers.arrow",
         transaction_uids="data/transaction_uids.csv",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
+        market_share_changes="data/group_market_share_changes_treated_dealers.arrow",
     output:
         increasing="data/treatment_effects/overall_increasing_{specification}.jld2",
         decreasing="data/treatment_effects/overall_decreasing_{specification}.jld2",
@@ -681,7 +682,7 @@ rule data_model_frames:
         "scripts/data_model_frames.jl",
         "data/statistics.txt",
         dealers_init="data/dealers_init_filtered.jld2",
-        new_registrations="data/arrow/new_registrations.arrow",
+        registrations="data/arrow/fords.arrow",
         price_table="data/price_table.arrow",
     output:
         "data/model_frames.jld2",
@@ -709,6 +710,18 @@ rule data_facts:
         "logs/facts.log",
     run:
         julia("scripts/facts.jl", input=input, output=output, log=log)
+
+rule data_fords:
+    input:
+        "scripts/fords.jl",
+        new_registrations="data/arrow/new_registrations.arrow",
+        dealers_init="data/dealers_init_filtered.jld2",
+    output:
+        "data/arrow/fords.arrow",
+    log:
+        "logs/fords.log",
+    run:
+        julia("scripts/fords.jl", input=input, output=output, log=log)
 
 
 rule plot_event_study_overall:
@@ -772,7 +785,9 @@ rule plot_hist_market_share_changes:
         "scripts/plot_hist_market_share_changes.jl",
         transactions_market_share_change="data/group_market_share_changes_treated_dealers.arrow",
     output:
-        "plots/hist_market_share_changes.png",
+        histogram="plots/hist_market_share_changes.png",
+        before_after_market_share="plots/hist_market_share_changes_before_after.png",
+        before_after_hhi="plots/hist_market_share_changes_before_after_hhi.png",
     log:
         "logs/hist_market_share_changes.log",
     run:
@@ -979,6 +994,24 @@ rule plot_effect_on_closest:
             wildcards=wildcards,
         )
 
+rule plot_assortment_probs:
+    input:
+        "scripts/plot_assortment_probs.jl",
+        fords = "data/arrow/fords.arrow",
+        dealer_demographics = "data/dealer_demographics.arrow",
+    output:
+        plots=directory("plots/assortment_probs_ford"),
+        sentinel="data/assortment_probs_sentinel.txt",
+    log:
+        "logs/plot_assortment_probs.log",
+    run:
+        julia(
+            "scripts/plot_assortment_probs.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
 rule toy_model:
     input:
         "scripts/toy_model.jl",
@@ -1166,6 +1199,8 @@ rule all:
         ),
         # Trim distribution plots
         get_plot_trim_distns,
+        # Assortment probability plots
+        "data/assortment_probs_sentinel.txt",
         # Facts
         "facts.tex",
         # # Demand model things

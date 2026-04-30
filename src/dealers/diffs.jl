@@ -158,28 +158,32 @@ dealer_idxs(e::AbstractEvent) = begin
     return dealer_idxs(idx) # get the dealer indexes for that event
 end
 
+const MUTATION_LOCK = ReentrantLock()
+
 function timetravel(f, e::Union{AbstractEvent, DataFrameRow}; before = true)
     idx_last_event = if before
         searchsortedlast(Events, e, by = e -> e.when, rev = true)
     else
         searchsortedfirst(Events, e, by = e -> e.when, rev = true) - 1
     end
-
-    for i in 1:idx_last_event
-        apply!(Diffs[i])
-    end
-
-    try
-        result = f() # try to execute the function
-        for i in idx_last_event:-1:1
-            unapply!(Diffs[i]) # unapply the diffs in reverse order
+    
+    lock(MUTATION_LOCK) do
+        for i in 1:idx_last_event
+            apply!(Diffs[i])
         end
-        return result
-    catch e
-        for i in idx_last_event:-1:1
-            unapply!(Diffs[i]) # unapply the diffs in reverse order
+
+        try
+            result = f() # try to execute the function
+            for i in idx_last_event:-1:1
+                unapply!(Diffs[i]) # unapply the diffs in reverse order
+            end
+            return result
+        catch e
+            for i in idx_last_event:-1:1
+                unapply!(Diffs[i]) # unapply the diffs in reverse order
+            end
+            rethrow(e)
         end
-        rethrow(e)
     end
 end
 

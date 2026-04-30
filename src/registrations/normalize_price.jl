@@ -48,6 +48,8 @@ function make_price_table()
     subset!(out, :n => ByRow(>(5)))
     subset!(out, :extra => ByRow(!contains(r"\bWORK\b")))
     subset!(out, :extra => ByRow(!contains(r"\bFLEET\b")))
+    subset!(out, :extra => ByRow(!contains(r"\bCOMMERCIAL\b")))
+    subset!(out, :extra => ByRow(!contains(r"\bPOLICE\b")))
 
     evenly_spaced(x) = let n = length(x)
             range(0, 1, length = n + 1) |> (@$ Iterators.take(_, n)) |> collect

@@ -1,17 +1,19 @@
-@memoize function dealership_count_map()
+@memoize function dealership_count_map(ford_dealers::Vector{UUID})
     result = DefaultOrderedDict{UUID, Set{UUID}}(Set{UUID})
     for e in union(Dealers.Events, Date(2017):Quarter(1):Date(2020))
         Dealers.timetravel(e) do
             for (; gid, uid) in eachrow(Dealers.State.df)
-                push!(result[gid], uid)
+                if uid in ford_dealers
+                    push!(result[gid], uid)
+                end
             end
         end
     end
     return result
 end
 
-@memoize single_operators() =
-    [gid for (gid, uids) in pairs(dealership_count_map()) if length(uids) == 1]
+@memoize single_operators(ford_dealers) =
+    [gid for (gid, uids) in pairs(dealership_count_map(ford_dealers)) if length(uids) == 1]
 
 const FRANCHISE_LOCK = ReentrantLock()
 
@@ -117,14 +119,19 @@ macro index(lookup, vals...)
 end
 
 function load_model_frames()
+    r = @> read_arrow(snakemake.input["registrations"]) subset(
+        :regeffdate => ByRow(>=(Date(2017))), view = true
+    ) # events start in 2017 Q1
+    ford_dealer_mask = Dealers.State.df.uid .∈ Ref(unique(r.dealer_uid))
     # Compute agent data, distances, firm product data, counts
     agent_data = Registrations.zips()
     agent_data.M = agent_data.population .÷ 48 # calibrate market size (2/HH, HH buys car every 6 years)
     transform!(agent_data, :median_earnings => ByRow(inv))
-    distances = miles.(agent_data.geometry, reshape(Dealers.State.df.geometry, 1, :)) # zips in rows, dealers in columns
+    distances =
+        miles.(agent_data.geometry, reshape(Dealers.State.df.geometry[ford_dealer_mask], 1, :)) # zips in rows, dealers in columns
 
     #### Done: distances
-    distances = NamedArray(distances, (agent_data.zip_code, Dealers.State.df.uid)) # convert to miles
+    distances = NamedArray(distances, (agent_data.zip_code, Dealers.State.df.uid[ford_dealer_mask])) # convert to miles
 
     #### Done: agent data
     agent_data = Dict{String, AgentInfo}(
@@ -137,13 +144,12 @@ function load_model_frames()
         ) for row in eachrow(agent_data)
     )
 
-    r = @> Registrations.registrations() subset(
-        :regeffdate => ByRow(>=(Date(2017))), view = true
-    ) # events start in 2017 Q1
     r.quarter = Dates.quarter.(r.regeffdate)
     r.year = Dates.year.(r.regeffdate)
     r.t = tuple.(r.year, r.quarter) # (year, quarter)
     r.j = tuple.(r.make, r.model, r.model_year)
+
+    body_classes = @> r groupby(:j) combine(:body_class => mode) eachrow Dict
 
     mean_prices = DataFrame(
         t = Tuple{Int64, Int64}[],
@@ -169,8 +175,16 @@ function load_model_frames()
         Dealers.fuzzytravel(t) do
             group = DataFrames.rename(group, :dealer_uid => :f, :trim_rank => :k)
             group.g .=
-                let joined = innerjoin(group, Dealers.State.df[:, [:uid, :gid]], on = :f => :uid)
-                    replace(joined.gid, (single_operators() .=> SINGLE_OPERATOR_GID)...)
+                let joined = innerjoin(
+                        group, Dealers.State.df[ford_dealer_mask, [:uid, :gid]], on = :f => :uid
+                    )
+                    replace(
+                        joined.gid,
+                        (
+                            single_operators(Dealers.State.df.uid[ford_dealer_mask]) .=>
+                                SINGLE_OPERATOR_GID
+                        )...,
+                    )
                 end
             zt_counts = @> group groupby([:f, :j, :k]) combine(nrow)
             zt_counts.z .= z
@@ -184,13 +198,14 @@ function load_model_frames()
         end
     end
 
+    r = nothing
+    GC.gc()
     pull_mean((; μ, n)) = (; n, p = μ)
     firm_product_data = @> mean_prices groupby([:t, :f, :j, :k, :g]) combine(
         :p => reduce$(merge) => :p
     )
     mean_prices = nothing
-    empty!(Memoize.memoize_cache(Registrations.registrations))
-    GC.gc() # free the memory used by registrations/mean_prices
+    GC.gc()
     firm_product_data.p_hausman = Folds.map(
         splat(hausman_price$(groupby(firm_product_data, [:t, :j]))),
         zip(
@@ -208,26 +223,44 @@ function load_model_frames()
     #### reshape dataframes into matrices and lookup tables ####
     nunique = nrow ∘ unique
 
-    product_info_matrix = SparseArray{ProductInfo}(
-        undef, nunique.(Ref(firm_product_data), (:t, :j, :k, :f))
+    # fold trim rank into product key so demand arrays are (t, j_trim, f) and (z, t, j_trim, f)
+    transform!(
+        firm_product_data,
+        [:j, :k] => ByRow((j, k) -> (j[1], j[2], j[3], Float32(k))) => :j_trim,
     )
-    counts_matrix = SparseArray{Int16}(undef, nunique.(Ref(counts), (:z, :t, :j, :k, :f)))
+    transform!(
+        counts,
+        [:j, :k] => ByRow((j, k) -> (j[1], j[2], j[3], Float32(k))) => :j_trim,
+    )
+    select!(firm_product_data, Not([:j, :k]))
+    select!(counts, Not([:j, :k]))
+    rename!(firm_product_data, :j_trim => :j)
+    rename!(counts, :j_trim => :j)
 
-    transform!(counts, :nrow => ByRow(Int16), :k => ByRow(Float32), renamecols = false)
+    product_info_matrix = SparseArray{ProductInfo}(
+        undef, nunique.(Ref(firm_product_data), (:t, :j, :f))
+    )
+    counts_matrix = SparseArray{Int16}(undef, nunique.(Ref(counts), (:z, :t, :j, :f)))
+
+    transform!(counts, :nrow => ByRow(Int16), renamecols = false)
     disallowmissing!(counts)
-    transform!(firm_product_data, :p => ByRow(Float32), :k => ByRow(Float32), renamecols = false)
+    transform!(
+        firm_product_data, :p => ByRow(Float32), :p_hausman => ByRow(Float32), renamecols = false
+    )
 
-    product_lookup = new_lookup(_ProductLookup, firm_product_data, :t, :j, :k, :f)
-    counts_lookup = new_lookup(CountsLookup, counts, :z, :t, :j, :k, :f)
+    product_lookup = new_lookup(_ProductLookup, firm_product_data, :t, :j, :f)
+    counts_lookup = new_lookup(CountsLookup, counts, :z, :t, :j, :f)
 
     @info "Filling product info matrix"
     for row in eachrow(firm_product_data)
-        i = @index product_lookup t j k f
+        i = @index product_lookup t j f
         push!(product_lookup.make[first(row.j)], i) # add make after the fact
         push!(product_lookup.tjf[(row.t, row.j, row.f)], i) # add (t, j, f) after the fact
-        domestic = first(row.j) in DOMESTIC_MAKES
         product_info_matrix[i] = (;
-            domestic,
+            is_coupe = row.j == "Coupe",
+            is_suv = row.j == "SUV/Crossover",
+            is_pickup = row.j == "Pickup",
+            is_sedan = row.j == "Sedan",
             row.p,
             row.p_hausman,
             row.n,
@@ -235,9 +268,12 @@ function load_model_frames()
         )
     end
 
+    firm_product_data = nothing
+    GC.gc()
+
     @info "Filling counts matrix"
     for row in eachrow(counts)
-        i = @index counts_lookup z t j k f
+        i = @index counts_lookup z t j f
         counts_matrix[i] = row.nrow
     end
 
@@ -245,8 +281,9 @@ function load_model_frames()
     unique_t = collect(keys(product_lookup.t))
     unique_f = collect(keys(product_lookup.f))
     unique_g = setdiff(
-        collect(keys(dealership_count_map())) ∪ [TRANSITION_GID, SINGLE_OPERATOR_GID],
-        single_operators(),
+        collect(keys(dealership_count_map(Dealers.State.df.uid[ford_dealer_mask]))) ∪
+        [TRANSITION_GID, SINGLE_OPERATOR_GID],
+        single_operators(Dealers.State.df.uid[ford_dealer_mask]),
     )
     ownership_matrix = SparseArray{Bool}(
         undef, (length(unique_t), length(unique_f), length(unique_g))
@@ -260,7 +297,14 @@ function load_model_frames()
     for t in unique_t
         Dealers.fuzzytravel(t) do
             for (; uid, gid) in eachrow(Dealers.State.df)
-                f, g = uid, (gid in single_operators() ? SINGLE_OPERATOR_GID : gid)
+                f, g = uid,
+                (
+                    if gid in single_operators(Dealers.State.df.uid[ford_dealer_mask])
+                        SINGLE_OPERATOR_GID
+                    else
+                        gid
+                    end
+                )
                 if f in unique_f && g in unique_g
                     i = @index ownership_lookup t f g
                     ownership_matrix[i] = true
@@ -269,97 +313,77 @@ function load_model_frames()
         end
     end
 
-    @info "Creating dealer adjacency matrix"
-    unique_j = keys(product_lookup.j)
-    adjacency_matrix = SparseArray{Float32}(
-        undef, (length(unique_t), length(unique_j), length(unique_f), length(unique_g))
-    )
-    adjacency_lookup = new_lookup(
-        AdjacencyLookup;
-        t = unique_t,
-        j = unique_j,
-        f = unique_f,
-        g = unique_g,
-    )
-    sold_models(t, f, make) =
-        Iterators.flatmap(keys(product_lookup.tjf)) do (t′, j, f′)
-            if t′ == t && f′ == f && first(j) == make
-                return [j]
-            else
-                return []
-            end
-        end
-    for t in unique_t
-        Dealers.fuzzytravel(t) do
-            Dealers.compute_franchise_network!()
-            for (make, network) in pairs(Dealers.State.franchise_network)
-                network_iter = zip(network.dealers, network.catchment_areas)
-                for ((a_idx, a_geom), (b_idx, b_geom)) in
-                    combinations(collect(network_iter), 2)
-                    if AG.touches(a_geom, b_geom)
-                        border = AG.intersection(a_geom, b_geom)
-                        if AG.geomlength(border) == 0.0
-                            @warn "Zero-length border between dealers $a_idx and $b_idx for make $make at time $t"
-                            continue
-                        end
-                        a_fraction, b_fraction =
-                            AG.geomlength(border) ./ AG.geomlength.([a_geom, b_geom])
-                        f_a, f_b = Dealers.State.df.uid[[a_idx, b_idx]]
-                        g_a, g_b = replace(
-                            Dealers.State.df.gid[[a_idx, b_idx]],
-                            (single_operators() .=> SINGLE_OPERATOR_GID)...,
-                        )
-                        for j in sold_models(t, f_a, make)
-                            i = let f = f_a, g = g_b
-                                @index adjacency_lookup t j f g
-                            end
-                            adjacency_matrix[i] += a_fraction
-                        end
-                        for j in sold_models(t, f_b, make)
-                            i = let f = f_b, g = g_a
-                                @index adjacency_lookup t j f g
-                            end
-                            adjacency_matrix[i] += b_fraction
-                        end
-                    end
-                end
-            end
-        end
-    end
+    # @info "Creating dealer adjacency matrix"
+    # unique_j = keys(product_lookup.j)
+    # adjacency_matrix = SparseArray{Float32}(
+    #     undef, (length(unique_t), length(unique_j), length(unique_f), length(unique_g))
+    # )
+    # adjacency_lookup = new_lookup(
+    #     AdjacencyLookup;
+    #     t = unique_t,
+    #     j = unique_j,
+    #     f = unique_f,
+    #     g = unique_g,
+    # )
+    # sold_models(t, f, make) =
+    #     Iterators.flatmap(keys(product_lookup.tjf)) do (t′, j, f′)
+    #         if t′ == t && f′ == f && first(j) == make
+    #             return [j]
+    #         else
+    #             return []
+    #         end
+    #     end
+    # for t in unique_t
+    #     Dealers.fuzzytravel(t) do
+    #         Dealers.compute_franchise_network!()
+    #         for (make, network) in pairs(Dealers.State.franchise_network)
+    #             network_iter = zip(network.dealers, network.catchment_areas)
+    #             for ((a_idx, a_geom), (b_idx, b_geom)) in
+    #                 combinations(collect(network_iter), 2)
+    #                 if AG.touches(a_geom, b_geom)
+    #                     border = AG.intersection(a_geom, b_geom)
+    #                     if AG.geomlength(border) == 0.0
+    #                         @warn "Zero-length border between dealers $a_idx and $b_idx for make $make at time $t"
+    #                         continue
+    #                     end
+    #                     a_fraction, b_fraction =
+    #                         AG.geomlength(border) ./ AG.geomlength.([a_geom, b_geom])
+    #                     f_a, f_b = Dealers.State.df.uid[[a_idx, b_idx]]
+    #                     g_a, g_b = replace(
+    #                         Dealers.State.df.gid[[a_idx, b_idx]],
+    #                         (single_operators() .=> SINGLE_OPERATOR_GID)...,
+    #                     )
+    #                     for j in sold_models(t, f_a, make)
+    #                         i = let f = f_a, g = g_b
+    #                             @index adjacency_lookup t j f g
+    #                         end
+    #                         adjacency_matrix[i] += a_fraction
+    #                     end
+    #                     for j in sold_models(t, f_b, make)
+    #                         i = let f = f_b, g = g_a
+    #                             @index adjacency_lookup t j f g
+    #                         end
+    #                         adjacency_matrix[i] += b_fraction
+    #                     end
+    #                 end
+    #             end
+    #         end
+    #     end
+    # end
 
-    # apparently some empty groups; remove them
+    # # apparently some empty groups; remove them
     nonempty_groups = findall(unique_g) do g
-        !isempty(ownership_lookup.g[g]) || !isempty(adjacency_lookup.g[g])
+        !isempty(ownership_lookup.g[g]) #|| !isempty(adjacency_lookup.g[g])
     end
 
     @info "Found nonempty groups" length(nonempty_groups) length(unique_g)
 
-    trimfree_lookup = new_lookup(
-        TrimFreeLookup,
-        t = unique_t,
-        j = unique_j,
-        f = unique_f,
-    )
-
-    for t in keys(product_lookup.t)
-        trimfree_idxs = unique(
-            CartesianIndex(t, j, f) for (t, j, _, f) in Tuple.(product_lookup.t[t])
-        )
-        trimfree_lookup.t[t] = Set(trimfree_idxs)
-    end
-
-    for j in keys(product_lookup.j)
-        trimfree_idxs = unique(
-            CartesianIndex(t, j, f) for (t, j, _, f) in Tuple.(product_lookup.j[j])
-        )
-        trimfree_lookup.j[j] = Set(trimfree_idxs)
-    end
-
-    for f in keys(product_lookup.f)
-        trimfree_idxs = unique(
-            CartesianIndex(t, j, f) for (t, j, _, f) in Tuple.(product_lookup.f[f])
-        )
-        trimfree_lookup.f[f] = Set(trimfree_idxs)
+    for obj in (product_lookup, counts_lookup, ownership_lookup)
+        for i in propertynames(obj)
+            for idxs in values(getproperty(obj, i))
+                unique!(idxs)
+            end
+        end
     end
 
     return (
@@ -371,8 +395,7 @@ function load_model_frames()
         counts_lookup = counts_lookup,
         ownership = ownership_matrix[:, :, nonempty_groups],
         ownership_lookup = ownership_lookup,
-        adjacency = adjacency_matrix[:, :, :, nonempty_groups],
-        adjacency_lookup = adjacency_lookup,
-        trimfree_lookup = trimfree_lookup,
+        #adjacency = adjacency_matrix[:, :, :, nonempty_groups],
+        #adjacency_lookup = adjacency_lookup,
     )
 end

@@ -15,16 +15,13 @@ FixedCoefType(J::Int64) = FixedCoefType(1, J)
 struct DemandModel{T <: AbstractCoefType} <: AbstractDemandModel
     u::T
     distances::NamedMatrix{Float32} # zips in rows, dealers in columns
-    product_info::SparseArray{ProductInfo, 4} #  t, j, k, f
+    product_info::SparseArray{ProductInfo, 3} #  t, j, f
     product_lookup::ProductLookup
     agent_data::Dict{String, AgentInfo} # demographics for each zip code, sorted by zip
-    counts::SparseArray{Int16, 5} # z, t, j, k, f
+    counts::SparseArray{Int16, 4} # z, t, j, f
     counts_lookup::CountsLookup
     ownership::SparseArray{Bool, 3} # t, f, g
     ownership_lookup::OwnershipLookup
-    adjacency::SparseArray{Float32, 4} # t, j, f, g
-    adjacency_lookup::AdjacencyLookup
-    trimfree_lookup::TrimFreeLookup
 end
 function DemandModel{T}(;
     distances,
@@ -35,14 +32,11 @@ function DemandModel{T}(;
     counts_lookup,
     ownership,
     ownership_lookup,
-    adjacency,
-    adjacency_lookup,
-    trimfree_lookup,
 ) where {T <: AbstractCoefType}
     u = T(
         100, # number of simulation draws
-        size(product_info, 1), # number of (quarter, model, trim, dealer) combinations
-        prod(size(product_info)[2:4]),
+        size(product_info, 1), # number of (quarter, model-trim, dealer) combinations
+        prod(size(product_info)[2:3]),
     )
     return DemandModel{T}(
         u,
@@ -54,15 +48,11 @@ function DemandModel{T}(;
         counts_lookup,
         ownership,
         ownership_lookup,
-        adjacency,
-        adjacency_lookup,
-        trimfree_lookup,
     )
 end
 
-# number of (quarter, model, dealer) combinations
+# number of (quarter, model-trim, dealer) combinations
 n_delta(model::DemandModel) = length(keys(model.product_lookup.tjf))
-n_trim_params(model::DemandModel) = 2length(unique(model.product_lookup.make))
 n_demographics(_) = length(DEMOGRAPHIC_ATTRIBUTES) # median income, urban, pct_black, pct_hispanic
 n_demo_product_params(x) = n_demographics(x) * n_product_attributes(x) # median income, urban, pct_black, pct_hispanic
 n_product_attributes(_) = length(PRODUCT_ATTRIBUTES) # suv, truck, electric
@@ -71,19 +61,14 @@ n_random_coefs(::DemandModel{RandomCoefType}) = 1 # price
 n_random_coefs(::DemandModel{FixedCoefType}) = 0
 n_dist_params(_) = 2 # distance disutility
 n_mean_price_params(_) = 1 # price
-n_rho(_) = 1
-n_group_fes(model) = size(model.adjacency, 4)
 
 const ORDER = [
     n_delta,
-    n_trim_params,
     n_demo_product_params,
     n_demo_price_params,
     n_random_coefs,
     n_dist_params,
     n_mean_price_params,
-    # n_rho,
-    # n_group_fes
 ]
 
 total_n_params(model::DemandModel) = sum(f(model) for f in ORDER)
@@ -118,7 +103,12 @@ end
     return out
 end
 
-@memoize p_matrix(model) = x_matrix(model)[:, :, :, :, end:end]
+@memoize x_matrix_mu(model) =
+    let X = x_matrix(model)
+        reshape(X, 1, size(X)...)
+    end
+
+@memoize p_matrix(model) = x_matrix(model)[:, :, :, end:end]
 
 @memoize function z_matrix(model)
     out = SparseArray{Float32}(
@@ -134,12 +124,13 @@ end
 @memoize function collect_lookups(lookup)
     t_lookup = collect.(values(lookup.t))
     j_lookup = collect.(values(lookup.j))
-    return t_lookup, j_lookup
+    f_lookup = collect.(values(lookup.f))
+    return t_lookup, j_lookup, f_lookup
 end
 
 function residualize!(X, lookup)
     i_iter = 0
-    t_lookup, j_lookup = collect_lookups(lookup)
+    t_lookup, j_lookup, f_lookup = collect_lookups(lookup)
     X_old = similar(X)
     while true
         i_iter += 1
@@ -149,6 +140,9 @@ function residualize!(X, lookup)
         end
         for j in j_lookup
             @inbounds X[j] .-= @fastmath mean(X[j])
+        end
+        for f in f_lookup
+            @inbounds X[f] .-= @fastmath mean(X[f])
         end
         rdiff = @fastmath norm(X - X_old) / norm(X_old)
         if rdiff < 1e-4
@@ -160,29 +154,29 @@ function residualize!(X, lookup)
 end
 
 @memoize function x_residualized(model)
-    x_j = x_matrix(model)[:, :, :, :, end:end]
-    @inbounds for i_demo in axes(x_j, 5)
-        x_j[:, :, :, :, i_demo] = residualize!(x_j[:, :, :, :, i_demo], model.product_lookup)
+    x_j = x_matrix(model)[:, :, :, end:end]
+    @inbounds for i_demo in axes(x_j, 4)
+        x_j[:, :, :, i_demo] = residualize!(x_j[:, :, :, i_demo], model.product_lookup)
     end
     return x_j
 end
 
 @memoize function z_residualized(model)
     z_j = copy(z_matrix(model))
-    @inbounds for i_demo in axes(z_j, 5)[1:(end - 1)]
-        z_j[:, :, :, :, i_demo] = residualize!(z_j[:, :, :, :, i_demo], model.product_lookup)
+    @inbounds for i_demo in axes(z_j, 4)[1:(end - 1)]
+        z_j[:, :, :, i_demo] = residualize!(z_j[:, :, :, i_demo], model.product_lookup)
     end
     return z_j
 end
 
-@memoize function Ω_matrix(ownership, adjacency)
-    Ω = similar(adjacency)
-    tj_combos = unique(idx.I[1:2] for idx in nonzero_keys(adjacency))
-    for (t, j) in tj_combos
-        @inbounds Ω[t, j, :, :] .= ownership[t, :, :] + adjacency[t, j, :, :]
-    end
-    return Ω, collect(nonzero_keys(Ω))
-end
+# @memoize function Ω_matrix(ownership, adjacency)
+#     Ω = similar(adjacency)
+#     tj_combos = unique(idx.I[1:2] for idx in nonzero_keys(adjacency))
+#     for (t, j) in tj_combos
+#         @inbounds Ω[t, j, :, :] .= ownership[t, :, :] + adjacency[t, j, :, :]
+#     end
+#     return Ω, collect(nonzero_keys(Ω))
+# end
 
 function initial_parameters(model)
     out =
@@ -192,10 +186,9 @@ function initial_parameters(model)
                 total_n_params(model),
             )
         )
-    out[@indexof trim_params out model] .= log(3.0f0)
-    out[@indexof mean_price_params out model] .= -1f0
-    out[@indexof dist_params out model] ./= 1f4
+    out[@indexof mean_price_params out model] .= -1.0f0
+    out[@indexof dist_params out model] ./= 1.0f4
     all_price_params = @indexof demo_price_params out model # going to leave 1/income unscaled
-    out[all_price_params[2:end]] ./= 1f3
+    out[all_price_params[2:end]] ./= 1.0f3
     return out
 end

@@ -4,7 +4,7 @@ using StatsBase: cov
 using LinearAlgebra
 LinearAlgebra.BLAS.set_num_threads(1)
 using Optim
-import Random: shuffle!, seed!
+import Random: seed!
 
 seed!(78704)
 
@@ -23,22 +23,26 @@ MPI.Barrier(comm)
 
 struct LikelihoodRequest
     params::Vector{Float32}
-    z::String
+    zs::Vector{String}
 end
 
 struct GradientRequest
     params::Vector{Float32}
-    z::String
+    zs::Vector{String}
 end
 
 struct StopSignal end
 
 function parent_scatter(T, zips, W, params)
-    shuffle!(zips)
-    for i in 1:(syze - 1)
-        MPI.send(T(params, zips[i]), i, 0, comm)
+    chunksize = cld(length(zips), syze)
+    chunks = collect(Iterators.partition(zips, chunksize))
+    while length(chunks) < syze
+        push!(chunks, String[])
     end
-    out = parent_handle(T, model, W, zips[syze], params)
+    for i in 1:(syze - 1)
+        MPI.send(T(params, chunks[i]), i, 0, comm)
+    end
+    out = parent_handle(T, model, W, chunks[syze], params)
     for i in 1:(syze - 1)
         msg, _ = MPI.recv(i, 0, comm)
         if msg isa StopSignal
@@ -49,51 +53,37 @@ function parent_scatter(T, zips, W, params)
             out -= msg
         end
     end
-    normalize!(out, T)
     return out
 end
 
-function parent_handle(::Type{LikelihoodRequest}, model, W, z, params)
+function parent_handle(::Type{LikelihoodRequest}, model, W, zs, params)
     islikelihood = snakemake.params["objective"] == "likelihood"
     if islikelihood
-        -Demand.loglikelihood(model, params, z)
+        isempty(zs) && return 0.0f0
+        return -sum(z -> Demand.loglikelihood(model, params, z), zs)
     else
-        Demand.Π̂(model, params, W)
+        # GMM moment objective is global (no zip dimension); evaluated once
+        return Demand.Π̂(model, params, W)
     end
 end
 
-function parent_handle(::Type{GradientRequest}, model, W, z, params)
+function parent_handle(::Type{GradientRequest}, model, W, zs, params)
     islikelihood = snakemake.params["objective"] == "likelihood"
     if islikelihood
-        -Demand.dloglikelihood(model, params, z)
+        isempty(zs) && return zeros(Float32, length(params))
+        return -sum(z -> Demand.dloglikelihood(model, params, z), zs)
     else
-        Demand.dΠ̂(model, params, W)
+        return Demand.dΠ̂(model, params, W)
     end
 end
 
-child_handle(r::LikelihoodRequest) = Demand.loglikelihood(model, r.params, r.z)
-child_handle(r::GradientRequest) = Demand.dloglikelihood(model, r.params, r.z)
+child_handle(r::LikelihoodRequest) =
+    isempty(r.zs) ? 0.0f0 :
+    sum(z -> Demand.loglikelihood(model, r.params, z), r.zs)
 
-normalize!(out, ::Type{LikelihoodRequest}) = nothing
-function normalize!(out, ::Type{GradientRequest})
-    delta_idxs = Demand.@indexof delta out model
-    normalize!(@view out[delta_idxs])
-
-    trim_idxs = Demand.@indexof trim_params out model
-    normalize!(@view out[trim_idxs], threshold = 50) 
-
-    other_idxs = setdiff(1:length(out), delta_idxs, trim_idxs)
-    normalize!(@view out[other_idxs], threshold = 10)
-
-    return nothing
-end
-
-function normalize!(out; threshold = 1)
-    g = norm(out) / threshold 
-    if g > 1
-        out ./= g
-    end
-end
+child_handle(r::GradientRequest) =
+    isempty(r.zs) ? zeros(Float32, length(r.params)) :
+    sum(z -> Demand.dloglikelihood(model, r.params, z), r.zs)
 
 stop!() =
     for i in 1:(syze - 1)
@@ -103,7 +93,7 @@ stop!() =
 with_logging() do
     if rank == 0
         @info "Starting optimization with $(syze) processes"
-        θ = if haskey(snakemake.input, "params_restart") && 
+        θ = if haskey(snakemake.input, "params_restart") &&
                 !isempty(snakemake.input["params_restart"]) &&
                 isfile(snakemake.input["params_restart"])
             JLD2.load_object(snakemake.input["params_restart"]).minimizer
@@ -111,10 +101,10 @@ with_logging() do
             initial_parameters(model)
         end
         zips = Registrations.zips().zip_code
+
+        # Two-step GMM for the combined objective; one pass for likelihood.
+        T = snakemake.params["objective"] == "likelihood" ? 1 : 2
         i = 0
-        lr_max = 5f-5
-        lr_min = 1f-6
-        T = 16 
         while i < T
             W = Demand.optimalW(model, θ)
             f = OnceDifferentiable(
@@ -124,25 +114,28 @@ with_logging() do
                 inplace = false,
             )
             i += 1
-            lr = lr_min + 0.5 * (lr_max - lr_min) * (1 + cos(i * pi / T))
             @info "In loop $i"
             result = optimize(
                 f,
                 θ,
-                Adam(alpha = Float32(lr), beta_mean = 0.9f0, beta_var = 0.99f0, epsilon=1f-8),
+                LBFGS(m = 20),
                 Optim.Options(
                     store_trace = true,
                     show_trace = true,
                     show_every = 1,
-                    iterations = 500,
+                    iterations = 5000,
+                    f_tol = 1f-9,
+                    g_tol = 1f-6,
+                    allow_f_increases = true,
                 ),
-            )    
+            )
             JLD2.save_object(snakemake.output[1], result)
             p, ext = splitext(snakemake.output[1])
             obj = snakemake.params["objective"]
             JLD2.save_object("$(p)_$(obj)_$(i)$(ext)", result)
             θ = result.minimizer
         end
+        stop!()
     else
         while true
             msg, _ = MPI.recv(0, 0, comm)
