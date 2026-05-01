@@ -36,15 +36,11 @@ with_logging() do
             ),
             on = :transaction_uid,
         )
-        transaction_uids.hhi_change = map(eachrow(transaction_uids)) do row
-            Empirics.hhi(
-                row.dealer_uid,
-                [Dealers.eventtime(row.t, -3)],
-                Dict(row.dealer_uid => row.t.buyer_gid),
-            )
-        end
-        decreasers = subset(transaction_uids, :hhi_change => ByRow(<=(0)))
-        increasers = subset(transaction_uids, :hhi_change => ByRow(>=(0)))
+        market_share_changes = read_arrow(snakemake.input["market_share_changes"])
+        leftjoin!(transaction_uids, market_share_changes, on = [:transaction_uid, :dealer_uid])
+        
+        decreasers = subset(transaction_uids, :change_market_share => ByRow(x -> x < 0 || x ≈ 0))
+        increasers = subset(transaction_uids, :change_market_share => ByRow(x -> x > 0 || x ≈ 0))
 
         increasing_registrations = subset(
             registrations, :dealer_uid => ByRow(!in(decreasers.dealer_uid))

@@ -10,8 +10,7 @@ const NS = Ref{Function}()
 function calcsplines!(x)
     if !isdefined(NS, 1)
         NS[] = ns_(
-            collect(x),
-            boundary_knots = (-0.1, 0.1),
+            collect(disallowmissing(x)),
             df = 5,
             intercept = true,
         )
@@ -21,7 +20,7 @@ end
 
 function addsplines!(df, col = :change_market_share)
     f = calcsplines!(df[!, col])
-    S = f(df[!, col])
+    S = f(disallowmissing(df[!, col]))
     for (i, col) in enumerate(eachcol(S))
         df[:, "ns_$(i)"] = col
     end
