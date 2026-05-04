@@ -128,30 +128,75 @@ end
     return t_lookup, j_lookup, f_lookup
 end
 
-function residualize!(X, lookup)
-    i_iter = 0
-    t_lookup, j_lookup, f_lookup = collect_lookups(lookup)
-    X_old = similar(X)
-    while true
-        i_iter += 1
-        copy!(X_old, X)
-        for t in t_lookup
-            @inbounds X[t] .-= @fastmath mean(X[t])
+function _fe_linear_map(t_refs, j_refs, f_refs, n_t, n_j, n_f)
+    N = length(t_refs)
+    M = Int(n_t + n_j + n_f)
+    fwd! = (y, x) -> begin
+        fill!(y, zero(Float32))
+        @fastmath @inbounds for i in 1:N
+            y[i] = x[t_refs[i]] + x[n_t + j_refs[i]] + x[n_t + n_j + f_refs[i]]
         end
-        for j in j_lookup
-            @inbounds X[j] .-= @fastmath mean(X[j])
-        end
-        for f in f_lookup
-            @inbounds X[f] .-= @fastmath mean(X[f])
-        end
-        adiff = norm(X - X_old)
-        rdiff = @fastmath norm(X - X_old) / norm(X_old)
-        if rdiff < 1e-4 || adiff ≈ 0
-            @info "Terminating after $i_iter iterations"
-            return X
-        end
-        i_iter % 10 == 0 && @info "Residualizing hit $i_iter iterations. rdiff = $(rdiff)"
+        return y
     end
+    adj! = (y, x) -> begin
+        fill!(y, zero(Float32))
+        @fastmath @inbounds for i in 1:N
+            xi = x[i]
+            y[t_refs[i]] += xi
+            y[n_t + j_refs[i]] += xi
+            y[n_t + n_j + f_refs[i]] += xi
+        end
+        return y
+    end
+    return LinearMap{Float32}(fwd!, adj!, N, M; ismutating = true)
+end
+
+@memoize function _residualize_plan(lookup)
+    t_lookup, j_lookup, f_lookup = collect_lookups(lookup)
+    obs_keys = reduce(vcat, t_lookup)
+    N = length(obs_keys)
+    key_to_obs = Dict(k => Int32(i) for (i, k) in enumerate(obs_keys))
+
+    t_refs = Vector{Int32}(undef, N)
+    j_refs = Vector{Int32}(undef, N)
+    f_refs = Vector{Int32}(undef, N)
+    for (gi, group) in enumerate(t_lookup)
+        for k in group
+            t_refs[key_to_obs[k]] = Int32(gi)
+        end
+    end
+    for (gi, group) in enumerate(j_lookup)
+        for k in group
+            j_refs[key_to_obs[k]] = Int32(gi)
+        end
+    end
+    for (gi, group) in enumerate(f_lookup)
+        for k in group
+            f_refs[key_to_obs[k]] = Int32(gi)
+        end
+    end
+
+    A = _fe_linear_map(t_refs, j_refs, f_refs, Int32(length(t_lookup)), Int32(length(j_lookup)), Int32(length(f_lookup)))
+    ws = LsmrWorkspace(N, size(A, 2), Vector{Float32})
+    return obs_keys, A, ws
+end
+
+function residualize!(X, lookup)
+    obs_keys, A, ws = _residualize_plan(lookup)
+    N = length(obs_keys)
+    b = Vector{Float32}(undef, N)
+    @inbounds for (i, k) in enumerate(obs_keys)
+        b[i] = X[k]
+    end
+    lsmr!(ws, A, b; atol = 1f-4, btol = 1f-4, itmax = 500)
+    ws.stats.solved || @warn "residualize! did not converge in $(ws.stats.niter) iterations"
+    @info "residualize! solved in $(ws.stats.niter) LSMR iterations"
+    fitted = ws.Av  # reuse workspace buffer (length m = N)
+    mul!(fitted, A, ws.x)
+    @inbounds for (i, k) in enumerate(obs_keys)
+        X[k] = b[i] - fitted[i]
+    end
+    return X
 end
 
 @memoize function x_residualized(model)

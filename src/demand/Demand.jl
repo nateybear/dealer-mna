@@ -34,6 +34,8 @@ using Graphs
 using Combinatorics
 import ArchGDAL as AG
 import FiniteDiff: finite_difference_gradient, GradientCache
+import Krylov: lsmr!, LsmrWorkspace
+import LinearMaps: LinearMap
 
 # include("keyedsparsearray.jl")
 # __init__() = _generate_method_overrides()
