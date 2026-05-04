@@ -35,11 +35,15 @@ struct StopSignal end
 
 function parent_scatter(T, zips, W, params)
     chunksize = cld(length(zips), syze - 1)
+    @info "Partitioning into chunks of size $chunksize"
+    maxrank = 0 # might not use all of the ranks in edge cases...
     for (i, chunk) in enumerate(Iterators.partition(zips, chunksize))
         MPI.send(T(params, chunk), i, 0, comm)
+        maxrank = i
     end
     out = parent_handle(T, model, W, params)
-    for i in 1:(syze - 1)
+    @info
+    for i in 1:maxrank
         msg, _ = MPI.recv(i, 0, comm)
         if msg isa StopSignal
             @info "Process $i signaled to stop"

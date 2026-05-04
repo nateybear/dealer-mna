@@ -1,4 +1,67 @@
 @memoize δ_prealloc(model) = similar(model.product_info, Float32)
+@memoize _resid_buf(model) = similar(model.product_info, Float32)
+@memoize _t_counts_buf(model) = zeros(Int64, size(model.counts, 2))
+
+@memoize function _mean_vec(S::Int)
+    v = SparseArray{Float32}(undef, (S,))
+    inv_s = 1.0f0 / Float32(S)
+    for i in 1:S
+        v[i] = inv_s
+    end
+    return v
+end
+
+@memoize _demo_zip(model, z::String) =
+    collect(model.agent_data[z][DEMOGRAPHIC_ATTRIBUTES])
+
+# Sum of instruments over each (t,j,f) product group — rows of ∂m/∂δ; model-fixed.
+@memoize function _Z_group_sums(model)
+    Z = z_matrix(model)
+    n_z = size(Z, ndims(Z))
+    n_groups = length(model.product_lookup.tjf)
+    sums = zeros(Float32, n_groups, n_z)
+    @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
+        for col in 1:n_z
+            sums[i, col] = sum(Z[Tuple(idx)..., col] for idx in idxs)
+        end
+    end
+    return sums
+end
+
+# X'Z cross-product for the price-attribute block of ∂m/∂β; model-fixed.
+@memoize function _XZ_cross(model)
+    X = p_matrix(model)
+    Z = z_matrix(model)
+    n_x = size(X, ndims(X))
+    n_z = size(Z, ndims(Z))
+    XZ = zeros(Float32, n_x, n_z)
+    @inbounds for idx in nonzero_keys(model.product_info)
+        t = Tuple(idx)
+        for i_x in 1:n_x, i_z in 1:n_z
+            XZ[i_x, i_z] += X[t..., i_x] * Z[t..., i_z]
+        end
+    end
+    return XZ
+end
+
+@memoize _∇m_buf(n_params::Int, n_moments::Int) = Matrix{Float32}(undef, n_params, n_moments)
+
+@memoize function _counts_zip(model, z::String)
+    iz = searchsortedfirst(collected_zips(model), z)
+    return model.counts[iz, :, :, :]
+end
+
+@memoize function _dist_zip_plan(model, z::String)
+    col_names = names(model.distances, 2)
+    dist_row = model.distances[z, :]
+    result = Tuple{Float32, Vector{CartesianIndex{3}}}[]
+    for (uid, dist) in zip(col_names, dist_row)
+        idxs = get(model.product_lookup.f, uid, CartesianIndex{3}[])
+        isempty(idxs) && continue
+        push!(result, (Float32(dist), idxs))
+    end
+    return result
+end
 
 @memoize function δ_fill_plan(model)
     n = sum(length(idxs) for idxs in values(model.product_lookup.tjf))
@@ -149,20 +212,17 @@ function loglikelihood(
     params::AbstractVector,
     z::String,
 )::Float32
-    mean_vec = SparseArray{Float32, 1}(ones(Float32, size(model.u.draws)))
-    mean_vec /= Float32(size(model.u.draws, 1))
-
+    S = length(model.u.draws)
     ccps = CCPs(model, params, z) # S × T × J × F
 
     # Take mean across first dimension
     grid = grid_prealloc(size(ccps)[2:end])
-    contract!(grid, mean_vec, (-1,), ccps, (-1, 2, 3, 4))
+    contract!(grid, _mean_vec(S), (-1,), ccps, (-1, 2, 3, 4))
 
     map!(log, values(grid.data))
 
     # pull counts for zip
-    iz = searchsortedfirst(collected_zips(model), z)
-    counts = model.counts[iz, :, :, :]
+    counts = _counts_zip(model, z)
     # log likelihood of all products, quarters, firms for zip
     return inner(grid, counts)
 end
@@ -287,33 +347,21 @@ end
 
 function dΠ̂(model::AbstractDemandModel, params::AbstractVector, W = I)::AbstractVector
     m = moments(model, params)
-    ∇m = reduce(hcat, (zeros(Float32, size(params)) for _ in 1:length(m)))
+
+    Z_gsums = _Z_group_sums(model)  # n_groups × n_z, model-fixed
+    XZ = _XZ_cross(model)           # n_x × n_z, model-fixed
+
+    ∇m = _∇m_buf(length(params), size(Z_gsums, 2))
+    fill!(∇m, zero(Float32))
 
     i_δ = @indexof delta params model
-
-    Z = z_matrix(model)
-
-    # grad for delta
-    @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
-        for col in axes(∇m, 2)
-            row = i_δ[i]
-            ∇m[row, col] = sum(Z[Tuple(idx)..., col] for idx in idxs)
-        end
+    @inbounds for (i, _) in enumerate(pairs(model.product_lookup.tjf))
+        ∇m[i_δ[i], :] .= @view Z_gsums[i, :]
     end
 
-    # grad for beta
-    X = p_matrix(model)
     i_β = @indexof mean_price_params params model
-    @inbounds for z_var in axes(Z, ndims(Z))
-        @inbounds for x_var in axes(X, ndims(X))
-            row = i_β[x_var]
-            col = z_var
-            ∇m[row, col] =
-                -sum(
-                    @inbounds X[Tuple(idx)..., x_var] * Z[Tuple(idx)..., z_var]
-                    for idx in nonzero_keys(model.product_info)
-                )
-        end
+    @inbounds for x_var in axes(XZ, 1)
+        ∇m[i_β[x_var], :] .= .-@view XZ[x_var, :]
     end
 
     return 0.5f0 * ∇m * W * m
@@ -324,72 +372,62 @@ function dloglikelihood(
     params::AbstractVector,
     z::String,
 )::AbstractVector
-    mean_vec = SparseArray{Float32, 1}(ones(Float32, size(model.u.draws)))
-    mean_vec /= Float32(size(model.u.draws, 1))
+    S = length(model.u.draws)
+    grid_S = CCPs(model, params, z) # S × T × J × F
 
-    grid = CCPs(model, params, z) # S × T × J × F
+    # Average CCPs over draws into T × J × F buffer
+    avg_grid = grid_prealloc(size(grid_S)[2:end])
+    contract!(avg_grid, _mean_vec(S), (-1,), grid_S, (-1, 2, 3, 4))
 
-    # Take mean across first dimension
-    contract!(
-        grid_prealloc(size(grid)[2:end]), mean_vec, (-1,), grid, (-1, 2, 3, 4)
-    )
-
-    grid = grid_prealloc(size(grid)[2:end])
-
-    # pull counts for zip
-    iz = searchsortedfirst(collect(keys(model.counts_lookup.z)), z)
-    counts = model.counts[iz, :, :, :]
-    t_counts = SparseArray{Int64}(undef, size(counts, 1))
+    # total counts per time period (reuse preallocated dense buffer)
+    counts = _counts_zip(model, z)
+    t_counts = _t_counts_buf(model)
+    fill!(t_counts, zero(Int64))
     @inbounds for (i, n) in nonzero_pairs(counts)
         t_counts[first(i.I)] += n
     end
 
-    out = zeros(Float32, length(params))
+    # precompute residual = count - t_total * avg_ccp for every product once
+    resid = _resid_buf(model)
+    @inbounds for idx in nonzero_keys(model.product_info)
+        t = first(idx.I)
+        resid[idx] = counts[idx] - t_counts[t] * avg_grid[idx]
+    end
 
+    out = zeros(Float32, length(params))
     i_δ = @indexof delta params model
 
     # grad for delta
     @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
-        t = first(idxs).I[1]
-        out[i_δ[i]] = sum(
-            counts[idx] - t_counts[t] * grid[idx] for idx in idxs
-        )
+        out[i_δ[i]] = sum(resid[idx] for idx in idxs)
     end
 
-    # grade for demo_produce and demo_price_params
+    # grad for demo_product and demo_price params
     X = x_matrix(model)
     i_Πᵦ = reshape(
         @indexof(demo_product_params, params, model),
         n_demographics(model),
         n_product_attributes(model),
-    ) # (n_demo × n_product)
-    i_Πₚ = @indexof demo_price_params params model # (n_demo)
-    i_Π = hcat(i_Πᵦ, i_Πₚ) # n_demo x (n_product + 1)
-    D_i = collect(model.agent_data[z][DEMOGRAPHIC_ATTRIBUTES])
+    )
+    i_Πₚ = @indexof demo_price_params params model
+    i_Π = hcat(i_Πᵦ, i_Πₚ)
+    D_i = _demo_zip(model, z)
     @inbounds for i_X in axes(X, ndims(X))
+        # inner product of X[:, i_X] with resid — same for all demographics
+        s = sum(X[Tuple(idx)..., i_X] * resid[idx] for idx in nonzero_keys(model.product_info))
         for i_D in axes(D_i, 1)
-            row = i_Π[i_D, i_X]
-            out[row] = sum(
-                D_i[i_D] * X[Tuple(idx)..., i_X] *
-                (counts[idx] - t_counts[first(idx.I)] * grid[idx])
-                for idx in nonzero_keys(model.product_info)
-            )
+            out[i_Π[i_D, i_X]] = D_i[i_D] * s
         end
     end
 
+    # grad for distance params
     η = @pull dist_params params model
     i_η = @indexof dist_params params model
-    dist_f = model.distances[z, :]
-    @inbounds for (uid, dist) in zip(names(dist_f, 1), dist_f)
-        idxs = model.product_lookup.f[uid]
-        @inbounds for idx in idxs
-            out[i_η[1]] -=
-                exp(η[1] + η[2] * dist) *
-                (counts[idx] - t_counts[first(idx.I)] * grid[idx])
-            out[i_η[2]] -=
-                dist * exp(η[1] + η[2] * dist) *
-                (counts[idx] - t_counts[first(idx.I)] * grid[idx])
-        end
+    @inbounds for (dist, idxs) in _dist_zip_plan(model, z)
+        e = @fastmath exp(η[1] + η[2] * dist)
+        s = sum(resid[idx] for idx in idxs)
+        out[i_η[1]] -= e * s
+        out[i_η[2]] -= dist * e * s
     end
 
     return out
