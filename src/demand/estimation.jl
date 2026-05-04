@@ -1,37 +1,29 @@
 @memoize δ_prealloc(model) = similar(model.product_info, Float32)
 
-# Pre-warm the preallocated dict so all keys exist with non-zero sentinels, then record
-# the exact hash-table slot for each (sparse_idx → guess_idx) pair.  On every subsequent
-# call we scatter directly into deltas.data.vals[slots], bypassing the Dict API and its
-# zero-deletion branch entirely — safe as long as we never add or remove keys afterwards.
 @memoize function δ_fill_plan(model)
-    deltas = δ_prealloc(model)
-    for idxs in values(model.product_lookup.tjf)
-        for idx in idxs
-            deltas.data[idx] = one(Float32)  # non-zero sentinel keeps the slot alive
-        end
-    end
     n = sum(length(idxs) for idxs in values(model.product_lookup.tjf))
-    slots = Vector{Int}(undef, n)
+    keys_plan = Vector{CartesianIndex{3}}(undef, n)
     gidxs = Vector{Int32}(undef, n)
     k = 1
     for (i, idxs) in enumerate(values(model.product_lookup.tjf))
         for idx in idxs
-            slots[k] = Base.ht_keyindex(deltas.data, idx)
+            keys_plan[k] = idx
             gidxs[k] = Int32(i)
             k += 1
         end
     end
-    return slots, gidxs
+    return keys_plan, gidxs
 end
+
+@memoize δ_indices(model) = first(δ_fill_plan(model))
 
 function δ(params::AbstractVector, model::DemandModel)::SparseArray{Float32, 3}
     guesses::Vector{Float32} = @pull delta params model # one delta per (t, j_trim, f)
     deltas = δ_prealloc(model)
-    slots, gidxs = δ_fill_plan(model)
-    dvals = deltas.data.vals
-    @inbounds @simd for k in eachindex(slots)
-        dvals[slots[k]] = guesses[gidxs[k]]
+    keys_plan, gidxs = δ_fill_plan(model)
+    h = deltas.data
+    @inbounds for k in eachindex(keys_plan)
+        h[keys_plan[k]] = guesses[gidxs[k]]
     end
     return deltas # T × J(trim-included) × F
 end
@@ -93,7 +85,7 @@ function μ(params, model::AbstractDemandModel, zip_code)::SparseArray{Float32, 
         disutils[k] = @fastmath exp(η1 + η2 * dist_f[k])
     end
     # regular getindex/setindex! dispatches to a method that can sometimes resize. Not thread safe!
-    @inbounds for k in eachindex(f_idxs4)
+    @inbounds @threads for k in eachindex(f_idxs4)
         disutility = disutils[k]
         @simd for idx4 in f_idxs4[k]
             @inbounds out[idx4] -= disutility

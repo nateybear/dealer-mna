@@ -144,12 +144,13 @@ function residualize!(X, lookup)
         for f in f_lookup
             @inbounds X[f] .-= @fastmath mean(X[f])
         end
+        adiff = norm(X - X_old)
         rdiff = @fastmath norm(X - X_old) / norm(X_old)
-        if rdiff < 1e-4
+        if rdiff < 1e-4 || adiff ≈ 0
             @info "Terminating after $i_iter iterations"
             return X
         end
-        i_iter % 10 == 0 && @info "Residualizing hit $i_iter iterations"
+        i_iter % 10 == 0 && @info "Residualizing hit $i_iter iterations. rdiff = $(rdiff)"
     end
 end
 
