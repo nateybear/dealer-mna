@@ -55,7 +55,6 @@ function mpi_scatter(T, zips, params)
     return out
 end
 
-
 function child_handle(r::LikelihoodRequest)
     return mapreduce(Demand.loglikelihood$(model, r.params), +, r.zs, init = 0.0f0)
 end
@@ -117,10 +116,9 @@ with_logging() do
                     g_tol = 1.0f-3,
                     allow_f_increases = true,
                     callback = state -> begin
-                        @info "warm-start iter $(state.iteration): " *
-                              "-logL=$(round(state.value; sigdigits=6)) " *
-                              "gnorm=$(round(state.g_norm; sigdigits=4))"
-                        return false
+                        @info "warm-start iter $(state.pseudo_iteration): " *
+                            "-logL=$(round(state.f_x; sigdigits=6)) "
+                        return state.f_x ≤ 0.0f0
                     end,
                 ),
             )
@@ -138,7 +136,7 @@ with_logging() do
                     _last_gmm[] = gmm
                     return ll + gmm
                 end,
-                θ_cur -> mpi_scatter(GradientRequest, zips, θ_cur) .+ Demand.dΠ̂(model, θ_cur, W),
+                θ_cur -> mpi_scatter(GradientRequest, zips, θ_cur) + Demand.dΠ̂(model, θ_cur, W),
                 θ,
                 inplace = false,
             ),
@@ -146,19 +144,11 @@ with_logging() do
             LBFGS(m = 20, linesearch = LineSearches.BackTracking()),
             Optim.Options(
                 store_trace = true,
-                show_trace = false,
+                show_trace = true,
                 iterations = 5000,
                 f_tol = 1.0f-9,
                 g_tol = 1.0f-6,
                 allow_f_increases = true,
-                callback = state -> begin
-                    @info "iter $(state.iteration): " *
-                          "total=$(round(state.value; sigdigits=6)) " *
-                          "-logL=$(round(_last_ll[]; sigdigits=6)) " *
-                          "Π̂=$(round(_last_gmm[]; sigdigits=6)) " *
-                          "gnorm=$(round(state.g_norm; sigdigits=4))"
-                    return false
-                end,
             ),
         )
 
