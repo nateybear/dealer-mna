@@ -126,33 +126,60 @@ with_logging() do
             @info "Warm start done: -logL=$(round(warm_result.minimum; sigdigits=6))"
         end
 
-        # Single joint optimization over all parameters (δ and π together).
-        result = optimize(
-            OnceDifferentiable(
-                function (θ_cur)
-                    ll = mpi_scatter(LikelihoodRequest, zips, θ_cur)
-                    gmm = Demand.Π̂(model, θ_cur, W)
-                    _last_ll[] = ll
-                    _last_gmm[] = gmm
-                    return ll + gmm
-                end,
-                θ_cur -> mpi_scatter(GradientRequest, zips, θ_cur) + Demand.dΠ̂(model, θ_cur, W),
-                θ,
-                inplace = false,
-            ),
-            θ,
-            LBFGS(m = 20, linesearch = LineSearches.BackTracking()),
-            Optim.Options(
-                store_trace = true,
-                show_trace = true,
-                iterations = 5000,
-                f_tol = 1.0f-9,
-                g_tol = 1.0f-6,
-                allow_f_increases = true,
-            ),
-        )
+        lbfgs_opts = LBFGS(m = 20, linesearch = LineSearches.BackTracking())
 
-        JLD2.save_object(snakemake.output[1], (; minimizer = result.minimizer, result))
+        function joint_optimize(θ₀, W_cur, label)
+            return optimize(
+                OnceDifferentiable(
+                    function (θ_cur)
+                        ll = mpi_scatter(LikelihoodRequest, zips, θ_cur)
+                        gmm = Demand.Π̂(model, θ_cur, W_cur)
+                        _last_ll[] = ll
+                        _last_gmm[] = gmm
+                        return ll + gmm
+                    end,
+                    θ_cur ->
+                        mpi_scatter(GradientRequest, zips, θ_cur) .+
+                        Demand.dΠ̂(model, θ_cur, W_cur),
+                    θ₀,
+                    inplace = false,
+                ),
+                θ₀,
+                lbfgs_opts,
+                Optim.Options(
+                    store_trace = true,
+                    show_trace = false,
+                    iterations = 5000,
+                    f_tol = 1.0f-9,
+                    g_tol = 1.0f-6,
+                    allow_f_increases = true,
+                    callback = state -> begin
+                        @info "$label iter $(state.iteration): " *
+                              "total=$(round(state.value; sigdigits=6)) " *
+                              "-logL=$(round(_last_ll[]; sigdigits=6)) " *
+                              "Π̂=$(round(_last_gmm[]; sigdigits=6)) " *
+                              "gnorm=$(round(state.g_norm; sigdigits=4))"
+                        return false
+                    end,
+                ),
+            )
+        end
+
+        # Step 1: optimize with initial W.
+        result1 = joint_optimize(θ, W, "step1")
+        θ̂₁ = result1.minimizer
+        @info "Step 1 done: total=$(round(result1.minimum; sigdigits=6)) converged=$(Optim.converged(result1))"
+
+        # Step 2: recompute optimal W at θ̂₁, re-optimize for efficiency.
+        W_opt = Demand.optimalW(model, θ̂₁)
+        @info "Recomputed optimal W for step 2"
+        result2 = joint_optimize(θ̂₁, W_opt, "step2")
+        @info "Step 2 done: total=$(round(result2.minimum; sigdigits=6)) converged=$(Optim.converged(result2))"
+
+        JLD2.save_object(
+            snakemake.output[1],
+            (; minimizer = result2.minimizer, step1 = result1, step2 = result2),
+        )
         stop!()
     else
         while true
