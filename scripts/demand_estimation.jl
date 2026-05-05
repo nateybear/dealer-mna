@@ -82,28 +82,40 @@ with_logging() do
                 initial_parameters(model)
             end
         zips = Registrations.zips().zip_code
-        W = Demand.optimalW(model, θ)
         i_δ = @indexof delta θ model
+        i_nonδ = setdiff(1:length(θ), i_δ)
+
+        # Cache: avoid re-running the inner problem when f and g are called at the same π.
+        _cached_π = fill(NaN32, length(i_nonδ))
+        _cached_θ_opt = copy(θ)
+        _inner_iter = Ref(0)
         _last_ll = Ref(NaN32)
         _last_gmm = Ref(NaN32)
 
-        # Warm start: find a good δ at the initial non-delta params before joint optimization.
-        # Only runs when starting from scratch (initial_parameters sets δ = -3 uniformly).
-        if !haskey(snakemake.input, "params_restart") ||
-            isempty(snakemake.input["params_restart"]) ||
-            !isfile(snakemake.input["params_restart"])
-            @info "Warm-starting delta via likelihood maximization ($(length(i_δ)) params)"
-            δ₀ = copy(@pull delta θ model)
-            warm_result = optimize(
+        # Inner problem: given non-delta params π, find δ*(π) = argmax_δ loglikelihood.
+        # δ is just-identified, so this inner LBFGS converges in very few steps.
+        # Warm-starts from the previous solution so adjacent line-search probes are cheap.
+        function concentrated_θ!(π)
+            if π == _cached_π
+                return _cached_θ_opt
+            end
+            _inner_iter[] += 1
+            id = _inner_iter[]
+
+            θ_tmp = copy(θ)
+            θ_tmp[i_nonδ] .= π
+            # warm start: reuse last δ* rather than resetting to initial
+            (@pull delta θ_tmp model) .= @pull delta _cached_θ_opt model
+
+            δ₀ = copy(Float32.(@pull delta θ_tmp model))
+            inner_result = optimize(
                 OnceDifferentiable(
                     function (δ_w)
-                        θ_tmp = copy(θ)
-                        (@pull delta θ_tmp model) .= δ_w
+                        θ_tmp[i_δ] .= δ_w
                         return mpi_scatter(LikelihoodRequest, zips, θ_tmp)
                     end,
                     function (δ_w)
-                        θ_tmp = copy(θ)
-                        (@pull delta θ_tmp model) .= δ_w
+                        θ_tmp[i_δ] .= δ_w
                         return mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]
                     end,
                     δ₀,
@@ -112,72 +124,96 @@ with_logging() do
                 δ₀,
                 LBFGS(m = 10, linesearch = LineSearches.BackTracking()),
                 Optim.Options(
-                    iterations = 200,
+                    iterations = 500,
                     g_tol = 1.0f-3,
+                    f_reltol = NaN,
+                    f_abstol = NaN,
+                    x_reltol = NaN,
+                    x_abstol = NaN,
                     allow_f_increases = true,
                     callback = state -> begin
-                        @info "warm-start iter $(state.pseudo_iteration): " *
-                            "-logL=$(round(state.f_x; sigdigits=6)) "
-                        return state.f_x ≤ 0.0f0
+                        @info "  inner #$id iter $(state.pseudo_iteration): " *
+                              "-logL=$(round(state.f_x; sigdigits=6)) " *
+                              "gnorm=$(round(norm(state.g_x); sigdigits=4))"
+                        return false
                     end,
                 ),
             )
-            (@pull delta θ model) .= warm_result.minimizer
-            @info "Warm start done: -logL=$(round(warm_result.minimum; sigdigits=6))" warm_result
+            θ_tmp[i_δ] .= inner_result.minimizer
+            @info "  inner #$id done: iters=$(inner_result.iterations) converged=$(Optim.converged(inner_result)) -logL=$(round(inner_result.minimum; sigdigits=6))"
+
+            _cached_π .= π
+            _cached_θ_opt .= θ_tmp
+            return _cached_θ_opt
         end
 
-        lbfgs_opts = LBFGS(m = 20, linesearch = LineSearches.BackTracking())
-
-        function joint_optimize(θ₀, W_cur, label)
+        function outer_optimize(π₀, W_cur, label)
             return optimize(
                 OnceDifferentiable(
-                    function (θ_cur)
-                        ll = mpi_scatter(LikelihoodRequest, zips, θ_cur)
-                        gmm = Demand.Π̂(model, θ_cur, W_cur)
+                    function (π)
+                        θ_opt = concentrated_θ!(π)
+                        ll = mpi_scatter(LikelihoodRequest, zips, θ_opt)
+                        gmm = Demand.Π̂(model, θ_opt, W_cur)
                         _last_ll[] = ll
                         _last_gmm[] = gmm
                         return ll + gmm
                     end,
-                    θ_cur ->
-                        mpi_scatter(GradientRequest, zips, θ_cur) .+
-                        Demand.dΠ̂(model, θ_cur, W_cur),
-                    θ₀,
+                    function (π)
+                        θ_opt = concentrated_θ!(π)
+                        return (
+                            mpi_scatter(GradientRequest, zips, θ_opt) .+
+                            Demand.dΠ̂(model, θ_opt, W_cur)
+                        )[i_nonδ]
+                    end,
+                    π₀,
                     inplace = false,
                 ),
-                θ₀,
-                lbfgs_opts,
+                π₀,
+                LBFGS(m = 20, linesearch = LineSearches.BackTracking()),
                 Optim.Options(
                     store_trace = true,
                     show_trace = false,
                     iterations = 5000,
-                    g_tol = 1.0f0,
+                    g_tol = 1.0f-3,
+                    f_reltol = NaN,
+                    f_abstol = NaN,
+                    x_reltol = NaN,
+                    x_abstol = NaN,
                     allow_f_increases = true,
                     callback = state -> begin
                         @info "$label iter $(state.pseudo_iteration): " *
-                            "total=$(round(state.f_x; sigdigits=6)) " *
-                            "-logL=$(round(_last_ll[]; sigdigits=6)) " *
-                            "Π̂=$(round(_last_gmm[]; sigdigits=6)) " *
-                            "gnorm=$(round(norm(state.g_x); sigdigits=4))"
+                              "total=$(round(state.f_x; sigdigits=6)) " *
+                              "-logL=$(round(_last_ll[]; sigdigits=6)) " *
+                              "Π̂=$(round(_last_gmm[]; sigdigits=6)) " *
+                              "gnorm=$(round(norm(state.g_x); sigdigits=4)) " *
+                              "inner_iters=$(_inner_iter[])"
                         return false
                     end,
                 ),
             )
         end
 
-        # Step 1: optimize with initial W.
-        result1 = joint_optimize(θ, W, "step1")
-        θ̂₁ = result1.minimizer
+        # Step 1: optimize over non-delta params with initial W (computed at initial θ).
+        W = Demand.optimalW(model, θ)
+        π₀ = Float32.(θ[i_nonδ])
+        result1 = outer_optimize(π₀, W, "step1")
+        θ̂₁ = copy(_cached_θ_opt)
+        θ̂₁[i_nonδ] .= result1.minimizer
         @info "Step 1 done: total=$(round(result1.minimum; sigdigits=6)) converged=$(Optim.converged(result1))"
 
-        # Step 2: recompute optimal W at θ̂₁, re-optimize for efficiency.
+        # Step 2: update W at θ̂₁ and re-optimize for efficiency.
         W_opt = Demand.optimalW(model, θ̂₁)
         @info "Recomputed optimal W for step 2"
-        result2 = joint_optimize(θ̂₁, W_opt, "step2")
+        _inner_iter[] = 0
+        _cached_π .= NaN32  # force inner re-solve at new W
+        result2 = outer_optimize(result1.minimizer, W_opt, "step2")
+        θ̂₂ = copy(_cached_θ_opt)
+        θ̂₂[i_nonδ] .= result2.minimizer
         @info "Step 2 done: total=$(round(result2.minimum; sigdigits=6)) converged=$(Optim.converged(result2))"
 
         JLD2.save_object(
             snakemake.output[1],
-            (; minimizer = result2.minimizer, step1 = result1, step2 = result2),
+            (; minimizer = θ̂₂, step1 = result1, step2 = result2),
         )
         stop!()
     else
