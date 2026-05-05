@@ -123,7 +123,7 @@ with_logging() do
                 ),
             )
             (@pull delta θ model) .= warm_result.minimizer
-            @info "Warm start done: -logL=$(round(warm_result.minimum; sigdigits=6))"
+            @info "Warm start done: -logL=$(round(warm_result.minimum; sigdigits=6))" warm_result
         end
 
         lbfgs_opts = LBFGS(m = 20, linesearch = LineSearches.BackTracking())
@@ -148,11 +148,18 @@ with_logging() do
                 lbfgs_opts,
                 Optim.Options(
                     store_trace = true,
-                    show_trace = true,
+                    show_trace = false,
                     iterations = 5000,
-                    f_tol = 1.0f-9,
-                    g_tol = 1.0f-6,
+                    g_tol = 1.0f0,
                     allow_f_increases = true,
+                    callback = state -> begin
+                        @info "$label iter $(state.pseudo_iteration): " *
+                            "total=$(round(state.f_x; sigdigits=6)) " *
+                            "-logL=$(round(_last_ll[]; sigdigits=6)) " *
+                            "Π̂=$(round(_last_gmm[]; sigdigits=6)) " *
+                            "gnorm=$(round(norm(state.g_x); sigdigits=4))"
+                        return false
+                    end,
                 ),
             )
         end
