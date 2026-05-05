@@ -55,28 +55,6 @@ function mpi_scatter(T, zips, params)
     return out
 end
 
-function parent_scatter(T, zips, W, params)
-    return mpi_scatter(T, zips, params) + parent_handle(T, model, W, params)
-end
-
-function parent_handle(::Type{LikelihoodRequest}, model, W, params)
-    islikelihood = snakemake.params["objective"] == "likelihood"
-    if islikelihood
-        return 0.0f0
-    else
-        # GMM moment objective is global (no zip dimension); evaluated once
-        return Demand.Π̂(model, params, W)
-    end
-end
-
-function parent_handle(::Type{GradientRequest}, model, W, params)
-    islikelihood = snakemake.params["objective"] == "likelihood"
-    if islikelihood
-        return zeros(Float32, length(params))
-    else
-        return Demand.dΠ̂(model, params, W)
-    end
-end
 
 function child_handle(r::LikelihoodRequest)
     return mapreduce(Demand.loglikelihood$(model, r.params), +, r.zs, init = 0.0f0)
@@ -105,97 +83,66 @@ with_logging() do
                 initial_parameters(model)
             end
         zips = Registrations.zips().zip_code
-        p, ext = splitext(snakemake.output[1])
-
-        # Grieco et al. cheap estimator: concentrate out delta via likelihood in the inner
-        # problem, then optimize the full objective over the remaining non-linear params.
-        i_δ = @indexof delta θ model
-        i_nonδ = setdiff(1:length(θ), i_δ)
         W = Demand.optimalW(model, θ)
-
-        # Cache avoids re-running the inner optimization for f and g at the same outer π.
-        _cached_π = fill(NaN32, length(i_nonδ))
-        _cached_θ_opt = copy(θ)
-
-        # Counters shared across closures for log correlation.
-        _inner_call = Ref(0)
+        i_δ = @indexof delta θ model
         _last_ll = Ref(NaN32)
         _last_gmm = Ref(NaN32)
 
-        # Inner problem: given non-linear params π, find δ*(π) = argmax_δ loglikelihood.
-        # Uses Barzilai–Borwein gradient descent: one gradient scatter per iteration,
-        # no line search. BB estimates a scalar step from consecutive gradient differences,
-        # giving adaptive curvature information without the overhead of a full line search.
-        function concentrated_θ!(π)
-            if π == _cached_π
-                @info "  inner #$(_inner_call[]): cache hit"
-                return _cached_θ_opt
-            end
-            _inner_call[] += 1
-            id = _inner_call[]
-            @info "  inner #$id: starting BB ($(length(i_δ)) delta params)"
-
-            θ_tmp = copy(θ)
-            θ_tmp[i_nonδ] .= π
-            (@pull delta θ_tmp model) .= @pull delta _cached_θ_opt model
-
-            g_prev = zeros(Float32, length(i_δ))
-            δ_prev = copy(Float32.(@pull delta θ_tmp model))
-            α = 1.0f-3  # conservative initial step; BB updates it after the first iteration
-            gnorm = Inf32
-            step_norm = Inf32
-            iter = 0
-
-            for iter in 1:500
-                g = mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]  # gradient of -logL
-                gnorm = maximum(abs, g)
-
-                # Update BB step size before the convergence check so step_norm uses current α.
-                if iter > 1
-                    s = (@pull delta θ_tmp model) .- δ_prev  # δ_k - δ_{k-1}
-                    y = g .- g_prev                           # ∇f_k - ∇f_{k-1}
-                    sy = dot(s, y)
-                    # BB2: ||y||² / (s'y) — larger, more aggressive steps
-                    sy > 0 && (α = clamp(dot(y, y) / sy, 1.0f-8, 1.0f4))
-                end
-
-                # α * gnorm ≈ |Δf| via Taylor; stop when neither gradient nor step is meaningful.
-                step_norm = α * gnorm
-                @info "  inner #$id BB $iter: gnorm=$(round(gnorm; sigdigits=4)) step=$(round(step_norm; sigdigits=4)) α=$(round(α; sigdigits=4))"
-                (gnorm < 1.0f-4 || step_norm < 1.0f-6) && break
-
-                δ_prev .= @pull delta θ_tmp model
-                g_prev .= g
-                (@pull delta θ_tmp model) .-= α .* g
-            end
-
-            converged = gnorm < 1.0f-4 || step_norm < 1.0f-6
-            @info "  inner #$id: done — iters=$iter converged=$converged gnorm=$(round(gnorm; sigdigits=4)) step=$(round(step_norm; sigdigits=4))"
-            _cached_π .= π
-            _cached_θ_opt .= θ_tmp
-            return _cached_θ_opt
+        # Warm start: find a good δ at the initial non-delta params before joint optimization.
+        # Only runs when starting from scratch (initial_parameters sets δ = -3 uniformly).
+        if !haskey(snakemake.input, "params_restart") ||
+            isempty(snakemake.input["params_restart"]) ||
+            !isfile(snakemake.input["params_restart"])
+            @info "Warm-starting delta via likelihood maximization ($(length(i_δ)) params)"
+            δ₀ = copy(@pull delta θ model)
+            warm_result = optimize(
+                OnceDifferentiable(
+                    function (δ_w)
+                        θ_tmp = copy(θ)
+                        (@pull delta θ_tmp model) .= δ_w
+                        return mpi_scatter(LikelihoodRequest, zips, θ_tmp)
+                    end,
+                    function (δ_w)
+                        θ_tmp = copy(θ)
+                        (@pull delta θ_tmp model) .= δ_w
+                        return mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]
+                    end,
+                    δ₀,
+                    inplace = false,
+                ),
+                δ₀,
+                LBFGS(m = 10, linesearch = LineSearches.BackTracking()),
+                Optim.Options(
+                    iterations = 200,
+                    g_tol = 1.0f-3,
+                    allow_f_increases = true,
+                    callback = state -> begin
+                        @info "warm-start iter $(state.iteration): " *
+                              "-logL=$(round(state.value; sigdigits=6)) " *
+                              "gnorm=$(round(state.g_norm; sigdigits=4))"
+                        return false
+                    end,
+                ),
+            )
+            (@pull delta θ model) .= warm_result.minimizer
+            @info "Warm start done: -logL=$(round(warm_result.minimum; sigdigits=6))"
         end
 
-        # Outer problem: optimize likelihood + GMM over non-delta params, delta concentrated out.
-        π₀ = Float32.(θ[i_nonδ])
-        outer_result = optimize(
+        # Single joint optimization over all parameters (δ and π together).
+        result = optimize(
             OnceDifferentiable(
-                function (π)
-                    θ_opt = concentrated_θ!(π)
-                    ll = mpi_scatter(LikelihoodRequest, zips, θ_opt)
-                    gmm = Demand.Π̂(model, θ_opt, W)
+                function (θ_cur)
+                    ll = mpi_scatter(LikelihoodRequest, zips, θ_cur)
+                    gmm = Demand.Π̂(model, θ_cur, W)
                     _last_ll[] = ll
                     _last_gmm[] = gmm
                     return ll + gmm
                 end,
-                function (π)
-                    θ_opt = concentrated_θ!(π)
-                    return (mpi_scatter(GradientRequest, zips, θ_opt) .+ Demand.dΠ̂(model, θ_opt, W))[i_nonδ]
-                end,
-                π₀,
+                θ_cur -> mpi_scatter(GradientRequest, zips, θ_cur) .+ Demand.dΠ̂(model, θ_cur, W),
+                θ,
                 inplace = false,
             ),
-            π₀,
+            θ,
             LBFGS(m = 20, linesearch = LineSearches.BackTracking()),
             Optim.Options(
                 store_trace = true,
@@ -205,21 +152,17 @@ with_logging() do
                 g_tol = 1.0f-6,
                 allow_f_increases = true,
                 callback = state -> begin
-                    @info "outer iter $(state.iteration): " *
+                    @info "iter $(state.iteration): " *
                           "total=$(round(state.value; sigdigits=6)) " *
                           "-logL=$(round(_last_ll[]; sigdigits=6)) " *
                           "Π̂=$(round(_last_gmm[]; sigdigits=6)) " *
-                          "gnorm=$(round(state.g_norm; sigdigits=4)) " *
-                          "inner_calls=$(_inner_call[])"
+                          "gnorm=$(round(state.g_norm; sigdigits=4))"
                     return false
                 end,
             ),
         )
 
-        # Reconstruct the full optimal parameter vector and save for restart compatibility.
-        θ_star = copy(_cached_θ_opt)
-        θ_star[i_nonδ] .= outer_result.minimizer
-        JLD2.save_object(snakemake.output[1], (; minimizer = θ_star, outer = outer_result))
+        JLD2.save_object(snakemake.output[1], (; minimizer = result.minimizer, result))
         stop!()
     else
         while true
