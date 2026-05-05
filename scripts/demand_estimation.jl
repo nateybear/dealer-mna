@@ -4,6 +4,7 @@ using StatsBase: cov
 using LinearAlgebra
 LinearAlgebra.BLAS.set_num_threads(1)
 using Optim
+import LineSearches
 import Random: seed!
 
 seed!(78704)
@@ -117,43 +118,56 @@ with_logging() do
         _cached_π = fill(NaN32, length(i_nonδ))
         _cached_θ_opt = copy(θ)
 
+        # Counters shared across closures for log correlation.
+        _inner_call = Ref(0)
+        _last_ll = Ref(NaN32)
+        _last_gmm = Ref(NaN32)
+
         # Inner problem: given non-linear params π, find δ*(π) = argmax_δ loglikelihood.
+        # Uses Barzilai–Borwein gradient descent: one gradient scatter per iteration,
+        # no line search. BB estimates a scalar step from consecutive gradient differences,
+        # giving adaptive curvature information without the overhead of a full line search.
         function concentrated_θ!(π)
-            π == _cached_π && return _cached_θ_opt
+            if π == _cached_π
+                @info "  inner #$(_inner_call[]): cache hit"
+                return _cached_θ_opt
+            end
+            _inner_call[] += 1
+            id = _inner_call[]
+            @info "  inner #$id: starting BB ($(length(i_δ)) delta params)"
+
             θ_tmp = copy(θ)
             θ_tmp[i_nonδ] .= π
-            # Warm-start from the most recent optimal delta: adjacent line-search points
-            # in π-space have very similar δ*, so this cuts inner iterations to ~5-10.
-            δ₀ = Float32.(@pull delta _cached_θ_opt model)
-            inner_result = optimize(
-                OnceDifferentiable(
-                    function (δ)
-                        θ_t = copy(θ_tmp)
-                        (@pull delta θ_t model) .= δ
-                        return mpi_scatter(LikelihoodRequest, zips, θ_t)
-                    end,
-                    function (δ)
-                        θ_t = copy(θ_tmp)
-                        (@pull delta θ_t model) .= δ
-                        return mpi_scatter(GradientRequest, zips, θ_t)[i_δ]
-                    end,
-                    δ₀,
-                    inplace = false,
-                ),
-                δ₀,
-                LBFGS(m = 5),
-                Optim.Options(
-                    iterations = 500,
-                    f_tol = 1.0f-7,
-                    g_tol = 1.0f-4,
-                    allow_f_increases = true,
-                    show_trace = false,
-                ),
-            )
-            (@pull delta θ_tmp model) .= inner_result.minimizer
+            (@pull delta θ_tmp model) .= @pull delta _cached_θ_opt model
+
+            g_prev = zeros(Float32, length(i_δ))
+            δ_prev = copy(Float32.(@pull delta θ_tmp model))
+            α = 1.0f-3  # conservative initial step; BB updates it after the first iteration
+            gnorm = Inf32
+            iter = 0
+
+            for iter in 1:500
+                g = mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]  # gradient of -logL
+                gnorm = maximum(abs, g)
+                @info "  inner #$id BB $iter: gnorm=$(round(gnorm; sigdigits=4)) α=$(round(α; sigdigits=4))"
+                gnorm < 1.0f-4 && break
+
+                if iter > 1
+                    s = (@pull delta θ_tmp model) .- δ_prev  # δ_k - δ_{k-1}
+                    y = g .- g_prev                           # ∇f_k - ∇f_{k-1}
+                    sy = dot(s, y)
+                    # BB2 step: ||y||² / (s'y) — tends to take larger, more aggressive steps
+                    sy > 0 && (α = clamp(dot(y, y) / sy, 1.0f-8, 1.0f4))
+                end
+
+                δ_prev .= @pull delta θ_tmp model
+                g_prev .= g
+                (@pull delta θ_tmp model) .-= α .* g
+            end
+
+            @info "  inner #$id: done — iters=$iter converged=$(gnorm < 1.0f-4) final_gnorm=$(round(gnorm; sigdigits=4))"
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
-            @info "Inner: " inner_result
             return _cached_θ_opt
         end
 
@@ -163,7 +177,11 @@ with_logging() do
             OnceDifferentiable(
                 function (π)
                     θ_opt = concentrated_θ!(π)
-                    return mpi_scatter(LikelihoodRequest, zips, θ_opt) + Demand.Π̂(model, θ_opt, W)
+                    ll = mpi_scatter(LikelihoodRequest, zips, θ_opt)
+                    gmm = Demand.Π̂(model, θ_opt, W)
+                    _last_ll[] = ll
+                    _last_gmm[] = gmm
+                    return ll + gmm
                 end,
                 function (π)
                     θ_opt = concentrated_θ!(π)
@@ -173,15 +191,23 @@ with_logging() do
                 inplace = false,
             ),
             π₀,
-            LBFGS(m = 20),
+            LBFGS(m = 20, linesearch = LineSearches.BackTracking()),
             Optim.Options(
                 store_trace = true,
-                show_trace = true,
-                show_every = 1,
+                show_trace = false,
                 iterations = 5000,
                 f_tol = 1.0f-9,
                 g_tol = 1.0f-6,
                 allow_f_increases = true,
+                callback = state -> begin
+                    @info "outer iter $(state.iteration): " *
+                          "total=$(round(state.value; sigdigits=6)) " *
+                          "-logL=$(round(_last_ll[]; sigdigits=6)) " *
+                          "Π̂=$(round(_last_gmm[]; sigdigits=6)) " *
+                          "gnorm=$(round(state.g_norm; sigdigits=4)) " *
+                          "inner_calls=$(_inner_call[])"
+                    return false
+                end,
             ),
         )
 
