@@ -36,7 +36,6 @@ struct StopSignal end
 
 function mpi_scatter(T, zips, params)
     chunksize = cld(length(zips), syze - 1)
-    @info "Partitioning into chunks of size $chunksize"
     maxrank = 0 # might not use all of the ranks in edge cases...
     for (i, chunk) in enumerate(Iterators.partition(zips, chunksize))
         MPI.send(T(params, chunk), i, 0, comm)
@@ -144,28 +143,34 @@ with_logging() do
             δ_prev = copy(Float32.(@pull delta θ_tmp model))
             α = 1.0f-3  # conservative initial step; BB updates it after the first iteration
             gnorm = Inf32
+            step_norm = Inf32
             iter = 0
 
             for iter in 1:500
                 g = mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]  # gradient of -logL
                 gnorm = maximum(abs, g)
-                @info "  inner #$id BB $iter: gnorm=$(round(gnorm; sigdigits=4)) α=$(round(α; sigdigits=4))"
-                gnorm < 1.0f-4 && break
 
+                # Update BB step size before the convergence check so step_norm uses current α.
                 if iter > 1
                     s = (@pull delta θ_tmp model) .- δ_prev  # δ_k - δ_{k-1}
                     y = g .- g_prev                           # ∇f_k - ∇f_{k-1}
                     sy = dot(s, y)
-                    # BB2 step: ||y||² / (s'y) — tends to take larger, more aggressive steps
+                    # BB2: ||y||² / (s'y) — larger, more aggressive steps
                     sy > 0 && (α = clamp(dot(y, y) / sy, 1.0f-8, 1.0f4))
                 end
+
+                # α * gnorm ≈ |Δf| via Taylor; stop when neither gradient nor step is meaningful.
+                step_norm = α * gnorm
+                @info "  inner #$id BB $iter: gnorm=$(round(gnorm; sigdigits=4)) step=$(round(step_norm; sigdigits=4)) α=$(round(α; sigdigits=4))"
+                (gnorm < 1.0f-4 || step_norm < 1.0f-6) && break
 
                 δ_prev .= @pull delta θ_tmp model
                 g_prev .= g
                 (@pull delta θ_tmp model) .-= α .* g
             end
 
-            @info "  inner #$id: done — iters=$iter converged=$(gnorm < 1.0f-4) final_gnorm=$(round(gnorm; sigdigits=4))"
+            converged = gnorm < 1.0f-4 || step_norm < 1.0f-6
+            @info "  inner #$id: done — iters=$iter converged=$converged gnorm=$(round(gnorm; sigdigits=4)) step=$(round(step_norm; sigdigits=4))"
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
             return _cached_θ_opt
