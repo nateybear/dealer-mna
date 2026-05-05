@@ -122,7 +122,9 @@ with_logging() do
             π == _cached_π && return _cached_θ_opt
             θ_tmp = copy(θ)
             θ_tmp[i_nonδ] .= π
-            δ₀ = Float32.(@pull delta θ_tmp model)
+            # Warm-start from the most recent optimal delta: adjacent line-search points
+            # in π-space have very similar δ*, so this cuts inner iterations to ~5-10.
+            δ₀ = Float32.(@pull delta _cached_θ_opt model)
             inner_result = optimize(
                 OnceDifferentiable(
                     function (δ)
@@ -139,20 +141,19 @@ with_logging() do
                     inplace = false,
                 ),
                 δ₀,
-                LBFGS(m = 20),
+                LBFGS(m = 5),
                 Optim.Options(
                     iterations = 500,
-                    f_tol = 1.0f-9,
-                    g_tol = 1.0f-6,
+                    f_tol = 1.0f-7,
+                    g_tol = 1.0f-4,
                     allow_f_increases = true,
-                    show_trace = true,
-                    show_every = 10,
+                    show_trace = false,
                 ),
             )
             (@pull delta θ_tmp model) .= inner_result.minimizer
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
-            @info "Inner: converged=$(Optim.converged(inner_result)), f=$(minimum(inner_result))"
+            @info "Inner: " inner_result
             return _cached_θ_opt
         end
 
