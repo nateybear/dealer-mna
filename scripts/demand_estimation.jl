@@ -148,19 +148,11 @@ with_logging() do
                 lbfgs_opts,
                 Optim.Options(
                     store_trace = true,
-                    show_trace = false,
+                    show_trace = true,
                     iterations = 5000,
                     f_tol = 1.0f-9,
                     g_tol = 1.0f-6,
                     allow_f_increases = true,
-                    callback = state -> begin
-                        @info "$label iter $(state.iteration): " *
-                              "total=$(round(state.value; sigdigits=6)) " *
-                              "-logL=$(round(_last_ll[]; sigdigits=6)) " *
-                              "Π̂=$(round(_last_gmm[]; sigdigits=6)) " *
-                              "gnorm=$(round(state.g_norm; sigdigits=4))"
-                        return false
-                    end,
                 ),
             )
         end
