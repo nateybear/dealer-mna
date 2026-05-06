@@ -107,41 +107,69 @@ with_logging() do
             # warm start: reuse last δ* rather than resetting to initial
             (@pull delta θ_tmp model) .= @pull delta _cached_θ_opt model
 
-            δ₀ = copy(Float32.(@pull delta θ_tmp model))
-            inner_result = optimize(
-                OnceDifferentiable(
-                    function (δ_w)
-                        θ_tmp[i_δ] .= δ_w
-                        return mpi_scatter(LikelihoodRequest, zips, θ_tmp)
-                    end,
-                    function (δ_w)
-                        θ_tmp[i_δ] .= δ_w
-                        return mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]
-                    end,
-                    δ₀,
-                    inplace = false,
-                ),
-                δ₀,
-                LBFGS(m = 10, linesearch = LineSearches.BackTracking()),
-                Optim.Options(
-                    iterations = 500,
-                    g_tol = 1.0f-3,
-                    f_reltol = NaN,
-                    f_abstol = NaN,
-                    x_reltol = NaN,
-                    x_abstol = NaN,
-                    allow_f_increases = true,
-                    callback = state -> begin
-                        @info "  inner #$id iter $(state.pseudo_iteration): " *
-                              "-logL=$(round(state.f_x; sigdigits=6)) " *
-                              "gnorm=$(round(norm(state.g_x); sigdigits=4))"
-                        return false
-                    end,
-                ),
-            )
-            θ_tmp[i_δ] .= inner_result.minimizer
-            @info "  inner #$id done: iters=$(inner_result.iterations) converged=$(Optim.converged(inner_result)) -logL=$(round(inner_result.minimum; sigdigits=6))"
+            δ_warm = copy(Float32.(@pull delta θ_tmp model))
+            best_f = Inf32
+            best_δ = copy(δ_warm)
 
+            for attempt in 1:5
+                δ₀ = attempt == 1 ? copy(δ_warm) :
+                     best_δ .+ 0.1f0 * Float32(attempt - 1) * randn(Float32, length(best_δ))
+                _prev_piter = Ref(-1)
+                _saw_reset = Ref(false)
+
+                inner_result = optimize(
+                    OnceDifferentiable(
+                        function (δ_w)
+                            θ_tmp[i_δ] .= δ_w
+                            return mpi_scatter(LikelihoodRequest, zips, θ_tmp)
+                        end,
+                        function (δ_w)
+                            θ_tmp[i_δ] .= δ_w
+                            return mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]
+                        end,
+                        δ₀,
+                        inplace = false,
+                    ),
+                    δ₀,
+                    LBFGS(m = 10, linesearch = LineSearches.StrongWolfe()),
+                    Optim.Options(
+                        iterations = 500,
+                        g_tol = 1.0f-3,
+                        f_reltol = NaN,
+                        f_abstol = NaN,
+                        x_reltol = NaN,
+                        x_abstol = NaN,
+                        allow_f_increases = true,
+                        callback = state -> begin
+                            if _prev_piter[] > 0 && state.pseudo_iteration == 0
+                                _saw_reset[] = true
+                            end
+                            _prev_piter[] = state.pseudo_iteration
+                            @info "\n  inner #$id/$attempt iter $(state.pseudo_iteration): " *
+                                  "-logL=$(round(state.f_x; sigdigits=6)) " *
+                                  "gnorm=$(round(norm(state.g_x); sigdigits=4))\n"
+                            return _saw_reset[]
+                        end,
+                    ),
+                )
+
+                if inner_result.minimum < best_f
+                    best_f = inner_result.minimum
+                    best_δ .= inner_result.minimizer
+                end
+
+                if Optim.converged(inner_result)
+                    @info "\n  inner #$id done (attempt $attempt): iters=$(inner_result.iterations) converged=true -logL=$(round(best_f; sigdigits=6))\n"
+                    break
+                elseif !_saw_reset[]
+                    @info "\n  inner #$id done (attempt $attempt): iters=$(inner_result.iterations) converged=false -logL=$(round(best_f; sigdigits=6))\n"
+                    break
+                else
+                    @warn "\n  inner #$id attempt $attempt: LBFGS reset detected, retrying with perturbation\n"
+                end
+            end
+
+            θ_tmp[i_δ] .= best_δ
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
             return _cached_θ_opt
@@ -181,12 +209,12 @@ with_logging() do
                     x_abstol = NaN,
                     allow_f_increases = true,
                     callback = state -> begin
-                        @info "$label iter $(state.pseudo_iteration): " *
+                        @info "\n$label iter $(state.pseudo_iteration): " *
                               "total=$(round(state.f_x; sigdigits=6)) " *
                               "-logL=$(round(_last_ll[]; sigdigits=6)) " *
                               "Π̂=$(round(_last_gmm[]; sigdigits=6)) " *
                               "gnorm=$(round(norm(state.g_x); sigdigits=4)) " *
-                              "inner_iters=$(_inner_iter[])"
+                              "inner_iters=$(_inner_iter[])\n"
                         return false
                     end,
                 ),
@@ -199,17 +227,17 @@ with_logging() do
         result1 = outer_optimize(π₀, W, "step1")
         θ̂₁ = copy(_cached_θ_opt)
         θ̂₁[i_nonδ] .= result1.minimizer
-        @info "Step 1 done: total=$(round(result1.minimum; sigdigits=6)) converged=$(Optim.converged(result1))"
+        @info "\nStep 1 done: total=$(round(result1.minimum; sigdigits=6)) converged=$(Optim.converged(result1))\n"
 
         # Step 2: update W at θ̂₁ and re-optimize for efficiency.
         W_opt = Demand.optimalW(model, θ̂₁)
-        @info "Recomputed optimal W for step 2"
+        @info "\nRecomputed optimal W for step 2\n"
         _inner_iter[] = 0
         _cached_π .= NaN32  # force inner re-solve at new W
         result2 = outer_optimize(result1.minimizer, W_opt, "step2")
         θ̂₂ = copy(_cached_θ_opt)
         θ̂₂[i_nonδ] .= result2.minimizer
-        @info "Step 2 done: total=$(round(result2.minimum; sigdigits=6)) converged=$(Optim.converged(result2))"
+        @info "\nStep 2 done: total=$(round(result2.minimum; sigdigits=6)) converged=$(Optim.converged(result2))\n"
 
         JLD2.save_object(
             snakemake.output[1],

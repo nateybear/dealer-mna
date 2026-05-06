@@ -337,7 +337,10 @@ function optimalW(model::AbstractDemandModel, params::AbstractVector)::AbstractM
     m = mapreduce(hcat, axes(Z, ndims(Z))) do i_demo
         [@inbounds val * Z[Tuple(idx)..., i_demo] for (idx, val) in nonzero_pairs(ξ)]
     end
-    return Float32.(inv(cov(m)))
+    C = cov(m)
+    W = pinv(C; rtol = 1e-4)
+    @info "optimalW: cond(cov)=$(round(cond(C); sigdigits=4)) max(W)=$(round(maximum(abs, W); sigdigits=4))"
+    return Float32.(W)
 end
 
 function Π̂(model::AbstractDemandModel, params::AbstractVector, W = I)::Float32
