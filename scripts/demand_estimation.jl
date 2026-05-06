@@ -125,7 +125,9 @@ with_logging() do
                         end,
                         function (δ_w)
                             θ_tmp[i_δ] .= δ_w
-                            return mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]
+                            g = mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]
+                            gn = norm(g)
+                            return gn > 1.0f4 ? g .* (1.0f4 / gn) : g
                         end,
                         δ₀,
                         inplace = false,
@@ -139,7 +141,7 @@ with_logging() do
                         f_abstol = NaN,
                         x_reltol = NaN,
                         x_abstol = NaN,
-                        allow_f_increases = true,
+                        allow_f_increases = false,
                         callback = state -> begin
                             if _prev_piter[] > 0 && state.pseudo_iteration == 0
                                 _saw_reset[] = true
@@ -221,8 +223,10 @@ with_logging() do
             )
         end
 
-        # Step 1: optimize over non-delta params with initial W (computed at initial θ).
-        W = Demand.optimalW(model, θ)
+        # Step 1: use identity weighting — optimalW at initial θ is degenerate
+        # (ξ̂ has near-zero variance at initialization, making cov(m) singular).
+        # Efficient W is only meaningful at a consistent first-step estimate.
+        W = I
         π₀ = Float32.(θ[i_nonδ])
         result1 = outer_optimize(π₀, W, "step1")
         θ̂₁ = copy(_cached_θ_opt)
