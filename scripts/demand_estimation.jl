@@ -84,8 +84,8 @@ with_logging() do
         zips = Registrations.zips().zip_code
         i_δ = @indexof delta θ model
         i_nonδ = setdiff(1:length(θ), i_δ)
-        obs_count = Demand.δ_obs_counts(model)  # observed product counts, fixed across inner iters
-        log_obs = log.(clamp.(obs_count, 1.0f-8, Inf32))
+        # obs_count: used to freeze zero-obs products in the inner δ solve.
+        obs_count = Demand.δ_obs_counts(model)
 
         # Cache: avoid re-running the inner problem when f and g are called at the same π.
         _cached_π = fill(NaN32, length(i_nonδ))
@@ -95,10 +95,11 @@ with_logging() do
         _last_gmm = Ref(NaN32)
 
         # Inner problem: given non-delta params π, find δ*(π) = argmax_δ loglikelihood.
-        # BLP contraction (Berry 1994): δ_j ← δ_j + log(obs_j) - log(pred_j).
-        # dloglikelihood returns obs - pred, so mpi_scatter (which negates) gives g_j = pred_j - obs_j.
-        # Hence pred_j = obs_j + g_j. Contraction modulus ≈ max product share ≈ 0.001;
-        # converges in ~10-30 iterations. Products with zero obs are held fixed.
+        # Uses L-BFGS over δ only. The BLP contraction (SQUAREM) has an asymptotically
+        # slow modulus (~0.9999/step) for this aggregate shared-δ formulation because the
+        # second difference v ≈ 0 (near-linear convergence), leaving SQUAREM ineffective.
+        # L-BFGS builds a curvature approximation and converges superlinearly.
+        # Zero-obs products are frozen by zeroing their gradient (same semantics as BLP).
         function concentrated_θ!(π)
             if π == _cached_π
                 return _cached_θ_opt
@@ -111,65 +112,42 @@ with_logging() do
             # warm start: reuse last δ* rather than resetting to initial
             (@pull delta θ_tmp model) .= @pull delta _cached_θ_opt model
 
-            # SQUAREM acceleration (Varadhan & Roland 2008; Conlon & Gortmaker 2020 / pyBLP).
-            # Each cycle uses 3 GradientRequests but achieves superlinear convergence even when
-            # the plain BLP contraction modulus is close to 1.
-            function blp_step!(δ)
-                g = mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]
-                pred = obs_count .+ g
-                δ .+= @. ifelse(obs_count > 0.0f0, log_obs - log(max(pred, 1.0f-8)), 0.0f0)
-                return δ
-            end
+            δ_init = copy(Float32.(@pull delta θ_tmp model))
 
-            tol = 1.0f-4
-            δ_cur = copy(Float32.(@pull delta θ_tmp model))
-            for iter in 1:700  # 700 cycles × 3 evals = 2100 GradientRequests max
-                δ0 = copy(δ_cur)
-                θ_tmp[i_δ] .= δ0
-                δ1 = blp_step!(copy(δ0))
-                r = δ1 .- δ0
-                step1 = maximum(abs, r)
+            inner_result = optimize(
+                OnceDifferentiable(
+                    function (δ)
+                        θ_tmp[i_δ] .= δ
+                        return mpi_scatter(LikelihoodRequest, zips, θ_tmp)  # = -logL
+                    end,
+                    function (δ)
+                        θ_tmp[i_δ] .= δ
+                        g = mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]
+                        @. g = ifelse(obs_count > 0.0f0, g, 0.0f0)  # freeze zero-obs products
+                        return g
+                    end,
+                    δ_init,
+                    inplace = false,
+                ),
+                δ_init,
+                LBFGS(m = 10, linesearch = LineSearches.BackTracking()),
+                Optim.Options(
+                    iterations = 100,
+                    g_tol = 1.0f-3,
+                    allow_f_increases = true,
+                    callback = state -> begin
+                        if state.pseudo_iteration % 10 == 1
+                            @info "\n  inner #$id iter $(state.pseudo_iteration): gnorm=$(round(norm(state.g_x); sigdigits=4))\n"
+                        end
+                        return false
+                    end,
+                ),
+            )
 
-                if step1 < tol
-                    δ_cur = δ1
-                    @info "\n  inner #$id converged at SQUAREM cycle $iter ($(3*(iter-1)+1) evals): step=$(round(step1; sigdigits=4))\n"
-                    break
-                end
-
-                θ_tmp[i_δ] .= δ1
-                δ2 = blp_step!(copy(δ1))
-                v = @. δ2 - 2.0f0 * δ1 + δ0  # second difference
-
-                # Step length: α ≤ -1 (extrapolation only, no interpolation)
-                α = min(-norm(r) / norm(v), -1.0f0)
-                δ_prop = @. δ0 - 2.0f0 * α * r + α^2 * v
-
-                # Stabilization step
-                θ_tmp[i_δ] .= δ_prop
-                δ_next = blp_step!(copy(δ_prop))
-                step_next = maximum(abs, δ_next .- δ0)
-
-                # Fall back to plain BLP result if SQUAREM step increased the norm
-                if step_next > maximum(abs, δ2 .- δ0)
-                    δ_cur = δ2
-                else
-                    δ_cur = δ_next
-                end
-
-                if iter % 10 == 1
-                    @info "\n  inner #$id SQUAREM cycle $iter: step=$(round(step_next; sigdigits=4)) α=$(round(α; sigdigits=3))\n"
-                end
-                if step_next < tol
-                    @info "\n  inner #$id converged at SQUAREM cycle $iter ($(3*iter) evals)\n"
-                    break
-                end
-                if iter == 700
-                    @warn "\n  inner #$id did not converge in 700 SQUAREM cycles: step=$(round(step_next; sigdigits=4))\n"
-                end
-            end
-            θ_tmp[i_δ] .= δ_cur
+            θ_tmp[i_δ] .= inner_result.minimizer
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
+            @info "\n  inner #$id: $(inner_result.iterations) L-BFGS iters, converged=$(Optim.converged(inner_result))\n"
             return _cached_θ_opt
         end
 
