@@ -3,6 +3,34 @@
 @memoize _t_counts_buf(model) = zeros(Int64, size(model.counts, 2))
 @memoize _t_inside_buf(model) = zeros(Float32, size(model.counts, 2))
 
+# For each δ group index i, which time key t does it belong to?
+# Returns Dict: t_key => Vector{Int} of δ group indices (1..n_delta) in that block.
+@memoize function δ_t_blocks(model)
+    blocks = Dict{Tuple{Int64, Int64}, Vector{Int}}()
+    for t in keys(model.product_lookup.t)
+        blocks[t] = Int[]
+    end
+    for (i, (key, _)) in enumerate(pairs(model.product_lookup.tjf))
+        push!(blocks[key[1]], i)  # key[1] = (year, quarter)
+    end
+    return blocks
+end
+
+# Offset of each time block in the flat block-diagonal Hessian vector (1-indexed).
+@memoize function hessian_δ_offsets(model)
+    blocks = δ_t_blocks(model)
+    offsets = Dict{Tuple{Int64, Int64}, Int}()
+    off = 1
+    for t in sort(collect(keys(blocks)))
+        offsets[t] = off
+        off += length(blocks[t])^2
+    end
+    return offsets
+end
+
+# Total flat storage for the block-diagonal Hessian: Σ_t J_t².
+@memoize hessian_δ_storage(model) = sum(length(v)^2 for v in values(δ_t_blocks(model)))
+
 # Number of (t,j,f) product observations — denominator for mean moments.
 @memoize n_obs(model) = Float32(nonzero_length(model.product_info))
 
@@ -466,4 +494,84 @@ function dloglikelihood(
     end
 
     return out
+end
+
+# Returns (g_δ, H_flat) for a single zip code z.
+# g_δ: ∇_δ logL, length n_delta (positive = want to increase δ).
+# H_flat: Hessian of logL w.r.t. δ, block-diagonal by time period, stored column-major.
+#   Negative definite. Length = hessian_δ_storage(model).
+function δ_grad_and_hessian(
+    model::AbstractDemandModel,
+    params::AbstractVector,
+    z::String,
+)
+    S = length(model.u.draws)
+    grid_S = CCPs(model, params, z)  # S × T × J × F
+
+    avg_grid = grid_prealloc(size(grid_S)[2:end])
+    contract!(avg_grid, _mean_vec(S), (-1,), grid_S, (-1, 2, 3, 4))
+
+    counts = _counts_zip(model, z)
+    M_z = model.agent_data[z].M
+
+    n_groups = length(model.product_lookup.tjf)
+    g_δ = zeros(Float32, n_groups)
+    s = Vector{Float32}(undef, n_groups)  # per-group CCP sums
+
+    @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
+        si = 0.0f0
+        gi = 0.0f0
+        for idx in idxs
+            ccp = avg_grid[idx]
+            si += ccp
+            gi += counts[idx] - M_z * ccp
+        end
+        s[i] = si
+        g_δ[i] = gi
+    end
+
+    t_blks = δ_t_blocks(model)
+    offs = hessian_δ_offsets(model)
+    H_flat = zeros(Float32, hessian_δ_storage(model))
+
+    if S == 1
+        # FixedCoefType: H_{ab} = M_z*(s_a*s_b − s_a*δ_{ab}), stored column-major.
+        @inbounds for (t, grp_idxs) in t_blks
+            J_t = length(grp_idxs)
+            off0 = offs[t] - 1  # 0-based so H_flat[off0 + (b-1)*J_t + a] = H[a,b]
+            for b in 1:J_t
+                sb = M_z * s[grp_idxs[b]]
+                for a in 1:J_t
+                    H_flat[off0 + (b - 1) * J_t + a] = sb * s[grp_idxs[a]]
+                end
+                H_flat[off0 + (b - 1) * J_t + b] -= M_z * s[grp_idxs[b]]
+            end
+        end
+    else
+        # RandomCoefType: need E_s[s_{i,s}*s_{l,s}] where s_{i,s} = Σ_{k∈G_i} σ_{k,s}.
+        s_draw = zeros(Float32, S, n_groups)
+        @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
+            for sv in 1:S
+                for idx in idxs
+                    s_draw[sv, i] += grid_S[sv, Tuple(idx)...]
+                end
+            end
+        end
+        inv_S = 1.0f0 / Float32(S)
+        @inbounds for (t, grp_idxs) in t_blks
+            J_t = length(grp_idxs)
+            off0 = offs[t] - 1
+            for b in 1:J_t
+                ib = grp_idxs[b]
+                for a in 1:J_t
+                    ia = grp_idxs[a]
+                    cross = dot(view(s_draw, :, ia), view(s_draw, :, ib)) * inv_S
+                    H_flat[off0 + (b - 1) * J_t + a] = M_z * cross
+                end
+                H_flat[off0 + (b - 1) * J_t + b] -= M_z * s[grp_idxs[b]]
+            end
+        end
+    end
+
+    return g_δ, H_flat
 end
