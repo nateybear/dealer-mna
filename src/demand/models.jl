@@ -225,9 +225,11 @@ end
 # end
 
 function initial_parameters(model)
-    out = -3ones(Float32, total_n_params(model))
-    out[@indexof dist_params out model] .= (rand(Float32, 2) .- 5.0f-1) / 1.0f4
-    all_price_params = @indexof demo_price_params out model # going to leave 1/income unscaled
-    out[all_price_params[2:end]] ./= 1.0f3
+    out = zeros(Float32, total_n_params(model))
+    # distance disutility: constant baseline, no distance gradient
+    out[@indexof dist_params out model] .= Float32[-1.0f0, 0.0f0]
+    # mild price sensitivity
+    out[@indexof mean_price_params out model] .= -0.1f0
+    # demo params start at 0 so μ ≈ 0 and CCPs are well-defined at any δ
     return out
 end
