@@ -84,6 +84,8 @@ with_logging() do
         zips = Registrations.zips().zip_code
         i_δ = @indexof delta θ model
         i_nonδ = setdiff(1:length(θ), i_δ)
+        obs_count = Demand.δ_obs_counts(model)  # observed product counts, fixed across inner iters
+        log_obs = log.(clamp.(obs_count, 1.0f-8, Inf32))
 
         # Cache: avoid re-running the inner problem when f and g are called at the same π.
         _cached_π = fill(NaN32, length(i_nonδ))
@@ -93,8 +95,10 @@ with_logging() do
         _last_gmm = Ref(NaN32)
 
         # Inner problem: given non-delta params π, find δ*(π) = argmax_δ loglikelihood.
-        # δ is just-identified, so this inner LBFGS converges in very few steps.
-        # Warm-starts from the previous solution so adjacent line-search probes are cheap.
+        # BLP contraction (Berry 1994): δ_j ← δ_j + log(obs_j) - log(pred_j).
+        # dloglikelihood returns obs - pred, so mpi_scatter (which negates) gives g_j = pred_j - obs_j.
+        # Hence pred_j = obs_j + g_j. Contraction modulus ≈ max product share ≈ 0.001;
+        # converges in ~10-30 iterations. Products with zero obs are held fixed.
         function concentrated_θ!(π)
             if π == _cached_π
                 return _cached_θ_opt
@@ -107,74 +111,25 @@ with_logging() do
             # warm start: reuse last δ* rather than resetting to initial
             (@pull delta θ_tmp model) .= @pull delta _cached_θ_opt model
 
-            δ_warm = copy(Float32.(@pull delta θ_tmp model))
-            best_f = Inf32
-            best_δ = copy(δ_warm)
-
-            for attempt in 1:5
-                δ₀ = if attempt == 1
-                    copy(δ_warm)
-                else
-                    best_δ .+ 0.1f0 * Float32(attempt - 1) * randn(Float32, length(best_δ))
+            tol = 1.0f-4
+            for iter in 1:2000
+                # g_j = pred_j - obs_j  (mpi_scatter negates dloglikelihood = obs - pred)
+                g = mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]
+                pred = obs_count .+ g
+                δ_step = @. ifelse(obs_count > 0.0f0, log_obs - log(max(pred, 1.0f-8)), 0.0f0)
+                θ_tmp[i_δ] .+= δ_step
+                step_norm = maximum(abs, δ_step)
+                if iter % 50 == 1
+                    @info "\n  inner #$id iter $iter: step=$(round(step_norm; sigdigits=4))\n"
                 end
-                _prev_piter = Ref(-1)
-                _saw_reset = Ref(false)
-
-                inner_result = optimize(
-                    OnceDifferentiable(
-                        function (δ_w)
-                            θ_tmp[i_δ] .= δ_w
-                            return mpi_scatter(LikelihoodRequest, zips, θ_tmp)
-                        end,
-                        function (δ_w)
-                            θ_tmp[i_δ] .= δ_w
-                            g = mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]
-                            gn = norm(g)
-                            return gn > 1.0f4 ? g .* (1.0f4 / gn) : g
-                        end,
-                        δ₀,
-                        inplace = false,
-                    ),
-                    δ₀,
-                    LBFGS(m = 10, linesearch = LineSearches.StrongWolfe()),
-                    Optim.Options(
-                        iterations = 500,
-                        g_tol = 1.0f-3,
-                        f_reltol = NaN,
-                        f_abstol = NaN,
-                        x_reltol = NaN,
-                        x_abstol = NaN,
-                        allow_f_increases = false,
-                        callback = state -> begin
-                            if _prev_piter[] > 0 && state.pseudo_iteration == 0
-                                _saw_reset[] = true
-                            end
-                            _prev_piter[] = state.pseudo_iteration
-                            @info "\n  inner #$id/$attempt iter $(state.pseudo_iteration): " *
-                                "-logL=$(round(state.f_x; sigdigits=6)) " *
-                                "gnorm=$(round(norm(state.g_x); sigdigits=4))\n"
-                            return _saw_reset[] || state.f_x <= 0.0f0
-                        end,
-                    ),
-                )
-
-                if inner_result.minimum < best_f
-                    best_f = inner_result.minimum
-                    best_δ .= inner_result.minimizer
+                if step_norm < tol
+                    @info "\n  inner #$id converged at iter $iter: step=$(round(step_norm; sigdigits=4))\n"
+                    break
                 end
-
-                if Optim.converged(inner_result)
-                    @info "\n  inner #$id done (attempt $attempt): iters=$(inner_result.iterations) converged=true -logL=$(round(best_f; sigdigits=6))\n"
-                    break
-                elseif !_saw_reset[]
-                    @info "\n  inner #$id done (attempt $attempt): iters=$(inner_result.iterations) converged=false -logL=$(round(best_f; sigdigits=6))\n"
-                    break
-                else
-                    @warn "\n  inner #$id attempt $attempt: LBFGS reset detected, retrying with perturbation\n"
+                if iter == 2000
+                    @warn "\n  inner #$id did not converge in 2000 iters: step=$(round(step_norm; sigdigits=4))\n"
                 end
             end
-
-            θ_tmp[i_δ] .= best_δ
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
             return _cached_θ_opt
