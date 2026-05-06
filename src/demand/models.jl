@@ -226,10 +226,35 @@ end
 
 function initial_parameters(model)
     out = zeros(Float32, total_n_params(model))
-    # distance disutility: constant baseline, no distance gradient
-    out[@indexof dist_params out model] .= Float32[-1.0f0, 0.0f0]
-    # mild price sensitivity
-    out[@indexof mean_price_params out model] .= -0.1f0
-    # demo params start at 0 so μ ≈ 0 and CCPs are well-defined at any δ
+
+    # δ: target P(outside) ≈ 0.99 (most people don't buy cars).
+    # With J products per market and P(outside) = 0.99:
+    #   J × exp(V_j) = 0.01  →  V_j = log(0.01/J) ≈ -12 for J≈1500.
+    # V_j = δ + μ; μ ≈ -exp(η₁) ≈ -1 at zero distance with η₁=0 below.
+    # So δ₀ ≈ -12 + 1 = -11.  Use -10 as a round number.
+    out[@indexof delta out model] .= -10.0f0
+
+    # Distance disutility: exp(η₁ + η₂ × dist_miles) subtracted from utility.
+    # η₁=0 → baseline visit cost exp(0)=1.0, meaningful relative to total utility ≈-10.
+    # η₂=0.02 → disutility doubles per ~35 miles, appropriate for Texas where
+    #   people drive 20-50 mi to a dealer.  At 20 mi: 1.5×, at 50 mi: 2.7×, at 100 mi: 7×.
+    # Previous η₁=-1 → exp(-1)≈0.37 was too small; η₂=0 gave no distance gradient.
+    out[@indexof dist_params out model] .= Float32[0.0f0, 0.02f0]
+
+    # β in ξ̂ = δ_res - β×p_res where p_res is residualized price in DOLLARS.
+    # With residualized price std ≈ $5000, β=-1e-4 → ≈0.5 utility units.
+    # Previous β=-0.1 → 500 utility units per $5K variation, far too large.
+    out[@indexof mean_price_params out model] .= -1.0f-4
+
+    # demo_product_params (Πᵦ, 4×4): demo × product-attribute interactions.
+    # income_inv ≈ 2e-5 → needs Πᵦ[1,:] ≈ ±50000 for unit utility (badly conditioned).
+    # urban/black/hispanic ≈ 0.3–0.5 → needs Πᵦ[2:4,:] ≈ ±2 (normal scale).
+    # Start at 0; the LBFGS gradient will determine sensible magnitudes.
+
+    # demo_price_params (Πₚ, length 4): demo × price interactions.
+    # income_inv × price ≈ 0.5 (price/income ratio) → Πₚ[1] ≈ ±2 (natural scale).
+    # urban/racial × price ≈ 12500 → Πₚ[2:4] ≈ ±8e-5 (very small; near-zero start OK).
+    # Start at 0.
+
     return out
 end
