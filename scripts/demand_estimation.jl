@@ -111,25 +111,63 @@ with_logging() do
             # warm start: reuse last δ* rather than resetting to initial
             (@pull delta θ_tmp model) .= @pull delta _cached_θ_opt model
 
-            tol = 1.0f-4
-            for iter in 1:2000
-                # g_j = pred_j - obs_j  (mpi_scatter negates dloglikelihood = obs - pred)
+            # SQUAREM acceleration (Varadhan & Roland 2008; Conlon & Gortmaker 2020 / pyBLP).
+            # Each cycle uses 3 GradientRequests but achieves superlinear convergence even when
+            # the plain BLP contraction modulus is close to 1.
+            function blp_step!(δ)
                 g = mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]
                 pred = obs_count .+ g
-                δ_step = @. ifelse(obs_count > 0.0f0, log_obs - log(max(pred, 1.0f-8)), 0.0f0)
-                θ_tmp[i_δ] .+= δ_step
-                step_norm = maximum(abs, δ_step)
-                if iter % 50 == 1
-                    @info "\n  inner #$id iter $iter: step=$(round(step_norm; sigdigits=4))\n"
-                end
-                if step_norm < tol
-                    @info "\n  inner #$id converged at iter $iter: step=$(round(step_norm; sigdigits=4))\n"
+                δ .+= @. ifelse(obs_count > 0.0f0, log_obs - log(max(pred, 1.0f-8)), 0.0f0)
+                return δ
+            end
+
+            tol = 1.0f-4
+            δ_cur = copy(Float32.(@pull delta θ_tmp model))
+            for iter in 1:700  # 700 cycles × 3 evals = 2100 GradientRequests max
+                δ0 = copy(δ_cur)
+                θ_tmp[i_δ] .= δ0
+                δ1 = blp_step!(copy(δ0))
+                r = δ1 .- δ0
+                step1 = maximum(abs, r)
+
+                if step1 < tol
+                    δ_cur = δ1
+                    @info "\n  inner #$id converged at SQUAREM cycle $iter ($(3*(iter-1)+1) evals): step=$(round(step1; sigdigits=4))\n"
                     break
                 end
-                if iter == 2000
-                    @warn "\n  inner #$id did not converge in 2000 iters: step=$(round(step_norm; sigdigits=4))\n"
+
+                θ_tmp[i_δ] .= δ1
+                δ2 = blp_step!(copy(δ1))
+                v = @. δ2 - 2.0f0 * δ1 + δ0  # second difference
+
+                # Step length: α ≤ -1 (extrapolation only, no interpolation)
+                α = min(-norm(r) / norm(v), -1.0f0)
+                δ_prop = @. δ0 - 2.0f0 * α * r + α^2 * v
+
+                # Stabilization step
+                θ_tmp[i_δ] .= δ_prop
+                δ_next = blp_step!(copy(δ_prop))
+                step_next = maximum(abs, δ_next .- δ0)
+
+                # Fall back to plain BLP result if SQUAREM step increased the norm
+                if step_next > maximum(abs, δ2 .- δ0)
+                    δ_cur = δ2
+                else
+                    δ_cur = δ_next
+                end
+
+                if iter % 10 == 1
+                    @info "\n  inner #$id SQUAREM cycle $iter: step=$(round(step_next; sigdigits=4)) α=$(round(α; sigdigits=3))\n"
+                end
+                if step_next < tol
+                    @info "\n  inner #$id converged at SQUAREM cycle $iter ($(3*iter) evals)\n"
+                    break
+                end
+                if iter == 700
+                    @warn "\n  inner #$id did not converge in 700 SQUAREM cycles: step=$(round(step_next; sigdigits=4))\n"
                 end
             end
+            θ_tmp[i_δ] .= δ_cur
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
             return _cached_θ_opt
