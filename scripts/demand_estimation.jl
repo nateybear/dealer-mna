@@ -112,8 +112,11 @@ with_logging() do
             best_δ = copy(δ_warm)
 
             for attempt in 1:5
-                δ₀ = attempt == 1 ? copy(δ_warm) :
-                     best_δ .+ 0.1f0 * Float32(attempt - 1) * randn(Float32, length(best_δ))
+                δ₀ = if attempt == 1
+                    copy(δ_warm)
+                else
+                    best_δ .+ 0.1f0 * Float32(attempt - 1) * randn(Float32, length(best_δ))
+                end
                 _prev_piter = Ref(-1)
                 _saw_reset = Ref(false)
 
@@ -148,9 +151,9 @@ with_logging() do
                             end
                             _prev_piter[] = state.pseudo_iteration
                             @info "\n  inner #$id/$attempt iter $(state.pseudo_iteration): " *
-                                  "-logL=$(round(state.f_x; sigdigits=6)) " *
-                                  "gnorm=$(round(norm(state.g_x); sigdigits=4))\n"
-                            return _saw_reset[]
+                                "-logL=$(round(state.f_x; sigdigits=6)) " *
+                                "gnorm=$(round(norm(state.g_x); sigdigits=4))\n"
+                            return _saw_reset[] || state.f_x <= 0.0f0
                         end,
                     ),
                 )
@@ -190,10 +193,11 @@ with_logging() do
                     end,
                     function (π)
                         θ_opt = concentrated_θ!(π)
-                        return (
-                            mpi_scatter(GradientRequest, zips, θ_opt) .+
-                            Demand.dΠ̂(model, θ_opt, W_cur)
-                        )[i_nonδ]
+                        g = (mpi_scatter(GradientRequest, zips, θ_opt) .+ Demand.dΠ̂(
+                            model, θ_opt, W_cur
+                        ))[i_nonδ]
+                        gn = norm(g)
+                        return gn > 1.0f4 ? g .* (1.0f4 / gn) : g
                     end,
                     π₀,
                     inplace = false,
@@ -212,11 +216,11 @@ with_logging() do
                     allow_f_increases = true,
                     callback = state -> begin
                         @info "\n$label iter $(state.pseudo_iteration): " *
-                              "total=$(round(state.f_x; sigdigits=6)) " *
-                              "-logL=$(round(_last_ll[]; sigdigits=6)) " *
-                              "Π̂=$(round(_last_gmm[]; sigdigits=6)) " *
-                              "gnorm=$(round(norm(state.g_x); sigdigits=4)) " *
-                              "inner_iters=$(_inner_iter[])\n"
+                            "total=$(round(state.f_x; sigdigits=6)) " *
+                            "-logL=$(round(_last_ll[]; sigdigits=6)) " *
+                            "Π̂=$(round(_last_gmm[]; sigdigits=6)) " *
+                            "gnorm=$(round(norm(state.g_x); sigdigits=4)) " *
+                            "inner_iters=$(_inner_iter[])\n"
                         return false
                     end,
                 ),
