@@ -1,6 +1,7 @@
 @memoize δ_prealloc(model) = similar(model.product_info, Float32)
 @memoize _resid_buf(model) = similar(model.product_info, Float32)
 @memoize _t_counts_buf(model) = zeros(Int64, size(model.counts, 2))
+@memoize _t_inside_buf(model) = zeros(Float32, size(model.counts, 2))
 
 # Number of (t,j,f) product observations — denominator for mean moments.
 @memoize n_obs(model) = Float32(nonzero_length(model.product_info))
@@ -237,12 +238,27 @@ function loglikelihood(
     grid = grid_prealloc(size(ccps)[2:end])
     contract!(grid, _mean_vec(S), (-1,), ccps, (-1, 2, 3, 4))
 
-    map!(log, values(grid.data))
-
-    # pull counts for zip
+    # Outside-good contribution: (M_z - obs_t) * log(1 - Σ_{j,f} CCP_{tjf})
+    # Must be computed before map!(log, ...) mutates grid.
+    M_z = model.agent_data[z].M
     counts = _counts_zip(model, z)
-    # log likelihood of all products, quarters, firms for zip
-    return inner(grid, counts)
+    t_counts = _t_counts_buf(model)
+    fill!(t_counts, zero(Int64))
+    @inbounds for (i, n) in nonzero_pairs(counts)
+        t_counts[first(i.I)] += n
+    end
+    t_inside = _t_inside_buf(model)
+    fill!(t_inside, 0.0f0)
+    @inbounds for idx in nonzero_keys(model.product_info)
+        t_inside[first(idx.I)] += grid[idx]
+    end
+    ll_outside = sum(enumerate(t_counts)) do (t, n_obs)
+        n_out = M_z - Float32(n_obs)
+        n_out > 0.0f0 ? n_out * log(max(1.0f0 - t_inside[t], 1.0f-10)) : 0.0f0
+    end
+
+    map!(log, values(grid.data))
+    return inner(grid, counts) + ll_outside
 end
 
 @memoize δ_reshape(s) = SparseArray{Float32}(undef, (1, s...))
@@ -402,19 +418,15 @@ function dloglikelihood(
     avg_grid = grid_prealloc(size(grid_S)[2:end])
     contract!(avg_grid, _mean_vec(S), (-1,), grid_S, (-1, 2, 3, 4))
 
-    # total counts per time period (reuse preallocated dense buffer)
     counts = _counts_zip(model, z)
-    t_counts = _t_counts_buf(model)
-    fill!(t_counts, zero(Int64))
-    @inbounds for (i, n) in nonzero_pairs(counts)
-        t_counts[first(i.I)] += n
-    end
+    M_z = model.agent_data[z].M
 
-    # precompute residual = count - t_total * avg_ccp for every product once
+    # residual = obs - M_z * CCP; gradient of full logL including outside good.
+    # The outside-good term (M_z - obs_t)*log(1-Σ CCP) contributes -M_z*CCP_j to ∂logL/∂δ_j,
+    # which cancels the obs_t*CCP_j cross-term, leaving obs_j - M_z*CCP_j exactly.
     resid = _resid_buf(model)
     @inbounds for idx in nonzero_keys(model.product_info)
-        t = first(idx.I)
-        resid[idx] = counts[idx] - t_counts[t] * avg_grid[idx]
+        resid[idx] = counts[idx] - M_z * avg_grid[idx]
     end
 
     out = zeros(Float32, length(params))
