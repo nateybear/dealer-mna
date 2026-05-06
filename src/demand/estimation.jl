@@ -2,6 +2,24 @@
 @memoize _resid_buf(model) = similar(model.product_info, Float32)
 @memoize _t_counts_buf(model) = zeros(Int64, size(model.counts, 2))
 
+# Number of (t,j,f) product observations — denominator for mean moments.
+@memoize n_obs(model) = Float32(nonzero_length(model.product_info))
+
+# Aggregate observed purchase counts per δ group (sum over all zip codes).
+# Used by the BLP contraction mapping for the inner δ optimization.
+@memoize function δ_obs_counts(model)
+    keys_plan, gidxs = δ_fill_plan(model)
+    tjf_to_group = Dict(keys_plan[k] => Int(gidxs[k]) for k in eachindex(keys_plan))
+    n_groups = length(model.product_lookup.tjf)
+    counts = zeros(Float32, n_groups)
+    for (idx, n) in nonzero_pairs(model.counts)
+        _, t_i, j_i, f_i = idx.I
+        g = get(tjf_to_group, CartesianIndex(t_i, j_i, f_i), 0)
+        g > 0 && (counts[g] += Float32(n))
+    end
+    return counts
+end
+
 @memoize function _mean_vec(S::Int)
     v = SparseArray{Float32}(undef, (S,))
     inv_s = 1.0f0 / Float32(S)
@@ -324,11 +342,12 @@ end
 function moments(model::AbstractDemandModel, params::AbstractVector)::AbstractVector
     ξ = ξ̂(model, params)
     Z = z_residualized(model)
+    N = n_obs(model)
     return mapreduce(vcat, axes(Z, ndims(Z))) do i_demo
         mapreduce(+, nonzero_pairs(ξ)) do (idx, val)
             @inbounds val * Z[Tuple(idx)..., i_demo]
         end
-    end
+    end ./ N
 end
 
 function optimalW(model::AbstractDemandModel, params::AbstractVector)::AbstractMatrix
@@ -351,6 +370,7 @@ end
 function dΠ̂(model::AbstractDemandModel, params::AbstractVector, W = I)::AbstractVector
     m = moments(model, params)
 
+    N = n_obs(model)
     Z_gsums = _Z_group_sums(model)  # n_groups × n_z, model-fixed
     XZ = _XZ_cross(model)           # n_x × n_z, model-fixed
 
@@ -359,12 +379,12 @@ function dΠ̂(model::AbstractDemandModel, params::AbstractVector, W = I)::Abstr
 
     i_δ = @indexof delta params model
     @inbounds for (i, _) in enumerate(pairs(model.product_lookup.tjf))
-        ∇m[i_δ[i], :] .= @view Z_gsums[i, :]
+        ∇m[i_δ[i], :] .= @view(Z_gsums[i, :]) ./ N
     end
 
     i_β = @indexof mean_price_params params model
     @inbounds for x_var in axes(XZ, 1)
-        ∇m[i_β[x_var], :] .= .-@view XZ[x_var, :]
+        ∇m[i_β[x_var], :] .= .-@view(XZ[x_var, :]) ./ N
     end
 
     return 0.5f0 * ∇m * W * m
