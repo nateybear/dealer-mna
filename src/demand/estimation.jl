@@ -575,3 +575,174 @@ function δ_grad_and_hessian(
 
     return g_δ, H_flat
 end
+
+# Exact analytic Hessian of -logL_z w.r.t. non-delta params, accumulated in-place.
+# Formula: -∂²logL_z/∂π_k∂π_l = M_z * Σ_t Cov_{CCP^t}(v_k, v_l) − Σ_a resid_a * ∂²μ_a/∂π_k∂π_l
+# where v_{k,a} = ∂μ_a/∂π_k is the utility gradient for product a w.r.t. param π_k.
+# Only Π (demo-product/price) and η (distance) params have non-zero utility gradients;
+# β (mean_price_params) does not appear in μ, so its rows/cols are zero here.
+# Score correction ∂²μ_a/∂π_k∂π_l ≠ 0 only for (η, η) pairs.
+# Implemented for FixedCoefType (S=1). i_nonδ is the sorted vector of non-delta param indices.
+function d2loglikelihood_nonδ!(
+    H_acc::AbstractMatrix{Float32},
+    model::AbstractDemandModel,
+    params::AbstractVector,
+    z::String,
+    i_nonδ::AbstractVector{Int},
+)
+    n = size(H_acc, 1)
+    S = length(model.u.draws)
+    S == 1 || error("d2loglikelihood_nonδ! only implemented for FixedCoefType (S=1)")
+
+    grid_S = CCPs(model, params, z)
+    avg_grid = grid_prealloc(size(grid_S)[2:end])
+    contract!(avg_grid, _mean_vec(S), (-1,), grid_S, (-1, 2, 3, 4))
+
+    counts = _counts_zip(model, z)
+    M_z = model.agent_data[z].M
+
+    resid = _resid_buf(model)
+    @inbounds for idx in nonzero_keys(model.product_info)
+        resid[idx] = counts[idx] - M_z * avg_grid[idx]
+    end
+
+    D_i = _demo_zip(model, z)
+    n_demo = length(D_i)
+    X = x_matrix(model)
+    n_X = size(X, ndims(X))  # product attributes + price (last)
+    η = @pull dist_params params model
+
+    # Map param groups to their positions within i_nonδ (0 = not in i_nonδ, ignored).
+    i_Π_full = hcat(
+        reshape(@indexof(demo_product_params, params, model), n_demo, :),
+        reshape(@indexof(demo_price_params, params, model), n_demo, 1),
+    )  # n_demo × n_X: full param index for (d, x) Π entry
+    i_η_full = @indexof dist_params params model  # length 2
+
+    nonδ_pos = Dict{Int, Int}(j => ii for (ii, j) in enumerate(i_nonδ))
+    Π_pos = [get(nonδ_pos, i_Π_full[d, x], 0) for d in 1:n_demo, x in 1:n_X]
+    η_pos = [get(nonδ_pos, j, 0) for j in i_η_full]
+
+    # Distance lookup for this zip: CartesianIndex{3} → distance to dealer
+    dist_by_idx = Dict{CartesianIndex{3}, Float32}()
+    for (dist, idxs) in _dist_zip_plan(model, z)
+        for idx in idxs
+            dist_by_idx[idx] = dist
+        end
+    end
+
+    # Per-time-period covariance contribution: H += M_z * Cov_{CCP^t}(v_k, v_l)
+    for (_, ts) in model.product_lookup.t
+        n_t = length(ts)
+        n_t == 0 && continue
+
+        V_t = zeros(Float32, n, n_t)  # n_nonδ × n_t utility gradient matrix
+        s_t = Vector{Float32}(undef, n_t)
+
+        for (a, tup) in enumerate(ts)
+            s_t[a] = avg_grid[tup]
+            for d in 1:n_demo, x in 1:n_X
+                pos = Π_pos[d, x]
+                pos > 0 && (V_t[pos, a] += D_i[d] * X[Tuple(tup)..., x])
+            end
+            dist_a = get(dist_by_idx, tup, 0.0f0)
+            e_a = @fastmath exp(η[1] + η[2] * dist_a)
+            η_pos[1] > 0 && (V_t[η_pos[1], a] = -e_a)
+            η_pos[2] > 0 && (V_t[η_pos[2], a] = -dist_a * e_a)
+        end
+
+        # Cov = E[v_k*v_l] - E[v_k]*E[v_l] under CCP^t distribution
+        Vs_t = V_t * s_t  # n_nonδ
+        @inbounds H_acc .+= M_z .* (V_t * (s_t .* V_t') .- Vs_t * Vs_t')
+    end
+
+    # Score correction for η pairs: H[p,q] += Σ_f e_f * dist_f^{p+q-2} * resid_f
+    # ∂²μ_a/∂η_p∂η_q = -dist^{p+q-2} * e, so -resid * ∂²μ = +resid * dist^{p+q-2} * e
+    if η_pos[1] > 0 && η_pos[2] > 0
+        p1, p2 = η_pos[1], η_pos[2]
+        for (dist, idxs) in _dist_zip_plan(model, z)
+            e = @fastmath exp(η[1] + η[2] * dist)
+            r = sum(resid[idx] for idx in idxs; init = 0.0f0)
+            H_acc[p1, p1] += e * r
+            H_acc[p1, p2] += dist * e * r
+            H_acc[p2, p1] += dist * e * r
+            H_acc[p2, p2] += dist^2 * e * r
+        end
+    end
+    return nothing
+end
+
+# In-place accumulating version: adds zip z's (g_δ, H_flat) contributions into g_acc and H_acc.
+# Avoids the per-zip hessian_δ_storage allocation that causes OOM on large models.
+function δ_grad_and_hessian_acc!(
+    g_acc::AbstractVector{Float32},
+    H_acc::AbstractVector{Float32},
+    model::AbstractDemandModel,
+    params::AbstractVector,
+    z::String,
+)
+    S = length(model.u.draws)
+    grid_S = CCPs(model, params, z)
+
+    avg_grid = grid_prealloc(size(grid_S)[2:end])
+    contract!(avg_grid, _mean_vec(S), (-1,), grid_S, (-1, 2, 3, 4))
+
+    counts = _counts_zip(model, z)
+    M_z = model.agent_data[z].M
+
+    n_groups = length(model.product_lookup.tjf)
+    s = Vector{Float32}(undef, n_groups)
+
+    @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
+        si = 0.0f0
+        gi = 0.0f0
+        for idx in idxs
+            ccp = avg_grid[idx]
+            si += ccp
+            gi += counts[idx] - M_z * ccp
+        end
+        s[i] = si
+        g_acc[i] += gi
+    end
+
+    t_blks = δ_t_blocks(model)
+    offs = hessian_δ_offsets(model)
+
+    if S == 1
+        @inbounds for (t, grp_idxs) in t_blks
+            J_t = length(grp_idxs)
+            off0 = offs[t] - 1
+            for b in 1:J_t
+                sb = M_z * s[grp_idxs[b]]
+                for a in 1:J_t
+                    H_acc[off0 + (b - 1) * J_t + a] += sb * s[grp_idxs[a]]
+                end
+                H_acc[off0 + (b - 1) * J_t + b] -= M_z * s[grp_idxs[b]]
+            end
+        end
+    else
+        s_draw = zeros(Float32, S, n_groups)
+        @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
+            for sv in 1:S
+                for idx in idxs
+                    s_draw[sv, i] += grid_S[sv, Tuple(idx)...]
+                end
+            end
+        end
+        inv_S = 1.0f0 / Float32(S)
+        @inbounds for (t, grp_idxs) in t_blks
+            J_t = length(grp_idxs)
+            off0 = offs[t] - 1
+            for b in 1:J_t
+                ib = grp_idxs[b]
+                for a in 1:J_t
+                    ia = grp_idxs[a]
+                    cross = dot(view(s_draw, :, ia), view(s_draw, :, ib)) * inv_S
+                    H_acc[off0 + (b - 1) * J_t + a] += M_z * cross
+                end
+                H_acc[off0 + (b - 1) * J_t + b] -= M_z * s[grp_idxs[b]]
+            end
+        end
+    end
+    return nothing
+end
