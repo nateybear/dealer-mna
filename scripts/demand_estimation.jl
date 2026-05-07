@@ -4,7 +4,6 @@ using StatsBase: cov
 using LinearAlgebra
 LinearAlgebra.BLAS.set_num_threads(1)
 using Optim
-import LineSearches
 import Random: seed!
 
 seed!(78704)
@@ -33,6 +32,12 @@ struct GradientRequest
 end
 
 struct NewtonRequest
+    params::Vector{Float32}
+    zs::Vector{String}
+end
+
+# Workers compute i_nonδ from params+model and accumulate the exact analytic Hessian.
+struct HessianRequest
     params::Vector{Float32}
     zs::Vector{String}
 end
@@ -88,6 +93,29 @@ function mpi_scatter_newton(zips, params)
     return g_total, H_total
 end
 
+# Returns exact analytic Hessian of -logL w.r.t. non-delta params (n_nonδ × n_nonδ).
+# Workers compute i_nonδ from model+params; n must equal length(i_nonδ) on rank 0.
+function mpi_scatter_hessian(zips, params, n)
+    chunksize = cld(length(zips), syze - 1)
+    maxrank = 0
+    for (i, chunk) in enumerate(Iterators.partition(zips, chunksize))
+        MPI.send(HessianRequest(params, collect(chunk)), i, 0, comm)
+        maxrank = i
+    end
+    H_total = zeros(Float32, n, n)
+    for i in 1:maxrank
+        msg, _ = MPI.recv(i, 0, comm)
+        if msg isa StopSignal
+            @info "Process $i signaled to stop"
+            stop!()
+            error("Stopping optimization as requested by process $i")
+        else
+            H_total .+= msg
+        end
+    end
+    return H_total
+end
+
 function child_handle(r::LikelihoodRequest)
     return mapreduce(Demand.loglikelihood$(model, r.params), +, r.zs, init = 0.0f0)
 end
@@ -107,6 +135,17 @@ function child_handle(r::NewtonRequest)
         Demand.δ_grad_and_hessian_acc!(g_acc, H_acc, model, r.params, z)
     end
     return (g_acc, H_acc)
+end
+
+function child_handle(r::HessianRequest)
+    i_δ_w = @indexof delta r.params model
+    i_nonδ_w = setdiff(1:length(r.params), i_δ_w)
+    n = length(i_nonδ_w)
+    H_acc = zeros(Float32, n, n)
+    for z in r.zs
+        Demand.d2loglikelihood_nonδ!(H_acc, model, r.params, z, i_nonδ_w)
+    end
+    return H_acc
 end
 
 stop!() =
@@ -138,14 +177,27 @@ with_logging() do
         n_hess = Demand.hessian_δ_storage(model)
         @info "Block-diagonal Hessian: $n_hess Float32 elements per worker ($(round(n_hess * 4 / 1e6; sigdigits = 3)) MB); $(length(t_blocks)) time blocks, max block $(maximum(length(v) for v in values(t_blocks))) groups"
 
-        # Cache: avoid re-running the inner problem when f and g are called at the same π.
+        # Cache: avoid re-running the inner problem when f, g!, h! are called at the same π.
         _cached_π = fill(NaN32, length(i_nonδ))
         _cached_θ_opt = copy(θ)
         _inner_iter = Ref(0)
         _last_ll = Ref(NaN32)
         _last_gmm = Ref(NaN32)
 
+        # Outer Hessian cache: Hessian scatter is expensive; reuse when π unchanged.
+        _cached_h_π = fill(NaN32, length(i_nonδ))
+        _cached_H_outer = zeros(Float32, length(i_nonδ), length(i_nonδ))
+
         sorted_t_keys = sort(collect(keys(t_blocks)))
+
+        # Precompute β positions and cross-product matrices for the exact Π̂ Hessian.
+        # Moments m = (1/N)*Z'*ξ̂ = (1/N)*Z'*(δ-X*β) are linear in β, so Gauss-Newton
+        # is exact: H_Π̂[β_k,β_l] = (∂m/∂β_k)'*W*(∂m/∂β_l) = (XZ[k,:]/N)*W*(XZ[l,:]/N)'.
+        # Other non-δ params have zero direct moment Jacobian (only indirect via δ*(π)).
+        i_β = @indexof mean_price_params θ model
+        i_β_in_nonδ = [searchsortedfirst(i_nonδ, j) for j in i_β]
+        XZ_precomp = Demand._XZ_cross(model)
+        N_obs = Demand.n_obs(model)
 
         # Inner problem: given non-delta params π, find δ*(π) = argmax_δ loglikelihood.
         # Custom block-diagonal Newton: solves (-H_t)*Δδ_t = g_t per time block, never
@@ -213,41 +265,54 @@ with_logging() do
         end
 
         function outer_optimize(π₀, W_cur, label)
+            function outer_f(π)
+                θ_opt = concentrated_θ!(π)
+                ll = mpi_scatter(LikelihoodRequest, zips, θ_opt)
+                gmm = Demand.Π̂(model, θ_opt, W_cur)
+                _last_ll[] = ll
+                _last_gmm[] = gmm
+                return ll + gmm
+            end
+
+            function outer_g!(G, π)
+                θ_opt = concentrated_θ!(π)
+                G .= (mpi_scatter(GradientRequest, zips, θ_opt) .+ Demand.dΠ̂(
+                    model, θ_opt, W_cur
+                ))[i_nonδ]
+                return nothing
+            end
+
+            # Exact analytic Hessian of -logL + Π̂ w.r.t. non-delta params.
+            # -logL term: exact via d2loglikelihood_nonδ! (MPI distributed).
+            # Π̂ term: m is linear in β, so GN is exact; other non-δ params have zero
+            # direct moment Jacobian → only β block contributes.
+            function outer_h!(H, π)
+                if π == _cached_h_π
+                    H .= _cached_H_outer
+                    return nothing
+                end
+                θ_opt = concentrated_θ!(π)
+                H .= mpi_scatter_hessian(zips, θ_opt, length(i_nonδ))
+                ∇m_β = .-XZ_precomp ./ N_obs  # n_x × n_moments: ∂m/∂β
+                for (x1, p1) in enumerate(i_β_in_nonδ), (x2, p2) in enumerate(i_β_in_nonδ)
+                    H[p1, p2] += dot(∇m_β[x1, :], W_cur * ∇m_β[x2, :])
+                end
+                _cached_h_π .= π
+                _cached_H_outer .= H
+                return nothing
+            end
+
             return optimize(
-                OnceDifferentiable(
-                    function (π)
-                        θ_opt = concentrated_θ!(π)
-                        ll = mpi_scatter(LikelihoodRequest, zips, θ_opt)
-                        gmm = Demand.Π̂(model, θ_opt, W_cur)
-                        _last_ll[] = ll
-                        _last_gmm[] = gmm
-                        return ll + gmm
-                    end,
-                    function (π)
-                        θ_opt = concentrated_θ!(π)
-                        g = (mpi_scatter(GradientRequest, zips, θ_opt) .+ Demand.dΠ̂(
-                            model, θ_opt, W_cur
-                        ))[i_nonδ]
-                        gn = norm(g)
-                        return gn > 1.0f4 ? g .* (1.0f4 / gn) : g
-                    end,
-                    π₀,
-                    inplace = false,
-                ),
+                TwiceDifferentiable(outer_f, outer_g!, outer_h!, π₀),
                 π₀,
-                LBFGS(m = 20, linesearch = LineSearches.BackTracking()),
+                NewtonTrustRegion(),
                 Optim.Options(
                     store_trace = true,
                     show_trace = false,
-                    iterations = 5000,
+                    iterations = 500,
                     g_tol = 1.0f-3,
-                    f_reltol = NaN,
-                    f_abstol = NaN,
-                    x_reltol = NaN,
-                    x_abstol = NaN,
-                    allow_f_increases = true,
                     callback = state -> begin
-                        @info "\n$label iter $(state.pseudo_iteration): " *
+                        @info "\n$label iter $(state.iteration): " *
                             "total=$(round(state.f_x; sigdigits=6)) " *
                             "-logL=$(round(_last_ll[]; sigdigits=6)) " *
                             "Π̂=$(round(_last_gmm[]; sigdigits=6)) " *
