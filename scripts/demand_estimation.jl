@@ -104,9 +104,7 @@ function child_handle(r::NewtonRequest)
     g_acc = zeros(Float32, n_groups)
     H_acc = zeros(Float32, n_hess)
     for z in r.zs
-        g_z, H_z = Demand.δ_grad_and_hessian(model, r.params, z)
-        g_acc .+= g_z
-        H_acc .+= H_z
+        Demand.δ_grad_and_hessian_acc!(g_acc, H_acc, model, r.params, z)
     end
     return (g_acc, H_acc)
 end
@@ -138,7 +136,7 @@ with_logging() do
         offsets = Demand.hessian_δ_offsets(model)
 
         n_hess = Demand.hessian_δ_storage(model)
-        @info "Block-diagonal Hessian: $n_hess Float32 elements per worker ($(round(n_hess * 4 / 1e6; sigdigits = 3)) MB); dense inner H is $(round(n_groups^2 * 4 / 1e6; sigdigits = 3)) MB"
+        @info "Block-diagonal Hessian: $n_hess Float32 elements per worker ($(round(n_hess * 4 / 1e6; sigdigits = 3)) MB); $(length(t_blocks)) time blocks, max block $(maximum(length(v) for v in values(t_blocks))) groups"
 
         # Cache: avoid re-running the inner problem when f and g are called at the same π.
         _cached_π = fill(NaN32, length(i_nonδ))
@@ -147,16 +145,13 @@ with_logging() do
         _last_ll = Ref(NaN32)
         _last_gmm = Ref(NaN32)
 
-        # Inner Newton cache: g! and h! share one MPI round when called at the same δ.
-        _newton_δ_cache = fill(NaN32, n_groups)
-        _newton_g_cache = zeros(Float32, n_groups)
-        _newton_H_flat_cache = zeros(Float32, n_hess)
+        sorted_t_keys = sort(collect(keys(t_blocks)))
 
         # Inner problem: given non-delta params π, find δ*(π) = argmax_δ loglikelihood.
-        # Uses Newton's method (TwiceDifferentiable + NewtonTrustRegion) with the exact
-        # block-diagonal Hessian of logL w.r.t. δ. Quadratic convergence in 2–5 iterations.
-        # Zero-obs products are frozen by regularizing their Hessian diagonal to 1.0 and
-        # zeroing their gradient, making the Newton step a no-op for those coordinates.
+        # Custom block-diagonal Newton: solves (-H_t)*Δδ_t = g_t per time block, never
+        # forming the full n_delta×n_delta Hessian. Each MPI round returns the full
+        # block-diagonal H_flat (1.25 GB on workers) accumulated in-place to avoid
+        # per-zip allocations. Quadratic convergence in 2–5 iterations.
         function concentrated_θ!(π)
             if π == _cached_π
                 return _cached_θ_opt
@@ -169,77 +164,51 @@ with_logging() do
             # warm start: reuse last δ* rather than resetting to initial
             (@pull delta θ_tmp model) .= @pull delta _cached_θ_opt model
 
-            δ_init = copy(Float32.(@pull delta θ_tmp model))
-
-            # Ensure gradient and Hessian are computed together for a given δ.
-            function _ensure_newton_cache!(δ)
-                if δ == _newton_δ_cache
-                    return
-                end
-                θ_tmp[i_δ] .= δ
+            gnorm = Inf32
+            n_inner = 0
+            for inner_it in 1:30
+                n_inner = inner_it
                 g_raw, H_raw = mpi_scatter_newton(zips, θ_tmp)
+
                 @. g_raw = ifelse(obs_count > 0.0f0, g_raw, 0.0f0)
-                _newton_g_cache .= .-g_raw  # gradient of -logL (minimization convention)
-                _newton_H_flat_cache .= H_raw
-                _newton_δ_cache .= δ
-                return nothing
-            end
+                gnorm = norm(g_raw)
 
-            function inner_g!(G, δ)
-                _ensure_newton_cache!(δ)
-                G .= _newton_g_cache
-                return nothing
-            end
+                if inner_it % 5 == 1
+                    @info "\n  inner #$id iter $inner_it: gnorm=$(round(gnorm; sigdigits = 4))\n"
+                end
+                gnorm < 1.0f-3 && break
 
-            # Hessian of -logL (positive definite). Block-diagonal by t; filled from H_flat.
-            # Zero-obs products get H[i,i]=1, H[i,:]=H[:,i]=0 so Newton ignores them.
-            function inner_h!(H, δ)
-                _ensure_newton_cache!(δ)
-                fill!(H, 0.0f0)
-                for (t, grp_idxs) in t_blocks
+                # Block-diagonal Newton step: for each time block t, solve
+                # (-H_logL_t) * Δδ_t = g_t. H_logL is neg-def so -H_logL is pos-def.
+                Δδ = zeros(Float32, n_groups)
+                for t in sorted_t_keys
+                    grp_idxs = t_blocks[t]
                     J_t = length(grp_idxs)
                     off = offsets[t]
-                    H_t = reshape(_newton_H_flat_cache[off:(off + J_t^2 - 1)], J_t, J_t)
-                    H[grp_idxs, grp_idxs] .= .-H_t  # -H_logL is positive definite
-                end
-                for (i, cnt) in enumerate(obs_count)
-                    if cnt == 0.0f0
-                        @view(H[i, :]) .= 0.0f0
-                        @view(H[:, i]) .= 0.0f0
-                        H[i, i] = 1.0f0
+                    # Extract and negate: H_t = -H_logL_t (positive definite)
+                    H_t = Matrix{Float32}(undef, J_t, J_t)
+                    @inbounds for col in 1:J_t, row in 1:J_t
+                        H_t[row, col] = -H_raw[off + (col - 1) * J_t + row - 1]
                     end
+                    g_t = g_raw[grp_idxs]
+                    # Freeze zero-obs products: H_t[i,i]=1, H_t[i,:]=0 → Δδ[i]=0
+                    for (ii, i) in enumerate(grp_idxs)
+                        if obs_count[i] == 0.0f0
+                            g_t[ii] = 0.0f0
+                            H_t[:, ii] .= 0.0f0
+                            H_t[ii, :] .= 0.0f0
+                            H_t[ii, ii] = 1.0f0
+                        end
+                    end
+                    Δδ[grp_idxs] .= H_t \ g_t
                 end
-                return nothing
+
+                θ_tmp[i_δ] .+= Δδ
             end
 
-            inner_result = optimize(
-                TwiceDifferentiable(
-                    function (δ)
-                        θ_tmp[i_δ] .= δ
-                        return mpi_scatter(LikelihoodRequest, zips, θ_tmp)
-                    end,
-                    inner_g!,
-                    inner_h!,
-                    δ_init,
-                ),
-                δ_init,
-                NewtonTrustRegion(),
-                Optim.Options(
-                    iterations = 30,
-                    g_tol = 1.0f-3,
-                    callback = state -> begin
-                        if state.iteration % 5 == 1
-                            @info "\n  inner #$id iter $(state.iteration): gnorm=$(round(norm(state.g_x); sigdigits = 4))\n"
-                        end
-                        return false
-                    end,
-                ),
-            )
-
-            θ_tmp[i_δ] .= inner_result.minimizer
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
-            @info "\n  inner #$id: $(inner_result.iterations) Newton iters, converged=$(Optim.converged(inner_result))\n"
+            @info "\n  inner #$id: $n_inner Newton iters, converged=$(gnorm < 1.0f-3)\n"
             return _cached_θ_opt
         end
 

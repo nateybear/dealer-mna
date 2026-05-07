@@ -575,3 +575,78 @@ function δ_grad_and_hessian(
 
     return g_δ, H_flat
 end
+
+# In-place accumulating version: adds zip z's (g_δ, H_flat) contributions into g_acc and H_acc.
+# Avoids the per-zip hessian_δ_storage allocation that causes OOM on large models.
+function δ_grad_and_hessian_acc!(
+    g_acc::AbstractVector{Float32},
+    H_acc::AbstractVector{Float32},
+    model::AbstractDemandModel,
+    params::AbstractVector,
+    z::String,
+)
+    S = length(model.u.draws)
+    grid_S = CCPs(model, params, z)
+
+    avg_grid = grid_prealloc(size(grid_S)[2:end])
+    contract!(avg_grid, _mean_vec(S), (-1,), grid_S, (-1, 2, 3, 4))
+
+    counts = _counts_zip(model, z)
+    M_z = model.agent_data[z].M
+
+    n_groups = length(model.product_lookup.tjf)
+    s = Vector{Float32}(undef, n_groups)
+
+    @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
+        si = 0.0f0
+        gi = 0.0f0
+        for idx in idxs
+            ccp = avg_grid[idx]
+            si += ccp
+            gi += counts[idx] - M_z * ccp
+        end
+        s[i] = si
+        g_acc[i] += gi
+    end
+
+    t_blks = δ_t_blocks(model)
+    offs = hessian_δ_offsets(model)
+
+    if S == 1
+        @inbounds for (t, grp_idxs) in t_blks
+            J_t = length(grp_idxs)
+            off0 = offs[t] - 1
+            for b in 1:J_t
+                sb = M_z * s[grp_idxs[b]]
+                for a in 1:J_t
+                    H_acc[off0 + (b - 1) * J_t + a] += sb * s[grp_idxs[a]]
+                end
+                H_acc[off0 + (b - 1) * J_t + b] -= M_z * s[grp_idxs[b]]
+            end
+        end
+    else
+        s_draw = zeros(Float32, S, n_groups)
+        @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
+            for sv in 1:S
+                for idx in idxs
+                    s_draw[sv, i] += grid_S[sv, Tuple(idx)...]
+                end
+            end
+        end
+        inv_S = 1.0f0 / Float32(S)
+        @inbounds for (t, grp_idxs) in t_blks
+            J_t = length(grp_idxs)
+            off0 = offs[t] - 1
+            for b in 1:J_t
+                ib = grp_idxs[b]
+                for a in 1:J_t
+                    ia = grp_idxs[a]
+                    cross = dot(view(s_draw, :, ia), view(s_draw, :, ib)) * inv_S
+                    H_acc[off0 + (b - 1) * J_t + a] += M_z * cross
+                end
+                H_acc[off0 + (b - 1) * J_t + b] -= M_z * s[grp_idxs[b]]
+            end
+        end
+    end
+    return nothing
+end
