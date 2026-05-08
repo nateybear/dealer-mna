@@ -35,12 +35,6 @@ struct GradientRequest
     zs::Vector{String}
 end
 
-# Workers compute i_nonδ from params+model and accumulate the exact analytic Hessian.
-struct HessianRequest
-    params::Vector{Float32}
-    zs::Vector{String}
-end
-
 struct StopSignal end
 
 struct CCPsRequest
@@ -69,37 +63,20 @@ function mpi_scatter(T, zips, params)
     return out
 end
 
-# Returns exact analytic Hessian of -logL w.r.t. non-delta params (n_nonδ × n_nonδ).
-# Workers compute i_nonδ from model+params; n must equal length(i_nonδ) on rank 0.
-function mpi_scatter_hessian(zips, params, n)
-    chunksize = cld(length(zips), syze - 1)
-    maxrank = 0
-    for (i, chunk) in enumerate(Iterators.partition(zips, chunksize))
-        MPI.send(HessianRequest(params, collect(chunk)), i, 0, comm)
-        maxrank = i
-    end
-    H_total = zeros(Float32, n, n)
-    for i in 1:maxrank
-        msg, _ = MPI.recv(i, 0, comm)
-        if msg isa StopSignal
-            @info "Process $i signaled to stop"
-            stop!()
-            error("Stopping optimization as requested by process $i")
-        else
-            H_total .+= msg
-        end
-    end
-    return H_total
-end
-
 function child_handle(r::LikelihoodRequest)
-    return mapreduce(Demand.loglikelihood$(model, r.params), +, r.zs, init = 0.0f0)
+    resp = mapreduce(+, r.zs, init = 0.0f0) do z
+        Demand.loglikelihood(model, r.params, z)
+    end
+    MPI.send(resp, 0, 0, comm)
+    return nothing
 end
 
 function child_handle(r::GradientRequest)
-    return mapreduce(
-        Demand.dloglikelihood$(model, r.params), +, r.zs, init = zeros(Float32, length(r.params))
-    )
+    resp = mapreduce(+, r.zs, init = zeros(Float32, length(r.params))) do z
+        Demand.dloglikelihood(model, r.params, z)
+    end
+    MPI.send(resp, 0, 0, comm)
+    return nothing
 end
 
 function child_handle(r::CCPsRequest)
@@ -195,23 +172,16 @@ with_logging() do
             else
                 initial_parameters(model)
             end
+        @info "Initial parameters set"
         zips = Registrations.zips().zip_code
         i_δ = @indexof delta θ model
         i_nonδ = setdiff(1:length(θ), i_δ)
-
-        n_groups = length(i_δ)
-        t_blocks = Demand.δ_t_blocks(model)
-        offsets = Demand.hessian_δ_offsets(model)
-
-        n_hess = Demand.hessian_δ_storage(model)
-        @info "Block-diagonal Hessian: $n_hess Float32 elements per worker ($(round(n_hess * 4 / 1e6; sigdigits = 3)) MB); $(length(t_blocks)) time blocks, max block $(maximum(length(v) for v in values(t_blocks))) groups"
 
         # Cache: avoid re-running the inner problem when f, g!, h! are called at the same π.
         _cached_π = fill(NaN32, length(i_nonδ))
         _cached_θ_opt = copy(θ)
         _inner_iter = Ref(0)
         _last_ll = Ref(NaN32)
-        _last_gmm = Ref(NaN32)
 
         ls = HagerZhang()
 
@@ -225,6 +195,7 @@ with_logging() do
                 return _cached_θ_opt
             end
             _inner_iter[] += 1
+            @info "Starting inner optimization #$(_inner_iter[])"
             id = _inner_iter[]
 
             θ_tmp = copy(θ)
@@ -270,48 +241,24 @@ with_logging() do
             return _cached_θ_opt
         end
 
-        function outer_optimize(π₀, W_cur, label)
+        function outer_optimize(π₀, label)
             function outer_f(π)
                 θ_opt = concentrated_θ!(π)
                 ll = mpi_scatter(LikelihoodRequest, zips, θ_opt)
-                gmm = Demand.Π̂(model, θ_opt, W_cur)
                 _last_ll[] = ll
-                _last_gmm[] = gmm
-                return ll + gmm
+                return ll
             end
 
             function outer_g!(G, π)
                 θ_opt = concentrated_θ!(π)
-                G .= (mpi_scatter(GradientRequest, zips, θ_opt) .+ Demand.dΠ̂(
-                    model, θ_opt, W_cur
-                ))[i_nonδ]
-                return nothing
-            end
-
-            # Exact analytic Hessian of -logL + Π̂ w.r.t. non-delta params.
-            # -logL term: exact via d2loglikelihood_nonδ! (MPI distributed).
-            # Π̂ term: m is linear in β, so GN is exact; other non-δ params have zero
-            # direct moment Jacobian → only β block contributes.
-            function outer_h!(H, π)
-                if π == _cached_h_π
-                    H .= _cached_H_outer
-                    return nothing
-                end
-                θ_opt = concentrated_θ!(π)
-                H .= mpi_scatter_hessian(zips, θ_opt, length(i_nonδ))
-                ∇m_β = .-XZ_precomp ./ N_obs  # n_x × n_moments: ∂m/∂β
-                for (x1, p1) in enumerate(i_β_in_nonδ), (x2, p2) in enumerate(i_β_in_nonδ)
-                    H[p1, p2] += dot(∇m_β[x1, :], W_cur * ∇m_β[x2, :])
-                end
-                _cached_h_π .= π
-                _cached_H_outer .= H
+                G .= mpi_scatter(GradientRequest, zips, θ_opt)[i_nonδ]
                 return nothing
             end
 
             return optimize(
-                TwiceDifferentiable(outer_f, outer_g!, outer_h!, π₀),
+                OnceDifferentiable(outer_f, outer_g!, π₀),
                 π₀,
-                NewtonTrustRegion(),
+                LBFGS(),
                 Optim.Options(
                     store_trace = true,
                     show_trace = false,
@@ -321,7 +268,6 @@ with_logging() do
                         @info "\n$label iter $(state.iteration): " *
                             "total=$(round(state.f_x; sigdigits=6)) " *
                             "-logL=$(round(_last_ll[]; sigdigits=6)) " *
-                            "Π̂=$(round(_last_gmm[]; sigdigits=6)) " *
                             "gnorm=$(round(norm(state.g_x); sigdigits=4)) " *
                             "inner_iters=$(_inner_iter[])\n"
                         return false
@@ -330,29 +276,13 @@ with_logging() do
             )
         end
 
-        # Step 1: use identity weighting — optimalW at initial θ is degenerate
-        # (ξ̂ has near-zero variance at initialization, making cov(m) singular).
-        # Efficient W is only meaningful at a consistent first-step estimate.
-        W = I
         π₀ = Float32.(θ[i_nonδ])
-        result1 = outer_optimize(π₀, W, "step1")
-        θ̂₁ = copy(_cached_θ_opt)
-        θ̂₁[i_nonδ] .= result1.minimizer
-        @info "\nStep 1 done: total=$(round(result1.minimum; sigdigits=6)) converged=$(Optim.converged(result1))\n"
-
-        # Step 2: update W at θ̂₁ and re-optimize for efficiency.
-        W_opt = Demand.optimalW(model, θ̂₁)
-        @info "\nRecomputed optimal W for step 2\n"
-        _inner_iter[] = 0
-        _cached_π .= NaN32  # force inner re-solve at new W
-        result2 = outer_optimize(result1.minimizer, W_opt, "step2")
-        θ̂₂ = copy(_cached_θ_opt)
-        θ̂₂[i_nonδ] .= result2.minimizer
-        @info "\nStep 2 done: total=$(round(result2.minimum; sigdigits=6)) converged=$(Optim.converged(result2))\n"
+        result = outer_optimize(π₀, "step1")
+        @info "\nEstimation done: total=$(round(result.minimum; sigdigits=6)) converged=$(Optim.converged(result))\n"
 
         JLD2.save_object(
             snakemake.output[1],
-            (; minimizer = θ̂₂, step1 = result1, step2 = result2),
+            result,
         )
         stop!()
     else
@@ -363,8 +293,7 @@ with_logging() do
                 break
             end
             try
-                resp = child_handle(msg)
-                MPI.send(resp, 0, 0, comm)
+                child_handle(msg)
             catch e
                 @error "Error in worker process $rank: $e"
                 MPI.send(StopSignal(), 0, 0, comm)
