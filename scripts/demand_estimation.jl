@@ -35,11 +35,6 @@ struct GradientRequest
     zs::Vector{String}
 end
 
-struct NewtonRequest
-    params::Vector{Float32}
-    zs::Vector{String}
-end
-
 # Workers compute i_nonδ from params+model and accumulate the exact analytic Hessian.
 struct HessianRequest
     params::Vector{Float32}
@@ -72,34 +67,6 @@ function mpi_scatter(T, zips, params)
         end
     end
     return out
-end
-
-# Returns (g_δ, H_flat) summed over all zips: ∇_δ logL and block-diagonal Hessian of logL.
-# Both are positive-logL-convention (g_δ > 0 means increase δ; H_flat is neg-def).
-function mpi_scatter_newton(zips, params)
-    chunksize = cld(length(zips), syze - 1)
-    maxrank = 0
-    for (i, chunk) in enumerate(Iterators.partition(zips, chunksize))
-        MPI.send(NewtonRequest(params, collect(chunk)), i, 0, comm)
-        maxrank = i
-    end
-    n_groups = Demand.n_delta(model)
-    n_hess = Demand.hessian_δ_storage(model)
-    g_total = zeros(Float32, n_groups)
-    H_total = zeros(Float32, n_hess)
-    for i in 1:maxrank
-        msg, _ = MPI.recv(i, 0, comm)
-        if msg isa StopSignal
-            @info "Process $i signaled to stop"
-            stop!()
-            error("Stopping optimization as requested by process $i")
-        else
-            g_i, H_i = msg
-            g_total .+= g_i
-            H_total .+= H_i
-        end
-    end
-    return g_total, H_total
 end
 
 # Returns exact analytic Hessian of -logL w.r.t. non-delta params (n_nonδ × n_nonδ).

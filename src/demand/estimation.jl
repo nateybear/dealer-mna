@@ -16,21 +16,6 @@
     return blocks
 end
 
-# Offset of each time block in the flat block-diagonal Hessian vector (1-indexed).
-@memoize function hessian_δ_offsets(model)
-    blocks = δ_t_blocks(model)
-    offsets = Dict{Tuple{Int64, Int64}, Int}()
-    off = 1
-    for t in sort(collect(keys(blocks)))
-        offsets[t] = off
-        off += length(blocks[t])^2
-    end
-    return offsets
-end
-
-# Total flat storage for the block-diagonal Hessian: Σ_t J_t².
-@memoize hessian_δ_storage(model) = sum(length(v)^2 for v in values(δ_t_blocks(model)))
-
 # Number of (t,j,f) product observations — denominator for mean moments.
 @memoize n_obs(model) = Float32(nonzero_length(model.product_info))
 
@@ -361,40 +346,4 @@ function dloglikelihood(
     end
 
     return out
-end
-
-# For each δ group index i, which time key t does it belong to?
-# Returns Dict: t_key => Vector{Int} of δ group indices (1..n_delta) in that block.
-@memoize function δ_t_blocks(model)
-    blocks = Dict{Tuple{Int64, Int64}, Vector{Int}}()
-    for t in keys(model.product_lookup.t)
-        blocks[t] = Int[]
-    end
-    for (i, (key, _)) in enumerate(pairs(model.product_lookup.tjf))
-        push!(blocks[key[1]], i)  # key[1] = (year, quarter)
-    end
-    return blocks
-end
-
-function descentdirection(
-    model::AbstractDemandModel,
-    params::AbstractVector,
-    z::String,
-)::AbstractVector
-    g = @pull delta dloglikelihood(model, params, z) model
-    ccps = grid_prealloc(size(δ_prealloc(model)))
-    for (t, i_δs) in pairs(δ_t_blocks(model))
-        @info "Trying block $t"
-        p = @view ccps[δ_indices(model)[i_δs]]
-        P0 = max(1f0 - sum(p), 1f-10)
-        g_sum = sum(@view(g[i_δs]))
-        @inbounds for (k, i) in enumerate(i_δs)
-            g[i] = g[i] / (M_z * p[k]) + g_sum / (M_z * P0)
-        end
-    end
-    return g
-end
-
-function hessian_nonlinear_params(model, params, z)
-
 end
