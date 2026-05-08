@@ -3,6 +3,34 @@
 @memoize _t_counts_buf(model) = zeros(Int64, size(model.counts, 2))
 @memoize _t_inside_buf(model) = zeros(Float32, size(model.counts, 2))
 
+# For each δ group index i, which time key t does it belong to?
+# Returns Dict: t_key => Vector{Int} of δ group indices (1..n_delta) in that block.
+@memoize function δ_t_blocks(model)
+    blocks = Dict{Tuple{Int64, Int64}, Vector{Int}}()
+    for t in keys(model.product_lookup.t)
+        blocks[t] = Int[]
+    end
+    for (i, (key, _)) in enumerate(pairs(model.product_lookup.tjf))
+        push!(blocks[key[1]], i)  # key[1] = (year, quarter)
+    end
+    return blocks
+end
+
+# Offset of each time block in the flat block-diagonal Hessian vector (1-indexed).
+@memoize function hessian_δ_offsets(model)
+    blocks = δ_t_blocks(model)
+    offsets = Dict{Tuple{Int64, Int64}, Int}()
+    off = 1
+    for t in sort(collect(keys(blocks)))
+        offsets[t] = off
+        off += length(blocks[t])^2
+    end
+    return offsets
+end
+
+# Total flat storage for the block-diagonal Hessian: Σ_t J_t².
+@memoize hessian_δ_storage(model) = sum(length(v)^2 for v in values(δ_t_blocks(model)))
+
 # Number of (t,j,f) product observations — denominator for mean moments.
 @memoize n_obs(model) = Float32(nonzero_length(model.product_info))
 
