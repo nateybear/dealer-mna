@@ -68,7 +68,7 @@ const ORDER = [
     n_demo_price_params,
     n_random_coefs,
     n_dist_params,
-    n_mean_price_params,
+    # n_mean_price_params,
 ]
 
 total_n_params(model::DemandModel) = sum(f(model) for f in ORDER)
@@ -244,7 +244,7 @@ function initial_parameters(model)
     # β in ξ̂ = δ_res - β×p_res where p_res is residualized price in DOLLARS.
     # With residualized price std ≈ $5000, β=-1e-4 → ≈0.5 utility units.
     # Previous β=-0.1 → 500 utility units per $5K variation, far too large.
-    out[@indexof mean_price_params out model] .= -1.0f-4
+    # out[@indexof mean_price_params out model] .= -1.0f-4
 
     # demo_product_params (Πᵦ, 4×4): demo × product-attribute interactions.
     # income_inv ≈ 2e-5 → needs Πᵦ[1,:] ≈ ±50000 for unit utility (badly conditioned).

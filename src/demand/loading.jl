@@ -256,11 +256,12 @@ function load_model_frames()
         i = @index product_lookup t j f
         push!(product_lookup.make[first(row.j)], i) # add make after the fact
         push!(product_lookup.tjf[(row.t, row.j, row.f)], i) # add (t, j, f) after the fact
+        body = get(body_classes, row.j[1:3], nothing)
         product_info_matrix[i] = (;
-            is_coupe = row.j == "Coupe",
-            is_suv = row.j == "SUV/Crossover",
-            is_pickup = row.j == "Pickup",
-            is_sedan = row.j == "Sedan",
+            is_coupe = body == "Coupe",
+            is_suv = body == "SUV/Crossover",
+            is_pickup = body == "Pickup",
+            is_sedan = body == "Sedan",
             row.p,
             row.p_hausman,
             row.n,

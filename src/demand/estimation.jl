@@ -34,21 +34,6 @@ end
 # Number of (t,j,f) product observations — denominator for mean moments.
 @memoize n_obs(model) = Float32(nonzero_length(model.product_info))
 
-# Aggregate observed purchase counts per δ group (sum over all zip codes).
-# Used by the BLP contraction mapping for the inner δ optimization.
-@memoize function δ_obs_counts(model)
-    keys_plan, gidxs = δ_fill_plan(model)
-    tjf_to_group = Dict(keys_plan[k] => Int(gidxs[k]) for k in eachindex(keys_plan))
-    n_groups = length(model.product_lookup.tjf)
-    counts = zeros(Float32, n_groups)
-    for (idx, n) in nonzero_pairs(model.counts)
-        _, t_i, j_i, f_i = idx.I
-        g = get(tjf_to_group, CartesianIndex(t_i, j_i, f_i), 0)
-        g > 0 && (counts[g] += Float32(n))
-    end
-    return counts
-end
-
 @memoize function _mean_vec(S::Int)
     v = SparseArray{Float32}(undef, (S,))
     inv_s = 1.0f0 / Float32(S)
@@ -58,45 +43,13 @@ end
     return v
 end
 
-@memoize _demo_zip(model, z::String) =
-    collect(model.agent_data[z][DEMOGRAPHIC_ATTRIBUTES])
-
-# Sum of instruments over each (t,j,f) product group — rows of ∂m/∂δ; model-fixed.
-@memoize function _Z_group_sums(model)
-    Z = z_matrix(model)
-    n_z = size(Z, ndims(Z))
-    n_groups = length(model.product_lookup.tjf)
-    sums = zeros(Float32, n_groups, n_z)
-    @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
-        for col in 1:n_z
-            sums[i, col] = sum(Z[Tuple(idx)..., col] for idx in idxs)
-        end
-    end
-    return sums
-end
-
-# X'Z cross-product for the price-attribute block of ∂m/∂β; model-fixed.
-@memoize function _XZ_cross(model)
-    X = p_matrix(model)
-    Z = z_matrix(model)
-    n_x = size(X, ndims(X))
-    n_z = size(Z, ndims(Z))
-    XZ = zeros(Float32, n_x, n_z)
-    @inbounds for idx in nonzero_keys(model.product_info)
-        t = Tuple(idx)
-        for i_x in 1:n_x, i_z in 1:n_z
-            XZ[i_x, i_z] += X[t..., i_x] * Z[t..., i_z]
-        end
-    end
-    return XZ
-end
-
-@memoize _∇m_buf(n_params::Int, n_moments::Int) = Matrix{Float32}(undef, n_params, n_moments)
-
 @memoize function _counts_zip(model, z::String)
     iz = searchsortedfirst(collected_zips(model), z)
     return model.counts[iz, :, :, :]
 end
+
+@memoize _demo_zip(model, z::String) =
+    collect(model.agent_data[z][DEMOGRAPHIC_ATTRIBUTES])
 
 @memoize function _dist_zip_plan(model, z::String)
     col_names = names(model.distances, 2)
@@ -195,7 +148,7 @@ function μ(params, model::AbstractDemandModel, zip_code)::SparseArray{Float32, 
         disutils[k] = @fastmath exp(η1 + η2 * dist_f[k])
     end
     # regular getindex/setindex! dispatches to a method that can sometimes resize. Not thread safe!
-    @inbounds @threads for k in eachindex(f_idxs4)
+    @inbounds for k in eachindex(f_idxs4)
         disutility = disutils[k]
         @simd for idx4 in f_idxs4[k]
             @inbounds out[idx4] -= disutility
@@ -348,92 +301,6 @@ function CCPs!(model, grid)
     return nothing
 end
 
-@memoize linear_params_prealloc(s) = SparseArray{Float32}(undef, s...)
-
-function ξ̂(model::AbstractDemandModel, params::AbstractVector)::SparseArray{Float32, 3}
-    # mean utilities (T × J × F)
-    δ̂ = δ(params, model)
-    residualize!(δ̂, model.product_lookup) # in-place residualization
-
-    x_j = x_residualized(model) # T × J × F × (n_product + price)
-
-    β = @pull mean_price_params params model # (1)
-
-    # not decomposing for now
-    # ρ = only(@pull rho params model)
-    # γ = @pull group_fes params model # (n_group_fes)
-
-    # Ω, i_Ω = Ω_matrix(model.ownership, model.adjacency)
-    # @inbounds @simd for idx in i_Ω
-    #     t, j, f, g = idx.I
-    #     Ω[t, j, f, g] = model.ownership[t, f, g] + ρ * model.adjacency[t, j, f, g]
-    # end
-
-    contract!(
-        linear_params_prealloc(size(x_j)[1:(end - 1)]), x_j, (1, 2, 3, -1), SparseArray(β), (-1,)
-    )
-
-    linear_params = linear_params_prealloc(size(x_j)[1:(end - 1)])
-
-    # @inbounds for i in axes(Ω, 4)
-    #     @info "Iteration $i of $(size(Ω, 4)) residualizing Ω matrix"
-    #     linear_params += residualize!(Ω[:, :, :, i], model.product_lookup) * γ[i]
-    # end
-
-    return δ̂ - linear_params
-end
-
-function moments(model::AbstractDemandModel, params::AbstractVector)::AbstractVector
-    ξ = ξ̂(model, params)
-    Z = z_residualized(model)
-    N = n_obs(model)
-    return mapreduce(vcat, axes(Z, ndims(Z))) do i_demo
-        mapreduce(+, nonzero_pairs(ξ)) do (idx, val)
-            @inbounds val * Z[Tuple(idx)..., i_demo]
-        end
-    end ./ N
-end
-
-function optimalW(model::AbstractDemandModel, params::AbstractVector)::AbstractMatrix
-    ξ = ξ̂(model, params)
-    Z = z_residualized(model)
-    m = mapreduce(hcat, axes(Z, ndims(Z))) do i_demo
-        [@inbounds val * Z[Tuple(idx)..., i_demo] for (idx, val) in nonzero_pairs(ξ)]
-    end
-    C = cov(m)
-    W = pinv(C; rtol = 1e-4)
-    @info "optimalW: cond(cov)=$(round(cond(C); sigdigits=4)) max(W)=$(round(maximum(abs, W); sigdigits=4))"
-    return Float32.(W)
-end
-
-function Π̂(model::AbstractDemandModel, params::AbstractVector, W = I)::Float32
-    m = moments(model, params)
-    return 0.5f0 * only(m' * W * m)
-end
-
-function dΠ̂(model::AbstractDemandModel, params::AbstractVector, W = I)::AbstractVector
-    m = moments(model, params)
-
-    N = n_obs(model)
-    Z_gsums = _Z_group_sums(model)  # n_groups × n_z, model-fixed
-    XZ = _XZ_cross(model)           # n_x × n_z, model-fixed
-
-    ∇m = _∇m_buf(length(params), size(Z_gsums, 2))
-    fill!(∇m, zero(Float32))
-
-    i_δ = @indexof delta params model
-    @inbounds for (i, _) in enumerate(pairs(model.product_lookup.tjf))
-        ∇m[i_δ[i], :] .= @view(Z_gsums[i, :]) ./ N
-    end
-
-    i_β = @indexof mean_price_params params model
-    @inbounds for x_var in axes(XZ, 1)
-        ∇m[i_β[x_var], :] .= .-@view(XZ[x_var, :]) ./ N
-    end
-
-    return 0.5f0 * ∇m * W * m
-end
-
 function dloglikelihood(
     model::AbstractDemandModel,
     params::AbstractVector,
@@ -496,253 +363,38 @@ function dloglikelihood(
     return out
 end
 
-# Returns (g_δ, H_flat) for a single zip code z.
-# g_δ: ∇_δ logL, length n_delta (positive = want to increase δ).
-# H_flat: Hessian of logL w.r.t. δ, block-diagonal by time period, stored column-major.
-#   Negative definite. Length = hessian_δ_storage(model).
-function δ_grad_and_hessian(
-    model::AbstractDemandModel,
-    params::AbstractVector,
-    z::String,
-)
-    S = length(model.u.draws)
-    grid_S = CCPs(model, params, z)  # S × T × J × F
-
-    avg_grid = grid_prealloc(size(grid_S)[2:end])
-    contract!(avg_grid, _mean_vec(S), (-1,), grid_S, (-1, 2, 3, 4))
-
-    counts = _counts_zip(model, z)
-    M_z = model.agent_data[z].M
-
-    n_groups = length(model.product_lookup.tjf)
-    g_δ = zeros(Float32, n_groups)
-    s = Vector{Float32}(undef, n_groups)  # per-group CCP sums
-
-    @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
-        si = 0.0f0
-        gi = 0.0f0
-        for idx in idxs
-            ccp = avg_grid[idx]
-            si += ccp
-            gi += counts[idx] - M_z * ccp
-        end
-        s[i] = si
-        g_δ[i] = gi
+# For each δ group index i, which time key t does it belong to?
+# Returns Dict: t_key => Vector{Int} of δ group indices (1..n_delta) in that block.
+@memoize function δ_t_blocks(model)
+    blocks = Dict{Tuple{Int64, Int64}, Vector{Int}}()
+    for t in keys(model.product_lookup.t)
+        blocks[t] = Int[]
     end
-
-    t_blks = δ_t_blocks(model)
-    offs = hessian_δ_offsets(model)
-    H_flat = zeros(Float32, hessian_δ_storage(model))
-
-    if S == 1
-        # FixedCoefType: H_{ab} = M_z*(s_a*s_b − s_a*δ_{ab}), stored column-major.
-        @inbounds for (t, grp_idxs) in t_blks
-            J_t = length(grp_idxs)
-            off0 = offs[t] - 1  # 0-based so H_flat[off0 + (b-1)*J_t + a] = H[a,b]
-            for b in 1:J_t
-                sb = M_z * s[grp_idxs[b]]
-                for a in 1:J_t
-                    H_flat[off0 + (b - 1) * J_t + a] = sb * s[grp_idxs[a]]
-                end
-                H_flat[off0 + (b - 1) * J_t + b] -= M_z * s[grp_idxs[b]]
-            end
-        end
-    else
-        # RandomCoefType: need E_s[s_{i,s}*s_{l,s}] where s_{i,s} = Σ_{k∈G_i} σ_{k,s}.
-        s_draw = zeros(Float32, S, n_groups)
-        @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
-            for sv in 1:S
-                for idx in idxs
-                    s_draw[sv, i] += grid_S[sv, Tuple(idx)...]
-                end
-            end
-        end
-        inv_S = 1.0f0 / Float32(S)
-        @inbounds for (t, grp_idxs) in t_blks
-            J_t = length(grp_idxs)
-            off0 = offs[t] - 1
-            for b in 1:J_t
-                ib = grp_idxs[b]
-                for a in 1:J_t
-                    ia = grp_idxs[a]
-                    cross = dot(view(s_draw, :, ia), view(s_draw, :, ib)) * inv_S
-                    H_flat[off0 + (b - 1) * J_t + a] = M_z * cross
-                end
-                H_flat[off0 + (b - 1) * J_t + b] -= M_z * s[grp_idxs[b]]
-            end
-        end
+    for (i, (key, _)) in enumerate(pairs(model.product_lookup.tjf))
+        push!(blocks[key[1]], i)  # key[1] = (year, quarter)
     end
-
-    return g_δ, H_flat
+    return blocks
 end
 
-# Exact analytic Hessian of -logL_z w.r.t. non-delta params, accumulated in-place.
-# Formula: -∂²logL_z/∂π_k∂π_l = M_z * Σ_t Cov_{CCP^t}(v_k, v_l) − Σ_a resid_a * ∂²μ_a/∂π_k∂π_l
-# where v_{k,a} = ∂μ_a/∂π_k is the utility gradient for product a w.r.t. param π_k.
-# Only Π (demo-product/price) and η (distance) params have non-zero utility gradients;
-# β (mean_price_params) does not appear in μ, so its rows/cols are zero here.
-# Score correction ∂²μ_a/∂π_k∂π_l ≠ 0 only for (η, η) pairs.
-# Implemented for FixedCoefType (S=1). i_nonδ is the sorted vector of non-delta param indices.
-function d2loglikelihood_nonδ!(
-    H_acc::AbstractMatrix{Float32},
+function descentdirection(
     model::AbstractDemandModel,
     params::AbstractVector,
     z::String,
-    i_nonδ::AbstractVector{Int},
-)
-    n = size(H_acc, 1)
-    S = length(model.u.draws)
-    S == 1 || error("d2loglikelihood_nonδ! only implemented for FixedCoefType (S=1)")
-
-    grid_S = CCPs(model, params, z)
-    avg_grid = grid_prealloc(size(grid_S)[2:end])
-    contract!(avg_grid, _mean_vec(S), (-1,), grid_S, (-1, 2, 3, 4))
-
-    counts = _counts_zip(model, z)
-    M_z = model.agent_data[z].M
-
-    resid = _resid_buf(model)
-    @inbounds for idx in nonzero_keys(model.product_info)
-        resid[idx] = counts[idx] - M_z * avg_grid[idx]
-    end
-
-    D_i = _demo_zip(model, z)
-    n_demo = length(D_i)
-    X = x_matrix(model)
-    n_X = size(X, ndims(X))  # product attributes + price (last)
-    η = @pull dist_params params model
-
-    # Map param groups to their positions within i_nonδ (0 = not in i_nonδ, ignored).
-    i_Π_full = hcat(
-        reshape(@indexof(demo_product_params, params, model), n_demo, :),
-        reshape(@indexof(demo_price_params, params, model), n_demo, 1),
-    )  # n_demo × n_X: full param index for (d, x) Π entry
-    i_η_full = @indexof dist_params params model  # length 2
-
-    nonδ_pos = Dict{Int, Int}(j => ii for (ii, j) in enumerate(i_nonδ))
-    Π_pos = [get(nonδ_pos, i_Π_full[d, x], 0) for d in 1:n_demo, x in 1:n_X]
-    η_pos = [get(nonδ_pos, j, 0) for j in i_η_full]
-
-    # Distance lookup for this zip: CartesianIndex{3} → distance to dealer
-    dist_by_idx = Dict{CartesianIndex{3}, Float32}()
-    for (dist, idxs) in _dist_zip_plan(model, z)
-        for idx in idxs
-            dist_by_idx[idx] = dist
+)::AbstractVector
+    g = @pull delta dloglikelihood(model, params, z) model
+    ccps = grid_prealloc(size(δ_prealloc(model)))
+    for (t, i_δs) in pairs(δ_t_blocks(model))
+        @info "Trying block $t"
+        p = @view ccps[δ_indices(model)[i_δs]]
+        P0 = max(1f0 - sum(p), 1f-10)
+        g_sum = sum(@view(g[i_δs]))
+        @inbounds for (k, i) in enumerate(i_δs)
+            g[i] = g[i] / (M_z * p[k]) + g_sum / (M_z * P0)
         end
     end
-
-    # Per-time-period covariance contribution: H += M_z * Cov_{CCP^t}(v_k, v_l)
-    for (_, ts) in model.product_lookup.t
-        n_t = length(ts)
-        n_t == 0 && continue
-
-        V_t = zeros(Float32, n, n_t)  # n_nonδ × n_t utility gradient matrix
-        s_t = Vector{Float32}(undef, n_t)
-
-        for (a, tup) in enumerate(ts)
-            s_t[a] = avg_grid[tup]
-            for d in 1:n_demo, x in 1:n_X
-                pos = Π_pos[d, x]
-                pos > 0 && (V_t[pos, a] += D_i[d] * X[Tuple(tup)..., x])
-            end
-            dist_a = get(dist_by_idx, tup, 0.0f0)
-            e_a = @fastmath exp(η[1] + η[2] * dist_a)
-            η_pos[1] > 0 && (V_t[η_pos[1], a] = -e_a)
-            η_pos[2] > 0 && (V_t[η_pos[2], a] = -dist_a * e_a)
-        end
-
-        # Cov = E[v_k*v_l] - E[v_k]*E[v_l] under CCP^t distribution
-        Vs_t = V_t * s_t  # n_nonδ
-        @inbounds H_acc .+= M_z .* (V_t * (s_t .* V_t') .- Vs_t * Vs_t')
-    end
-
-    # Score correction for η pairs: H[p,q] += Σ_f e_f * dist_f^{p+q-2} * resid_f
-    # ∂²μ_a/∂η_p∂η_q = -dist^{p+q-2} * e, so -resid * ∂²μ = +resid * dist^{p+q-2} * e
-    if η_pos[1] > 0 && η_pos[2] > 0
-        p1, p2 = η_pos[1], η_pos[2]
-        for (dist, idxs) in _dist_zip_plan(model, z)
-            e = @fastmath exp(η[1] + η[2] * dist)
-            r = sum(resid[idx] for idx in idxs; init = 0.0f0)
-            H_acc[p1, p1] += e * r
-            H_acc[p1, p2] += dist * e * r
-            H_acc[p2, p1] += dist * e * r
-            H_acc[p2, p2] += dist^2 * e * r
-        end
-    end
-    return nothing
+    return g
 end
 
-# In-place accumulating version: adds zip z's (g_δ, H_flat) contributions into g_acc and H_acc.
-# Avoids the per-zip hessian_δ_storage allocation that causes OOM on large models.
-function δ_grad_and_hessian_acc!(
-    g_acc::AbstractVector{Float32},
-    H_acc::AbstractVector{Float32},
-    model::AbstractDemandModel,
-    params::AbstractVector,
-    z::String,
-)
-    S = length(model.u.draws)
-    grid_S = CCPs(model, params, z)
+function hessian_nonlinear_params(model, params, z)
 
-    avg_grid = grid_prealloc(size(grid_S)[2:end])
-    contract!(avg_grid, _mean_vec(S), (-1,), grid_S, (-1, 2, 3, 4))
-
-    counts = _counts_zip(model, z)
-    M_z = model.agent_data[z].M
-
-    n_groups = length(model.product_lookup.tjf)
-    s = Vector{Float32}(undef, n_groups)
-
-    @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
-        si = 0.0f0
-        gi = 0.0f0
-        for idx in idxs
-            ccp = avg_grid[idx]
-            si += ccp
-            gi += counts[idx] - M_z * ccp
-        end
-        s[i] = si
-        g_acc[i] += gi
-    end
-
-    t_blks = δ_t_blocks(model)
-    offs = hessian_δ_offsets(model)
-
-    if S == 1
-        @inbounds for (t, grp_idxs) in t_blks
-            J_t = length(grp_idxs)
-            off0 = offs[t] - 1
-            for b in 1:J_t
-                sb = M_z * s[grp_idxs[b]]
-                for a in 1:J_t
-                    H_acc[off0 + (b - 1) * J_t + a] += sb * s[grp_idxs[a]]
-                end
-                H_acc[off0 + (b - 1) * J_t + b] -= M_z * s[grp_idxs[b]]
-            end
-        end
-    else
-        s_draw = zeros(Float32, S, n_groups)
-        @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
-            for sv in 1:S
-                for idx in idxs
-                    s_draw[sv, i] += grid_S[sv, Tuple(idx)...]
-                end
-            end
-        end
-        inv_S = 1.0f0 / Float32(S)
-        @inbounds for (t, grp_idxs) in t_blks
-            J_t = length(grp_idxs)
-            off0 = offs[t] - 1
-            for b in 1:J_t
-                ib = grp_idxs[b]
-                for a in 1:J_t
-                    ia = grp_idxs[a]
-                    cross = dot(view(s_draw, :, ia), view(s_draw, :, ib)) * inv_S
-                    H_acc[off0 + (b - 1) * J_t + a] += M_z * cross
-                end
-                H_acc[off0 + (b - 1) * J_t + b] -= M_z * s[grp_idxs[b]]
-            end
-        end
-    end
-    return nothing
 end
