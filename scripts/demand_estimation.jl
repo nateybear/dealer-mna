@@ -5,7 +5,7 @@ using LinearAlgebra
 LinearAlgebra.BLAS.set_num_threads(1)
 using Optim
 import Random: seed!
-import LineSearches: HagerZhang
+import LineSearches: BackTracking
 
 seed!(78704)
 
@@ -38,6 +38,11 @@ end
 struct StopSignal end
 
 struct CCPsRequest
+    params::Vector{Float32}
+    zips::Vector{String}
+end
+
+struct CombinedRequest
     params::Vector{Float32}
     zips::Vector{String}
 end
@@ -104,6 +109,25 @@ function child_handle(r::CCPsRequest)
     end
 end
 
+function child_handle(r::CombinedRequest)
+    all_idxs = Demand.δ_indices(model)
+    Z_local = length(r.zips)
+    ll_sum = 0.0f0
+    grad_sum = zeros(Float32, length(r.params))
+    all_ccps = Matrix{Float32}(undef, length(all_idxs), Z_local)
+    for (zi, z) in enumerate(r.zips)
+        ll_z, grad_z, ccp_vec = Demand.loglikelihood_gradient_and_ccps(model, r.params, z)
+        ll_sum += ll_z
+        grad_sum .+= grad_z
+        all_ccps[:, zi] .= ccp_vec
+    end
+    MPI.send((grad_sum, ll_sum), 0, 0, comm)
+    for (bi, (_, i_δs)) in enumerate(T_BLOCK_ORDER)
+        MPI.send(all_ccps[i_δs, :], 0, bi, comm)
+    end
+    return nothing
+end
+
 # Woodbury Newton step for one time block.
 # -H_t = diag(d) - U*diag(M_z)*U'  where d = U*M_z  (positive semidefinite block Hessian of -ℓ).
 # g_t:  N_t loglikelihood gradient for this block's δ parameters.
@@ -156,6 +180,45 @@ function mpi_newton_delta_direction(
     return step
 end
 
+# Scatter a CombinedRequest; receive (grad, ll) on tag 0 from all workers, then assemble
+# per-block CCP matrices and compute Woodbury Newton step.
+# Returns (-∇ℓ, Newton ascent step for ℓ over δ, -ℓ) — matching mpi_scatter sign convention.
+function mpi_combined_newton_step(
+    params::Vector{Float32},
+    zips::Vector{String},
+)::Tuple{Vector{Float32}, Vector{Float32}, Float32}
+    chunksize = cld(length(zips), syze - 1)
+    zip_chunks = collect(Iterators.partition(zips, chunksize))
+    maxrank = length(zip_chunks)
+    for (i, chunk) in enumerate(zip_chunks)
+        MPI.send(CombinedRequest(params, collect(chunk)), i, 0, comm)
+    end
+    M_zs = Float32[model.agent_data[z].M for z in zips]
+    g_full = zeros(Float32, length(params))  # accumulates +∇ℓ
+    ll_sum = 0.0f0                           # accumulates +ℓ
+    for i in 1:maxrank
+        (grad_i, ll_i), _ = MPI.recv(i, 0, comm)
+        g_full .+= grad_i
+        ll_sum += ll_i
+    end
+    i_δ_all = @indexof delta params model
+    g_δ = g_full[i_δ_all]  # +∇_δ ℓ
+    step = Vector{Float32}(undef, length(g_δ))
+    for (bi, (_, i_δs)) in enumerate(T_BLOCK_ORDER)
+        N_t = length(i_δs)
+        U = Matrix{Float32}(undef, N_t, length(zips))
+        col = 1
+        for i in 1:maxrank
+            ccp_block, _ = MPI.recv(i, bi, comm)
+            ncols = size(ccp_block, 2)
+            U[:, col:(col + ncols - 1)] .= ccp_block
+            col += ncols
+        end
+        step[i_δs] .= woodbury_newton_step(U, M_zs, g_δ[i_δs])
+    end
+    return -g_full, step, -ll_sum
+end
+
 stop!() =
     for i in 1:(syze - 1)
         MPI.send(StopSignal(), i, 0, comm)
@@ -183,7 +246,7 @@ with_logging() do
         _inner_iter = Ref(0)
         _last_ll = Ref(NaN32)
 
-        ls = HagerZhang()
+        ls = BackTracking()
 
         # Inner problem: given non-delta params π, find δ*(π) = argmax_δ loglikelihood.
         # Custom block-diagonal Newton: solves (-H_t)*Δδ_t = g_t per time block, never
@@ -207,20 +270,18 @@ with_logging() do
             while true
                 newton_iter += 1
                 δ_cur = @pull delta θ_tmp model
-                g_full = mpi_scatter(GradientRequest, zips, θ_tmp)  # gradient of -ℓ
-                g = @pull delta g_full model                          # δ-block only
+                # Combined round: gradient, Newton step, and ϕ0 in one MPI scatter.
+                t_combined = @elapsed begin
+                    g_full, d, ϕ0 = mpi_combined_newton_step(θ_tmp, zips)
+                end
+                g = @pull delta g_full model  # -∇_δ ℓ
                 gnorm = norm(g)
                 if gnorm ≤ 1.0f-4
                     @info "  inner #$id newton: converged in $newton_iter iters (gnorm=$gnorm)"
                     break
                 end
-                # d = (-H_ℓ)^{-1} ∇_δ ℓ: Newton ascent direction for ℓ (descent for -ℓ).
-                # mpi_newton_delta_direction expects ∇_δ ℓ (not negated), so pass -g.
-                t_direction = @elapsed d = mpi_newton_delta_direction(θ_tmp, zips, -g)
                 dϕ0 = dot(g, d)  # ∇(-ℓ)·d ≤ 0 (valid descent direction)
-                @info "  inner #$id newton iter $newton_iter: gnorm=$(round(gnorm; sigdigits=4)) dϕ0=$(round(dϕ0; sigdigits=4)) direction_time=$(round(t_direction; sigdigits=3))s"
-                # Precompute ϕ0 from values already in hand.
-                ϕ0 = mpi_scatter(LikelihoodRequest, zips, θ_tmp)  # -ℓ at current point
+                @info "  inner #$id newton iter $newton_iter: gnorm=$(round(gnorm; sigdigits=4)) dϕ0=$(round(dϕ0; sigdigits=4)) combined_time=$(round(t_combined; sigdigits=3))s"
                 function ϕ(α)
                     θ_tmp_tmp = copy(θ_tmp)
                     (@pull delta θ_tmp_tmp model) .= δ_cur + α * d
@@ -230,7 +291,7 @@ with_logging() do
                     θ_tmp_tmp = copy(θ_tmp)
                     (@pull delta θ_tmp_tmp model) .= δ_cur + α * d
                     g_trial = mpi_scatter(GradientRequest, zips, θ_tmp_tmp)
-                    return dot(@pull(delta, g_trial, model), d)  # ∇(-ℓ)·d at trial point
+                    return dot(@pull(delta, g_trial, model), d)
                 end
                 ϕdϕ(α) = (ϕ(α), dϕ(α))
                 alpha, phi_alpha = ls(ϕ, dϕ, ϕdϕ, 1.0f0, ϕ0, dϕ0)

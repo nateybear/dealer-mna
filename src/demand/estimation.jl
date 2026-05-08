@@ -347,3 +347,82 @@ function dloglikelihood(
 
     return out
 end
+
+function loglikelihood_gradient_and_ccps(
+    model::AbstractDemandModel,
+    params::AbstractVector,
+    z::String,
+)::Tuple{Float32, Vector{Float32}, Vector{Float32}}
+    S = length(model.u.draws)
+    ccp_S = CCPs(model, params, z)
+
+    avg_grid = grid_prealloc(size(ccp_S)[2:end])
+    contract!(avg_grid, _mean_vec(S), (-1,), ccp_S, (-1, 2, 3, 4))
+
+    M_z = model.agent_data[z].M
+    counts = _counts_zip(model, z)
+
+    # Extract averaged CCPs in δ-index order BEFORE log transform.
+    all_idxs = δ_indices(model)
+    ccp_vec = Vector{Float32}(undef, length(all_idxs))
+    @inbounds for (k, idx) in enumerate(all_idxs)
+        ccp_vec[k] = avg_grid[idx]
+    end
+
+    # Outside-good ll (requires avg_grid before log).
+    t_counts = _t_counts_buf(model)
+    fill!(t_counts, zero(Int64))
+    @inbounds for (i, n) in nonzero_pairs(counts)
+        t_counts[first(i.I)] += n
+    end
+    t_inside = _t_inside_buf(model)
+    fill!(t_inside, 0.0f0)
+    @inbounds for idx in nonzero_keys(model.product_info)
+        t_inside[first(idx.I)] += avg_grid[idx]
+    end
+    ll_outside = sum(enumerate(t_counts)) do (t, n_obs)
+        n_out = M_z - Float32(n_obs)
+        n_out > 0.0f0 ? n_out * log(max(1.0f0 - t_inside[t], 1.0f-10)) : 0.0f0
+    end
+
+    resid = _resid_buf(model)
+    @inbounds for idx in nonzero_keys(model.product_info)
+        resid[idx] = counts[idx] - M_z * avg_grid[idx]
+    end
+
+    map!(log, values(avg_grid.data))
+    ll = inner(avg_grid, counts) + ll_outside
+
+    out = zeros(Float32, length(params))
+    i_δ = @indexof delta params model
+    @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
+        out[i_δ[i]] = sum(resid[idx] for idx in idxs)
+    end
+
+    X = x_matrix(model)
+    i_Πᵦ = reshape(
+        @indexof(demo_product_params, params, model),
+        n_demographics(model),
+        n_product_attributes(model),
+    )
+    i_Πₚ = @indexof demo_price_params params model
+    i_Π = hcat(i_Πᵦ, i_Πₚ)
+    D_i = _demo_zip(model, z)
+    @inbounds for i_X in axes(X, ndims(X))
+        s = sum(X[Tuple(idx)..., i_X] * resid[idx] for idx in nonzero_keys(model.product_info))
+        for i_D in axes(D_i, 1)
+            out[i_Π[i_D, i_X]] = D_i[i_D] * s
+        end
+    end
+
+    η = @pull dist_params params model
+    i_η = @indexof dist_params params model
+    @inbounds for (dist, idxs) in _dist_zip_plan(model, z)
+        e = @fastmath exp(η[1] + η[2] * dist)
+        s = sum(resid[idx] for idx in idxs)
+        out[i_η[1]] -= e * s
+        out[i_η[2]] -= dist * e * s
+    end
+
+    return ll, out, ccp_vec
+end
