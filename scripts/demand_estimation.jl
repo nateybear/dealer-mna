@@ -170,8 +170,6 @@ with_logging() do
         zips = Registrations.zips().zip_code
         i_δ = @indexof delta θ model
         i_nonδ = setdiff(1:length(θ), i_δ)
-        # obs_count: used to freeze zero-obs products in the inner δ solve.
-        obs_count = Demand.δ_obs_counts(model)
 
         # Cache: avoid re-running the inner problem when f and g are called at the same π.
         _cached_π = fill(NaN32, length(i_nonδ))
