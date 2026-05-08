@@ -327,7 +327,7 @@ with_logging() do
                     iterations = 500,
                     g_tol = 1.0f-3,
                     callback = state -> begin
-                        @info "\n$label iter $(state.iteration): " *
+                        @info "\n$label iter $(state.psuedo_iteration): " *
                             "total=$(round(state.f_x; sigdigits=6)) " *
                             "-logL=$(round(_last_ll[]; sigdigits=6)) " *
                             "gnorm=$(round(norm(state.g_x); sigdigits=4)) " *
