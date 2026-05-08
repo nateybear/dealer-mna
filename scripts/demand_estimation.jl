@@ -216,10 +216,11 @@ with_logging() do
                 end
                 # d = (-H_ℓ)^{-1} ∇_δ ℓ: Newton ascent direction for ℓ (descent for -ℓ).
                 # mpi_newton_delta_direction expects ∇_δ ℓ (not negated), so pass -g.
-                d = mpi_newton_delta_direction(θ_tmp, zips, -g)
-                # Precompute ϕ0 and dϕ0 from values already in hand.
+                t_direction = @elapsed d = mpi_newton_delta_direction(θ_tmp, zips, -g)
+                dϕ0 = dot(g, d)  # ∇(-ℓ)·d ≤ 0 (valid descent direction)
+                @info "  inner #$id newton iter $newton_iter: gnorm=$(round(gnorm; sigdigits=4)) dϕ0=$(round(dϕ0; sigdigits=4)) direction_time=$(round(t_direction; sigdigits=3))s"
+                # Precompute ϕ0 from values already in hand.
                 ϕ0 = mpi_scatter(LikelihoodRequest, zips, θ_tmp)  # -ℓ at current point
-                dϕ0 = dot(g, d)  # ∇(-ℓ)·d = g·d ≤ 0 (valid descent direction)
                 function ϕ(α)
                     θ_tmp_tmp = copy(θ_tmp)
                     (@pull delta θ_tmp_tmp model) .= δ_cur + α * d
@@ -232,8 +233,8 @@ with_logging() do
                     return dot(@pull(delta, g_trial, model), d)  # ∇(-ℓ)·d at trial point
                 end
                 ϕdϕ(α) = (ϕ(α), dϕ(α))
-                alpha, phi_alpha, _, _ = ls(ϕ, dϕ, ϕdϕ, 1.0f0, ϕ0, dϕ0)
-                @info "  inner #$id newton iter $newton_iter: -logL=$(round(phi_alpha; sigdigits=6)) gnorm=$(round(gnorm; sigdigits=4)) α=$(round(alpha; sigdigits=4))"
+                alpha, phi_alpha = ls(ϕ, dϕ, ϕdϕ, 1.0f0, ϕ0, dϕ0)
+                @info "  inner #$id newton iter $newton_iter: -logL=$(round(phi_alpha; sigdigits=6)) α=$(round(alpha; sigdigits=4))"
                 δ_cur .+= alpha * d
             end
             _cached_π .= π
