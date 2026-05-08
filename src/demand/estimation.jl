@@ -6,21 +6,6 @@
 # Number of (t,j,f) product observations — denominator for mean moments.
 @memoize n_obs(model) = Float32(nonzero_length(model.product_info))
 
-# Aggregate observed purchase counts per δ group (sum over all zip codes).
-# Used by the BLP contraction mapping for the inner δ optimization.
-@memoize function δ_obs_counts(model)
-    keys_plan, gidxs = δ_fill_plan(model)
-    tjf_to_group = Dict(keys_plan[k] => Int(gidxs[k]) for k in eachindex(keys_plan))
-    n_groups = length(model.product_lookup.tjf)
-    counts = zeros(Float32, n_groups)
-    for (idx, n) in nonzero_pairs(model.counts)
-        _, t_i, j_i, f_i = idx.I
-        g = get(tjf_to_group, CartesianIndex(t_i, j_i, f_i), 0)
-        g > 0 && (counts[g] += Float32(n))
-    end
-    return counts
-end
-
 @memoize function _mean_vec(S::Int)
     v = SparseArray{Float32}(undef, (S,))
     inv_s = 1.0f0 / Float32(S)
@@ -30,45 +15,13 @@ end
     return v
 end
 
-@memoize _demo_zip(model, z::String) =
-    collect(model.agent_data[z][DEMOGRAPHIC_ATTRIBUTES])
-
-# Sum of instruments over each (t,j,f) product group — rows of ∂m/∂δ; model-fixed.
-@memoize function _Z_group_sums(model)
-    Z = z_matrix(model)
-    n_z = size(Z, ndims(Z))
-    n_groups = length(model.product_lookup.tjf)
-    sums = zeros(Float32, n_groups, n_z)
-    @inbounds for (i, (_, idxs)) in enumerate(pairs(model.product_lookup.tjf))
-        for col in 1:n_z
-            sums[i, col] = sum(Z[Tuple(idx)..., col] for idx in idxs)
-        end
-    end
-    return sums
-end
-
-# X'Z cross-product for the price-attribute block of ∂m/∂β; model-fixed.
-@memoize function _XZ_cross(model)
-    X = p_matrix(model)
-    Z = z_matrix(model)
-    n_x = size(X, ndims(X))
-    n_z = size(Z, ndims(Z))
-    XZ = zeros(Float32, n_x, n_z)
-    @inbounds for idx in nonzero_keys(model.product_info)
-        t = Tuple(idx)
-        for i_x in 1:n_x, i_z in 1:n_z
-            XZ[i_x, i_z] += X[t..., i_x] * Z[t..., i_z]
-        end
-    end
-    return XZ
-end
-
-@memoize _∇m_buf(n_params::Int, n_moments::Int) = Matrix{Float32}(undef, n_params, n_moments)
-
 @memoize function _counts_zip(model, z::String)
     iz = searchsortedfirst(collected_zips(model), z)
     return model.counts[iz, :, :, :]
 end
+
+@memoize _demo_zip(model, z::String) =
+    collect(model.agent_data[z][DEMOGRAPHIC_ATTRIBUTES])
 
 @memoize function _dist_zip_plan(model, z::String)
     col_names = names(model.distances, 2)
@@ -167,7 +120,7 @@ function μ(params, model::AbstractDemandModel, zip_code)::SparseArray{Float32, 
         disutils[k] = @fastmath exp(η1 + η2 * dist_f[k])
     end
     # regular getindex/setindex! dispatches to a method that can sometimes resize. Not thread safe!
-    @inbounds @threads for k in eachindex(f_idxs4)
+    @inbounds for k in eachindex(f_idxs4)
         disutility = disutils[k]
         @simd for idx4 in f_idxs4[k]
             @inbounds out[idx4] -= disutility
@@ -320,92 +273,6 @@ function CCPs!(model, grid)
     return nothing
 end
 
-@memoize linear_params_prealloc(s) = SparseArray{Float32}(undef, s...)
-
-function ξ̂(model::AbstractDemandModel, params::AbstractVector)::SparseArray{Float32, 3}
-    # mean utilities (T × J × F)
-    δ̂ = δ(params, model)
-    residualize!(δ̂, model.product_lookup) # in-place residualization
-
-    x_j = x_residualized(model) # T × J × F × (n_product + price)
-
-    β = @pull mean_price_params params model # (1)
-
-    # not decomposing for now
-    # ρ = only(@pull rho params model)
-    # γ = @pull group_fes params model # (n_group_fes)
-
-    # Ω, i_Ω = Ω_matrix(model.ownership, model.adjacency)
-    # @inbounds @simd for idx in i_Ω
-    #     t, j, f, g = idx.I
-    #     Ω[t, j, f, g] = model.ownership[t, f, g] + ρ * model.adjacency[t, j, f, g]
-    # end
-
-    contract!(
-        linear_params_prealloc(size(x_j)[1:(end - 1)]), x_j, (1, 2, 3, -1), SparseArray(β), (-1,)
-    )
-
-    linear_params = linear_params_prealloc(size(x_j)[1:(end - 1)])
-
-    # @inbounds for i in axes(Ω, 4)
-    #     @info "Iteration $i of $(size(Ω, 4)) residualizing Ω matrix"
-    #     linear_params += residualize!(Ω[:, :, :, i], model.product_lookup) * γ[i]
-    # end
-
-    return δ̂ - linear_params
-end
-
-function moments(model::AbstractDemandModel, params::AbstractVector)::AbstractVector
-    ξ = ξ̂(model, params)
-    Z = z_residualized(model)
-    N = n_obs(model)
-    return mapreduce(vcat, axes(Z, ndims(Z))) do i_demo
-        mapreduce(+, nonzero_pairs(ξ)) do (idx, val)
-            @inbounds val * Z[Tuple(idx)..., i_demo]
-        end
-    end ./ N
-end
-
-function optimalW(model::AbstractDemandModel, params::AbstractVector)::AbstractMatrix
-    ξ = ξ̂(model, params)
-    Z = z_residualized(model)
-    m = mapreduce(hcat, axes(Z, ndims(Z))) do i_demo
-        [@inbounds val * Z[Tuple(idx)..., i_demo] for (idx, val) in nonzero_pairs(ξ)]
-    end
-    C = cov(m)
-    W = pinv(C; rtol = 1e-4)
-    @info "optimalW: cond(cov)=$(round(cond(C); sigdigits=4)) max(W)=$(round(maximum(abs, W); sigdigits=4))"
-    return Float32.(W)
-end
-
-function Π̂(model::AbstractDemandModel, params::AbstractVector, W = I)::Float32
-    m = moments(model, params)
-    return 0.5f0 * only(m' * W * m)
-end
-
-function dΠ̂(model::AbstractDemandModel, params::AbstractVector, W = I)::AbstractVector
-    m = moments(model, params)
-
-    N = n_obs(model)
-    Z_gsums = _Z_group_sums(model)  # n_groups × n_z, model-fixed
-    XZ = _XZ_cross(model)           # n_x × n_z, model-fixed
-
-    ∇m = _∇m_buf(length(params), size(Z_gsums, 2))
-    fill!(∇m, zero(Float32))
-
-    i_δ = @indexof delta params model
-    @inbounds for (i, _) in enumerate(pairs(model.product_lookup.tjf))
-        ∇m[i_δ[i], :] .= @view(Z_gsums[i, :]) ./ N
-    end
-
-    i_β = @indexof mean_price_params params model
-    @inbounds for x_var in axes(XZ, 1)
-        ∇m[i_β[x_var], :] .= .-@view(XZ[x_var, :]) ./ N
-    end
-
-    return 0.5f0 * ∇m * W * m
-end
-
 function dloglikelihood(
     model::AbstractDemandModel,
     params::AbstractVector,
@@ -466,4 +333,40 @@ function dloglikelihood(
     end
 
     return out
+end
+
+# For each δ group index i, which time key t does it belong to?
+# Returns Dict: t_key => Vector{Int} of δ group indices (1..n_delta) in that block.
+@memoize function δ_t_blocks(model)
+    blocks = Dict{Tuple{Int64, Int64}, Vector{Int}}()
+    for t in keys(model.product_lookup.t)
+        blocks[t] = Int[]
+    end
+    for (i, (key, _)) in enumerate(pairs(model.product_lookup.tjf))
+        push!(blocks[key[1]], i)  # key[1] = (year, quarter)
+    end
+    return blocks
+end
+
+function descentdirection(
+    model::AbstractDemandModel,
+    params::AbstractVector,
+    z::String,
+)::AbstractVector
+    g = @pull delta dloglikelihood(model, params, z) model
+    ccps = grid_prealloc(size(δ_prealloc(model)))
+    for (t, i_δs) in pairs(δ_t_blocks(model))
+        @info "Trying block $t"
+        p = @view ccps[δ_indices(model)[i_δs]]
+        P0 = max(1f0 - sum(p), 1f-10)
+        g_sum = sum(@view(g[i_δs]))
+        @inbounds for (k, i) in enumerate(i_δs)
+            g[i] = g[i] / (M_z * p[k]) + g_sum / (M_z * P0)
+        end
+    end
+    return g
+end
+
+function hessian_nonlinear_params(model, params, z)
+
 end

@@ -6,6 +6,7 @@ LinearAlgebra.BLAS.set_num_threads(1)
 using Optim
 import LineSearches
 import Random: seed!
+import LineSearches: HagerZhang
 
 seed!(78704)
 
@@ -15,6 +16,9 @@ using MPI
 MPI.Init()
 
 model = DemandModel{FixedCoefType}(; JLD2.load_object(snakemake.input["model"])...)
+
+# Sorted so parent and child agree on iteration order regardless of Dict hashing.
+const T_BLOCK_ORDER = sort(collect(pairs(Demand.δ_t_blocks(model))), by = first)
 
 comm = MPI.COMM_WORLD
 rank = MPI.Comm_rank(comm)
@@ -33,6 +37,11 @@ struct GradientRequest
 end
 
 struct StopSignal end
+
+struct CCPsRequest
+    params::Vector{Float32}
+    zips::Vector{String}
+end
 
 function mpi_scatter(T, zips, params)
     chunksize = cld(length(zips), syze - 1)
@@ -65,6 +74,83 @@ function child_handle(r::GradientRequest)
     )
 end
 
+function child_handle(r::CCPsRequest)
+    all_idxs = Demand.δ_indices(model)
+    Z_local = length(r.zips)
+    S = length(model.u.draws)
+    inv_S = 1.0f0 / Float32(S)
+
+    # Averaged CCPs for each assigned zip: one row per δ group, one column per zip.
+    all_ccps = Matrix{Float32}(undef, length(all_idxs), Z_local)
+    for (zi, z) in enumerate(r.zips)
+        ccp_S = Demand.CCPs(model, r.params, z)  # S × T × J × F
+        @inbounds for (i, idx) in enumerate(all_idxs)
+            s = 0.0f0
+            for si in 1:S
+                s += ccp_S[si, Tuple(idx)...]
+            end
+            all_ccps[i, zi] = s * inv_S
+        end
+    end
+
+    # Send each time-block slice; tag = block index (1-based) so parent can receive in order.
+    for (bi, (_, i_δs)) in enumerate(T_BLOCK_ORDER)
+        MPI.send(all_ccps[i_δs, :], 0, bi, comm)  # N_t × Z_local
+    end
+end
+
+# Woodbury Newton step for one time block.
+# -H_t = diag(d) - U*diag(M_z)*U'  where d = U*M_z  (positive semidefinite block Hessian of -ℓ).
+# g_t:  N_t loglikelihood gradient for this block's δ parameters.
+# Returns (-∂²ℓ/∂δ_t²)^{-1} g_t — Newton ascent direction for ℓ (negate for descent on -ℓ).
+function woodbury_newton_step(
+    U::Matrix{Float32},    # N_t × Z: per-zip averaged CCPs for products in this block
+    M_z::Vector{Float32},  # Z: market sizes in the same column order as U
+    g_t::Vector{Float32},  # N_t: loglikelihood gradient for this block
+)::Vector{Float32}
+    d = U * M_z                                    # N_t: diagonal of -H_t = D
+    inv_d = 1.0f0 ./ max.(d, 1.0f-12)
+    v = inv_d .* g_t                               # v = D⁻¹g
+    DinvU = inv_d .* U                             # D⁻¹U, N_t × Z
+    middle = Diagonal(1.0f0 ./ M_z) - U' * DinvU  # M⁻¹ - U'D⁻¹U, Z × Z
+    w = Symmetric(middle) \ (U' * v)               # (M⁻¹ - U'D⁻¹U)⁻¹ U'v, Z-vector
+    return v + DinvU * w                           # = (-H_t)⁻¹ g_t via Woodbury
+end
+
+# Scatter a CCPsRequest, collect per-block CCP matrices, and return the block-wise
+# Woodbury Newton ascent direction for all δ parameters.
+# g_δ: loglikelihood gradient for δ (length n_delta), NOT negated.
+# Returns (-∂²ℓ/∂δ²)^{-1} g_δ; negate this to get the descent direction for -ℓ.
+function mpi_newton_delta_direction(
+    params::Vector{Float32},
+    zips::Vector{String},
+    g_δ::Vector{Float32},
+)::Vector{Float32}
+    chunksize = cld(length(zips), syze - 1)
+    zip_chunks = collect(Iterators.partition(zips, chunksize))
+    maxrank = length(zip_chunks)
+    for (i, chunk) in enumerate(zip_chunks)
+        MPI.send(CCPsRequest(params, collect(chunk)), i, 0, comm)
+    end
+    # M_z in the same order as zips (which matches the concatenated chunk columns in U)
+    M_zs = Float32[model.agent_data[z].M for z in zips]
+
+    step = Vector{Float32}(undef, length(g_δ))
+    for (bi, (_, i_δs)) in enumerate(T_BLOCK_ORDER)
+        N_t = length(i_δs)
+        U = Matrix{Float32}(undef, N_t, length(zips))
+        col = 1
+        for i in 1:maxrank
+            ccp_block, _ = MPI.recv(i, bi, comm)  # N_t × Z_child
+            ncols = size(ccp_block, 2)
+            U[:, col:(col + ncols - 1)] .= ccp_block
+            col += ncols
+        end
+        step[i_δs] .= woodbury_newton_step(U, M_zs, g_δ[i_δs])
+    end
+    return step
+end
+
 stop!() =
     for i in 1:(syze - 1)
         MPI.send(StopSignal(), i, 0, comm)
@@ -94,6 +180,8 @@ with_logging() do
         _last_ll = Ref(NaN32)
         _last_gmm = Ref(NaN32)
 
+        ls = HagerZhang()
+
         # Inner problem: given non-delta params π, find δ*(π) = argmax_δ loglikelihood.
         # Uses L-BFGS over δ only. The BLP contraction (SQUAREM) has an asymptotically
         # slow modulus (~0.9999/step) for this aggregate shared-δ formulation because the
@@ -112,42 +200,41 @@ with_logging() do
             # warm start: reuse last δ* rather than resetting to initial
             (@pull delta θ_tmp model) .= @pull delta _cached_θ_opt model
 
-            δ_init = copy(Float32.(@pull delta θ_tmp model))
-
-            inner_result = optimize(
-                OnceDifferentiable(
-                    function (δ)
-                        θ_tmp[i_δ] .= δ
-                        return mpi_scatter(LikelihoodRequest, zips, θ_tmp)  # = -logL
-                    end,
-                    function (δ)
-                        θ_tmp[i_δ] .= δ
-                        g = mpi_scatter(GradientRequest, zips, θ_tmp)[i_δ]
-                        @. g = ifelse(obs_count > 0.0f0, g, 0.0f0)  # freeze zero-obs products
-                        return g
-                    end,
-                    δ_init,
-                    inplace = false,
-                ),
-                δ_init,
-                LBFGS(m = 10, linesearch = LineSearches.BackTracking()),
-                Optim.Options(
-                    iterations = 100,
-                    g_tol = 1.0f-3,
-                    allow_f_increases = true,
-                    callback = state -> begin
-                        if state.pseudo_iteration % 10 == 1
-                            @info "\n  inner #$id iter $(state.pseudo_iteration): gnorm=$(round(norm(state.g_x); sigdigits=4))\n"
-                        end
-                        return false
-                    end,
-                ),
-            )
-
-            θ_tmp[i_δ] .= inner_result.minimizer
+            newton_iter = 0
+            while true
+                newton_iter += 1
+                δ_cur = @pull delta θ_tmp model
+                g_full = mpi_scatter(GradientRequest, zips, θ_tmp)  # gradient of -ℓ
+                g = @pull delta g_full model                          # δ-block only
+                gnorm = norm(g)
+                if gnorm ≤ 1.0f-4
+                    @info "  inner #$id newton: converged in $newton_iter iters (gnorm=$gnorm)"
+                    break
+                end
+                # d = (-H_ℓ)^{-1} ∇_δ ℓ: Newton ascent direction for ℓ (descent for -ℓ).
+                # mpi_newton_delta_direction expects ∇_δ ℓ (not negated), so pass -g.
+                d = mpi_newton_delta_direction(θ_tmp, zips, -g)
+                # Precompute ϕ0 and dϕ0 from values already in hand.
+                ϕ0 = mpi_scatter(LikelihoodRequest, zips, θ_tmp)  # -ℓ at current point
+                dϕ0 = dot(g, d)  # ∇(-ℓ)·d = g·d ≤ 0 (valid descent direction)
+                function ϕ(α)
+                    θ_tmp_tmp = copy(θ_tmp)
+                    (@pull delta θ_tmp_tmp model) .= δ_cur + α * d
+                    return mpi_scatter(LikelihoodRequest, zips, θ_tmp_tmp)
+                end
+                function dϕ(α)
+                    θ_tmp_tmp = copy(θ_tmp)
+                    (@pull delta θ_tmp_tmp model) .= δ_cur + α * d
+                    g_trial = mpi_scatter(GradientRequest, zips, θ_tmp_tmp)
+                    return dot(@pull(delta, g_trial, model), d)  # ∇(-ℓ)·d at trial point
+                end
+                ϕdϕ(α) = (ϕ(α), dϕ(α))
+                alpha, phi_alpha, _, _ = ls(ϕ, dϕ, ϕdϕ, 1.0f0, ϕ0, dϕ0)
+                @info "  inner #$id newton iter $newton_iter: -logL=$(round(phi_alpha; sigdigits=6)) gnorm=$(round(gnorm; sigdigits=4)) α=$(round(alpha; sigdigits=4))"
+                δ_cur .+= alpha * d
+            end
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
-            @info "\n  inner #$id: $(inner_result.iterations) L-BFGS iters, converged=$(Optim.converged(inner_result))\n"
             return _cached_θ_opt
         end
 
