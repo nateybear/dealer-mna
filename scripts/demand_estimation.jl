@@ -5,7 +5,7 @@ using LinearAlgebra
 LinearAlgebra.BLAS.set_num_threads(1)
 using Optim
 import Random: seed!
-import LineSearches: BackTracking
+import LineSearches: HagerZhang
 
 seed!(78704)
 
@@ -246,7 +246,7 @@ with_logging() do
         _inner_iter = Ref(0)
         _last_ll = Ref(NaN32)
 
-        ls = BackTracking()
+        ls = HagerZhang()
 
         # Inner problem: given non-delta params π, find δ*(π) = argmax_δ loglikelihood.
         # Custom block-diagonal Newton: solves (-H_t)*Δδ_t = g_t per time block, never
@@ -276,7 +276,7 @@ with_logging() do
                 end
                 g = @pull delta g_full model  # -∇_δ ℓ
                 gnorm = norm(g)
-                if gnorm ≤ 1.0f-4
+                if gnorm ≤ 1.0f-3 || isapprox(ϕ0, 0) 
                     @info "  inner #$id newton: converged in $newton_iter iters (gnorm=$gnorm)"
                     break
                 end
@@ -327,7 +327,7 @@ with_logging() do
                     iterations = 500,
                     g_tol = 1.0f-3,
                     callback = state -> begin
-                        @info "\n$label iter $(state.iteration): " *
+                        @info "\n$label iter $(state.pseudo_iteration): " *
                             "total=$(round(state.f_x; sigdigits=6)) " *
                             "-logL=$(round(_last_ll[]; sigdigits=6)) " *
                             "gnorm=$(round(norm(state.g_x); sigdigits=4)) " *
