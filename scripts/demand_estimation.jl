@@ -22,7 +22,7 @@ comm = MPI.COMM_WORLD
 rank = MPI.Comm_rank(comm)
 syze = MPI.Comm_size(comm)
 
-LinearAlgebra.BLAS.set_num_threads(rank == 0 ? Sys.CPU_THREADS : 1)
+LinearAlgebra.BLAS.set_num_threads(rank == 0 ? 2 : 1)
 
 MPI.Barrier(comm)
 
