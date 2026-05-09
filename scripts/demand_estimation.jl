@@ -143,8 +143,16 @@ function woodbury_newton_step(
     v = inv_d .* g_t                               # v = D⁻¹g
     DinvU = inv_d .* U                             # D⁻¹U, N_t × Z
     middle = Diagonal(1.0f0 ./ M_z) - U' * DinvU  # M⁻¹ - U'D⁻¹U, Z × Z
-    w = Symmetric(middle) \ (U' * v)               # (M⁻¹ - U'D⁻¹U)⁻¹ U'v, Z-vector
-    return v + DinvU * w                           # = (-H_t)⁻¹ g_t via Woodbury
+    # Degenerate CCPs (extreme utilities after a large outer step) can make middle singular in
+    # Float32. Fall back to g_t (gradient ascent); the line search provides the step size, and
+    # the Woodbury is retried automatically once δ has moved and CCPs recover.
+    try
+        w = Symmetric(middle) \ (U' * v)           # (M⁻¹ - U'D⁻¹U)⁻¹ U'v, Z-vector
+        return v + DinvU * w                        # = (-H_t)⁻¹ g_t via Woodbury
+    catch e
+        e isa SingularException || rethrow(e)
+        return g_t
+    end
 end
 
 # Scatter a CCPsRequest, collect per-block CCP matrices, and return the block-wise
