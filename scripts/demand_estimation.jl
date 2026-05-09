@@ -259,17 +259,6 @@ with_logging() do
                 )
             end
 
-        # Diagonal LBFGS preconditioner: each entry ≈ |initial gradient| for that parameter.
-        # ldiv!(s, P, q) computes s = q ./ diag(P), normalising each direction to O(1)
-        # and preventing η_dist (grad ≈ 5e10) from dominating the first step by 1e6×.
-        # Πᵦ entries are 1.0 (zero gradient at π=0; curvature built from LBFGS history).
-        # Πp/η entries derived from the observed outer gradient at the initial parameters.
-        P_diag = vcat(
-            ones(Float32, Demand.n_demo_product_params(model)),
-            Float32[1.0f4, 2.0f9, 6.0f8, 7.0f8],  # Πp: income_inv, urban, black, hispanic
-            Float32[1.0f8, 5.0f10],            # η: baseline, dist
-        )
-
         # Inner problem: given non-delta params π, find δ*(π) = argmax_δ loglikelihood.
         # Custom block-diagonal Newton: solves (-H_t)*Δδ_t = g_t per time block, never
         # forming the full n_delta×n_delta Hessian. Each MPI round returns the full
@@ -287,6 +276,16 @@ with_logging() do
             θ_tmp[i_nonδ] .= π
             # warm start: reuse last δ* rather than resetting to initial
             (@pull delta θ_tmp model) .= @pull delta _cached_θ_opt model
+            # Guard: if the outer step was too large, the warm-started δ may produce
+            # degenerate CCPs (Float32 underflow) that break the Woodbury Newton step.
+            # Fall back to the initial δ when logL is >10x worse than the previous accepted value.
+            if !isnan(_last_ll[])
+                ϕ_warm = mpi_scatter(LikelihoodRequest, zips, θ_tmp)
+                if ϕ_warm > 10 * _last_ll[]
+                    @info "  inner #$id: warm start logL=$(round(ϕ_warm; sigdigits=4)) >> prev $(round(_last_ll[]; sigdigits=4)), resetting to initial δ"
+                    (@pull delta θ_tmp model) .= @pull delta θ model
+                end
+            end
 
             newton_iter = 0
             while true
@@ -324,6 +323,16 @@ with_logging() do
             _cached_θ_opt .= θ_tmp
             return _cached_θ_opt
         end
+
+        # Diagonal LBFGS preconditioner computed from the first gradient evaluation at π₀.
+        # ldiv!(s, P, q) computes s = q ./ P_diag, normalising each direction to O(1).
+        # Πᵦ entries are 1.0 (gradient ≈ 0 at starting point; curvature built from LBFGS history).
+        π₀ = Float32.(θ[i_nonδ])
+        θ_init_opt = concentrated_θ!(π₀)
+        G₀_nonδ = mpi_scatter(GradientRequest, zips, θ_init_opt)[i_nonδ]
+        n_Πᵦ = Demand.n_demo_product_params(model)
+        P_diag = Float32.(vcat(ones(n_Πᵦ), max.(abs.(G₀_nonδ[(n_Πᵦ+1):end]), 1f0)))
+        @info "Dynamic preconditioner P_diag: $(round.(Float64.(P_diag); sigdigits=3))"
 
         function outer_optimize(π₀, label)
             function outer_f(π)
@@ -373,7 +382,6 @@ with_logging() do
             )
         end
 
-        π₀ = Float32.(θ[i_nonδ])
         result = outer_optimize(π₀, "step1")
         @info "\nEstimation done: total=$(round(result.minimum; sigdigits=6)) converged=$(Optim.converged(result))\n"
 
