@@ -249,15 +249,26 @@ with_logging() do
 
         ls = BackTracking()
 
-        # Labels for the 22 non-delta params in vector order (column-major: demographics vary fastest).
+        # Labels for the non-delta params in vector order (column-major: demographics vary fastest).
         nonδ_labels =
             let D = string.(Demand.DEMOGRAPHIC_ATTRIBUTES), P = string.(Demand.PRODUCT_ATTRIBUTES)
                 vcat(
-                    ["Π[$d,$p]" for p in P for d in D],   # 16 demo×product params
-                    ["Πp[$d]" for d in D],                  # 4 demo×price params
-                    ["η_baseline", "η_dist"],               # 2 distance params
+                    ["Π[$d,$p]" for p in P for d in D],
+                    ["Πp[$d]" for d in D],
+                    ["η_baseline", "η_dist"],
                 )
             end
+
+        # Diagonal LBFGS preconditioner: each entry ≈ |initial gradient| for that parameter.
+        # ldiv!(s, P, q) computes s = q ./ diag(P), normalising each direction to O(1)
+        # and preventing η_dist (grad ≈ 5e10) from dominating the first step by 1e6×.
+        # Πᵦ entries are 1.0 (zero gradient at π=0; curvature built from LBFGS history).
+        # Πp/η entries derived from the observed outer gradient at the initial parameters.
+        P_diag = vcat(
+            ones(Float32, Demand.n_demo_product_params(model)),
+            Float32[1f4, 2f9, 6f8, 7f8],  # Πp: income_inv, urban, black, hispanic
+            Float32[1f8, 5f10],            # η: baseline, dist
+        )
 
         # Inner problem: given non-delta params π, find δ*(π) = argmax_δ loglikelihood.
         # Custom block-diagonal Newton: solves (-H_t)*Δδ_t = g_t per time block, never
@@ -331,7 +342,7 @@ with_logging() do
             return optimize(
                 OnceDifferentiable(outer_f, outer_g!, π₀),
                 π₀,
-                LBFGS(),
+                LBFGS(P = Diagonal(P_diag)),
                 Optim.Options(
                     store_trace = true,
                     show_trace = false,

@@ -235,11 +235,10 @@ function initial_parameters(model)
     out[@indexof delta out model] .= -10.0f0
 
     # Distance disutility: exp(η₁ + η₂ × dist_miles) subtracted from utility.
-    # η₁=0 → baseline visit cost exp(0)=1.0, meaningful relative to total utility ≈-10.
-    # η₂=0.02 → disutility doubles per ~35 miles, appropriate for Texas where
-    #   people drive 20-50 mi to a dealer.  At 20 mi: 1.5×, at 50 mi: 2.7×, at 100 mi: 7×.
-    # Previous η₁=-1 → exp(-1)≈0.37 was too small; η₂=0 gave no distance gradient.
-    out[@indexof dist_params out model] .= Float32[0.0f0, 0.02f0]
+    # η₁=-4 → baseline cost exp(-4)≈0.018 at d=0 (small base cost).
+    # η₂=0.01 → disutility doubles per ~70 miles.  At 20 mi: 1.22×, at 50 mi: 1.65×.
+    # Gradient analysis confirmed η₁ and η₂ should decrease from 0/0.02.
+    out[@indexof dist_params out model] .= Float32[-4.0f0, 0.01f0]
 
     # β in ξ̂ = δ_res - β×p_res where p_res is residualized price in DOLLARS.
     # With residualized price std ≈ $5000, β=-1e-4 → ≈0.5 utility units.
@@ -252,9 +251,10 @@ function initial_parameters(model)
     # Start at 0; the LBFGS gradient will determine sensible magnitudes.
 
     # demo_price_params (Πₚ, length 4): demo × price interactions.
-    # income_inv × price ≈ 0.5 (price/income ratio) → Πₚ[1] ≈ ±2 (natural scale).
-    # urban/racial × price ≈ 12500 → Πₚ[2:4] ≈ ±8e-5 (very small; near-zero start OK).
-    # Start at 0.
+    # income_inv × price ≈ 0.5 → natural scale ±2; start at -1 (price sensitivity).
+    # urban/racial × price ≈ 12500 → natural scale ±8e-5; start at -5e-5.
+    # All negative: higher price reduces utility more for price-sensitive demographics.
+    out[@indexof demo_price_params out model] .= Float32[-1.0f0, -5f-5, -5f-5, -5f-5]
 
     return out
 end
