@@ -248,6 +248,15 @@ with_logging() do
 
         ls = BackTracking()
 
+        # Labels for the 22 non-delta params in vector order (column-major: demographics vary fastest).
+        nonδ_labels = let D = string.(Demand.DEMOGRAPHIC_ATTRIBUTES), P = string.(Demand.PRODUCT_ATTRIBUTES)
+            vcat(
+                ["Π[$d,$p]" for p in P for d in D],   # 16 demo×product params
+                ["Πp[$d]" for d in D],                  # 4 demo×price params
+                ["η_baseline", "η_dist"],               # 2 distance params
+            )
+        end
+
         # Inner problem: given non-delta params π, find δ*(π) = argmax_δ loglikelihood.
         # Custom block-diagonal Newton: solves (-H_t)*Δδ_t = g_t per time block, never
         # forming the full n_delta×n_delta Hessian. Each MPI round returns the full
@@ -327,11 +336,24 @@ with_logging() do
                     iterations = 500,
                     g_tol = 1.0f-3,
                     callback = state -> begin
+                        π_cur = _cached_θ_opt[i_nonδ]
+                        g = state.g_x
+                        param_lines = join(
+                            [
+                                "  " *
+                                rpad(nonδ_labels[k], 36) *
+                                "val=$(rpad(string(round(Float64(π_cur[k]); sigdigits=4)), 14))" *
+                                "grad=$(round(Float64(g[k]); sigdigits=4))" for
+                                k in eachindex(nonδ_labels)
+                            ],
+                            "\n",
+                        )
                         @info "\n$label iter $(state.psuedo_iteration): " *
                             "total=$(round(state.f_x; sigdigits=6)) " *
                             "-logL=$(round(_last_ll[]; sigdigits=6)) " *
-                            "gnorm=$(round(norm(state.g_x); sigdigits=4)) " *
-                            "inner_iters=$(_inner_iter[])\n"
+                            "gnorm=$(round(norm(g); sigdigits=4)) " *
+                            "inner_iters=$(_inner_iter[])\n" *
+                            param_lines
                         return false
                     end,
                 ),
