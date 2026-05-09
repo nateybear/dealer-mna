@@ -2,7 +2,6 @@ using DealerMnA
 import .Demand: DemandModel, FixedCoefType, initial_parameters, @indexof, @pull
 using StatsBase: cov
 using LinearAlgebra
-LinearAlgebra.BLAS.set_num_threads(1)
 using Optim
 import Random: seed!
 import LineSearches: BackTracking
@@ -22,6 +21,8 @@ const T_BLOCK_ORDER = sort(collect(pairs(Demand.δ_t_blocks(model))), by = first
 comm = MPI.COMM_WORLD
 rank = MPI.Comm_rank(comm)
 syze = MPI.Comm_size(comm)
+
+LinearAlgebra.BLAS.set_num_threads(rank == 0 ? Sys.CPU_THREADS : 1)
 
 MPI.Barrier(comm)
 
@@ -249,13 +250,14 @@ with_logging() do
         ls = BackTracking()
 
         # Labels for the 22 non-delta params in vector order (column-major: demographics vary fastest).
-        nonδ_labels = let D = string.(Demand.DEMOGRAPHIC_ATTRIBUTES), P = string.(Demand.PRODUCT_ATTRIBUTES)
-            vcat(
-                ["Π[$d,$p]" for p in P for d in D],   # 16 demo×product params
-                ["Πp[$d]" for d in D],                  # 4 demo×price params
-                ["η_baseline", "η_dist"],               # 2 distance params
-            )
-        end
+        nonδ_labels =
+            let D = string.(Demand.DEMOGRAPHIC_ATTRIBUTES), P = string.(Demand.PRODUCT_ATTRIBUTES)
+                vcat(
+                    ["Π[$d,$p]" for p in P for d in D],   # 16 demo×product params
+                    ["Πp[$d]" for d in D],                  # 4 demo×price params
+                    ["η_baseline", "η_dist"],               # 2 distance params
+                )
+            end
 
         # Inner problem: given non-delta params π, find δ*(π) = argmax_δ loglikelihood.
         # Custom block-diagonal Newton: solves (-H_t)*Δδ_t = g_t per time block, never
@@ -285,7 +287,7 @@ with_logging() do
                 end
                 g = @pull delta g_full model  # -∇_δ ℓ
                 gnorm = norm(g)
-                if gnorm ≤ 1.0f-3 || isapprox(ϕ0, 0) 
+                if gnorm ≤ 1.0f-3 || isapprox(ϕ0, 0)
                     @info "  inner #$id newton: converged in $newton_iter iters (gnorm=$gnorm)"
                     break
                 end
