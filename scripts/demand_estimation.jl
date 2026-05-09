@@ -335,7 +335,22 @@ with_logging() do
         @info "Dynamic preconditioner P_diag: $(round.(Float64.(P_diag); sigdigits=3))"
 
         function outer_optimize(π₀, label)
+            _prev_π = copy(π₀)
             function outer_f(π)
+                Δπ = π .- _prev_π
+                step_lines = join(
+                    [
+                        "  " *
+                        rpad(nonδ_labels[k], 36) *
+                        "val=$(rpad(string(round(Float64(π[k]); sigdigits=4)), 14))" *
+                        "Δ=$(round(Float64(Δπ[k]); sigdigits=4))" for
+                        k in eachindex(nonδ_labels)
+                    ],
+                    "\n",
+                )
+                @info "\n$label outer_f: step_norm=$(round(Float64(norm(Δπ)); sigdigits=4))\n" *
+                    step_lines
+                _prev_π .= π
                 θ_opt = concentrated_θ!(π)
                 ll = mpi_scatter(LikelihoodRequest, zips, θ_opt)
                 _last_ll[] = ll
