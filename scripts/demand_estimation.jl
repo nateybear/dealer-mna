@@ -285,7 +285,7 @@ with_logging() do
                 end
                 g = @pull delta g_full model  # -∇_δ ℓ
                 gnorm = norm(g)
-                if gnorm ≤ 1.0f-4
+                if gnorm ≤ 1.0f-3 || isapprox(ϕ0, 0) 
                     @info "  inner #$id newton: converged in $newton_iter iters (gnorm=$gnorm)"
                     break
                 end
