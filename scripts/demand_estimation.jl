@@ -5,7 +5,6 @@ using LinearAlgebra
 using Optim
 import Random: seed!
 import LineSearches: HagerZhang
-import Base.Threads: @threads
 
 seed!(78704)
 
@@ -23,7 +22,7 @@ comm = MPI.COMM_WORLD
 rank = MPI.Comm_rank(comm)
 syze = MPI.Comm_size(comm)
 
-LinearAlgebra.BLAS.set_num_threads(rank == 0 ? Sys.CPU_THREADS : 1)
+LinearAlgebra.BLAS.set_num_threads(rank == 0 ? 2 : 1)
 
 MPI.Barrier(comm)
 
@@ -170,11 +169,12 @@ function mpi_newton_delta_direction(
     for (bi, (_, i_δs)) in enumerate(T_BLOCK_ORDER)
         N_t = length(i_δs)
         U = Matrix{Float32}(undef, N_t, length(zips))
-        @threads for i in 1:maxrank
+        col = 1
+        for i in 1:maxrank
             ccp_block, _ = MPI.recv(i, bi, comm)  # N_t × Z_child
             ncols = size(ccp_block, 2)
-            start_col = (i - 1) * chunksize + 1
-            U[:, start_col:(start_col + ncols - 1)] .= ccp_block
+            U[:, col:(col + ncols - 1)] .= ccp_block
+            col += ncols
         end
         step[i_δs] .= woodbury_newton_step(U, M_zs, g_δ[i_δs])
     end
