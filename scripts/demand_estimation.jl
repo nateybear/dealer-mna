@@ -350,7 +350,7 @@ with_logging() do
                             ],
                             "\n",
                         )
-                        @info "\n$label iter $(state.psuedo_iteration): " *
+                        @info "\n$label iter $(state.pseudo_iteration): " *
                             "total=$(round(state.f_x; sigdigits=6)) " *
                             "-logL=$(round(_last_ll[]; sigdigits=6)) " *
                             "gnorm=$(round(norm(g); sigdigits=4)) " *
