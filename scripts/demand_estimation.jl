@@ -4,7 +4,8 @@ using StatsBase: cov
 using LinearAlgebra
 using Optim
 import Random: seed!
-import LineSearches: BackTracking
+import LineSearches: HagerZhang
+import Base.Threads: @threads
 
 seed!(78704)
 
@@ -22,7 +23,7 @@ comm = MPI.COMM_WORLD
 rank = MPI.Comm_rank(comm)
 syze = MPI.Comm_size(comm)
 
-LinearAlgebra.BLAS.set_num_threads(rank == 0 ? 2 : 1)
+LinearAlgebra.BLAS.set_num_threads(rank == 0 ? Sys.CPU_THREADS : 1)
 
 MPI.Barrier(comm)
 
@@ -169,12 +170,11 @@ function mpi_newton_delta_direction(
     for (bi, (_, i_δs)) in enumerate(T_BLOCK_ORDER)
         N_t = length(i_δs)
         U = Matrix{Float32}(undef, N_t, length(zips))
-        col = 1
-        for i in 1:maxrank
+        @threads for i in 1:maxrank
             ccp_block, _ = MPI.recv(i, bi, comm)  # N_t × Z_child
             ncols = size(ccp_block, 2)
-            U[:, col:(col + ncols - 1)] .= ccp_block
-            col += ncols
+            start_col = (i - 1) * chunksize + 1
+            U[:, start_col:(start_col + ncols - 1)] .= ccp_block
         end
         step[i_δs] .= woodbury_newton_step(U, M_zs, g_δ[i_δs])
     end
@@ -247,7 +247,7 @@ with_logging() do
         _inner_iter = Ref(0)
         _last_ll = Ref(NaN32)
 
-        ls = BackTracking()
+        ls = HagerZhang()
 
         # Labels for the non-delta params in vector order (column-major: demographics vary fastest).
         nonδ_labels =
@@ -266,8 +266,8 @@ with_logging() do
         # Πp/η entries derived from the observed outer gradient at the initial parameters.
         P_diag = vcat(
             ones(Float32, Demand.n_demo_product_params(model)),
-            Float32[1f4, 2f9, 6f8, 7f8],  # Πp: income_inv, urban, black, hispanic
-            Float32[1f8, 5f10],            # η: baseline, dist
+            Float32[1.0f4, 2.0f9, 6.0f8, 7.0f8],  # Πp: income_inv, urban, black, hispanic
+            Float32[1.0f8, 5.0f10],            # η: baseline, dist
         )
 
         # Inner problem: given non-delta params π, find δ*(π) = argmax_δ loglikelihood.
