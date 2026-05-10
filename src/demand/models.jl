@@ -24,6 +24,7 @@ struct DemandModel{T <: AbstractCoefType} <: AbstractDemandModel
     ownership_lookup::OwnershipLookup
     demo_scales::Vector{Float32}   # std dev of each demographic in DEMOGRAPHIC_ATTRIBUTES order
     price_scale::Float32           # std dev of price across all (t,j,f) observations
+    dist_scale::Float32            # std dev of distance across all (zip,dealer) pairs in miles
 end
 function DemandModel{T}(;
     distances,
@@ -36,6 +37,7 @@ function DemandModel{T}(;
     ownership_lookup,
     demo_scales,
     price_scale,
+    dist_scale,
 ) where {T <: AbstractCoefType}
     u = T(
         100, # number of simulation draws
@@ -54,6 +56,7 @@ function DemandModel{T}(;
         ownership_lookup,
         demo_scales,
         price_scale,
+        dist_scale,
     )
 end
 
@@ -240,11 +243,11 @@ function initial_parameters(model)
     # So δ₀ ≈ -12 + 1 = -11.  Use -10 as a round number.
     out[@indexof delta out model] .= -10.0f0
 
-    # Distance disutility: exp(η₁ + η₂ × dist_miles) subtracted from utility.
-    # η₁=-4 → baseline cost exp(-4)≈0.018 at d=0 (small base cost).
-    # η₂=0.01 → disutility doubles per ~70 miles.  At 20 mi: 1.22×, at 50 mi: 1.65×.
-    # Gradient analysis confirmed η₁ and η₂ should decrease from 0/0.02.
-    out[@indexof dist_params out model] .= Float32[-4.0f0, 0.01f0]
+    # Distance disutility: exp(η₁ + η₂ × dist') where dist' = dist_miles / σ_dist.
+    # η₁=-4 → baseline cost exp(-4)≈0.018 at d=0 (unchanged by standardization).
+    # η₂: old 0.01/mile × σ_dist ≈ 1.0 per std-dev (σ_dist ≈ 100 miles).
+    # After standardization |∂ℓ/∂η₂| / |∂ℓ/∂η₁| ≈ mean(dist') = O(1).
+    out[@indexof dist_params out model] .= Float32[-4.0f0, 1.0f0]
 
     # β in ξ̂ = δ_res - β×p_res where p_res is residualized price in DOLLARS.
     # With residualized price std ≈ $5000, β=-1e-4 → ≈0.5 utility units.

@@ -136,6 +136,8 @@ function load_model_frames()
 
     #### Done: distances
     distances = NamedArray(distances, (agent_data.zip_code, Dealers.State.df.uid[ford_dealer_mask])) # convert to miles
+    dist_scale = Float32(std(distances))
+    distances ./= dist_scale
 
     #### Done: agent data
     agent_data = Dict{String, AgentInfo}(
@@ -405,6 +407,7 @@ function load_model_frames()
         ownership_lookup = ownership_lookup,
         demo_scales = demo_scales,
         price_scale = price_scale,
+        dist_scale = dist_scale,
         #adjacency = adjacency_matrix[:, :, :, nonempty_groups],
         #adjacency_lookup = adjacency_lookup,
     )
