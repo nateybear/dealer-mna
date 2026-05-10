@@ -334,7 +334,9 @@ with_logging() do
 
         # Diagonal LBFGS preconditioner computed from the first gradient evaluation at π₀.
         # ldiv!(s, P, q) computes s = q ./ P_diag, normalising each direction to O(1).
-        # Πᵦ entries are 1.0 (gradient ≈ 0 at starting point; curvature built from LBFGS history).
+        # Covariate standardization makes Πₚ gradients comparable in magnitude; the preconditioner
+        # handles residual Πₚ vs. η scale differences. Πᵦ entries are 1.0 (gradient ≈ 0 at
+        # starting point; curvature built from LBFGS history).
         π₀ = Float32.(θ[i_nonδ])
         θ_init_opt = concentrated_θ!(π₀)
         G₀_nonδ = mpi_scatter(GradientRequest, zips, θ_init_opt)[i_nonδ]

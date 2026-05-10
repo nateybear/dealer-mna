@@ -127,6 +127,10 @@ function load_model_frames()
     agent_data = Registrations.zips()
     agent_data.M = agent_data.population .÷ 48 # calibrate market size (2/HH, HH buys car every 6 years)
     transform!(agent_data, :median_earnings => ByRow(inv))
+    demo_scales = Float32[std(agent_data[!, d]) for d in DEMOGRAPHIC_ATTRIBUTES]
+    for (d, s) in zip(DEMOGRAPHIC_ATTRIBUTES, demo_scales)
+        agent_data[!, d] ./= s
+    end
     distances =
         miles.(agent_data.geometry, reshape(Dealers.State.df.geometry[ford_dealer_mask], 1, :)) # zips in rows, dealers in columns
 
@@ -247,6 +251,9 @@ function load_model_frames()
     transform!(
         firm_product_data, :p => ByRow(Float32), :p_hausman => ByRow(Float32), renamecols = false
     )
+    price_scale = Float32(std(firm_product_data.p))
+    firm_product_data.p ./= price_scale
+    firm_product_data.p_hausman ./= price_scale
 
     product_lookup = new_lookup(_ProductLookup, firm_product_data, :t, :j, :f)
     counts_lookup = new_lookup(CountsLookup, counts, :z, :t, :j, :f)
@@ -396,6 +403,8 @@ function load_model_frames()
         counts_lookup = counts_lookup,
         ownership = ownership_matrix[:, :, nonempty_groups],
         ownership_lookup = ownership_lookup,
+        demo_scales = demo_scales,
+        price_scale = price_scale,
         #adjacency = adjacency_matrix[:, :, :, nonempty_groups],
         #adjacency_lookup = adjacency_lookup,
     )

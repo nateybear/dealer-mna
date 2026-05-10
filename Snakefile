@@ -681,6 +681,7 @@ rule data_model_frames:
     input:
         "scripts/data_model_frames.jl",
         "data/statistics.txt",
+        "src/demand/loading.jl",
         dealers_init="data/dealers_init_filtered.jld2",
         registrations="data/arrow/fords.arrow",
         price_table="data/price_table.arrow",

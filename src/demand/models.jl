@@ -22,6 +22,8 @@ struct DemandModel{T <: AbstractCoefType} <: AbstractDemandModel
     counts_lookup::CountsLookup
     ownership::SparseArray{Bool, 3} # t, f, g
     ownership_lookup::OwnershipLookup
+    demo_scales::Vector{Float32}   # std dev of each demographic in DEMOGRAPHIC_ATTRIBUTES order
+    price_scale::Float32           # std dev of price across all (t,j,f) observations
 end
 function DemandModel{T}(;
     distances,
@@ -32,6 +34,8 @@ function DemandModel{T}(;
     counts_lookup,
     ownership,
     ownership_lookup,
+    demo_scales,
+    price_scale,
 ) where {T <: AbstractCoefType}
     u = T(
         100, # number of simulation draws
@@ -48,6 +52,8 @@ function DemandModel{T}(;
         counts_lookup,
         ownership,
         ownership_lookup,
+        demo_scales,
+        price_scale,
     )
 end
 
@@ -246,15 +252,13 @@ function initial_parameters(model)
     # out[@indexof mean_price_params out model] .= -1.0f-4
 
     # demo_product_params (Πᵦ, 4×4): demo × product-attribute interactions.
-    # income_inv ≈ 2e-5 → needs Πᵦ[1,:] ≈ ±50000 for unit utility (badly conditioned).
-    # urban/black/hispanic ≈ 0.3–0.5 → needs Πᵦ[2:4,:] ≈ ±2 (normal scale).
-    # Start at 0; the LBFGS gradient will determine sensible magnitudes.
+    # All covariates are standardized (divided by sample std dev), so D'_z[d] has std ≈ 1.
+    # Start at 0; gradient will drive from here; LBFGS curvature builds from history.
 
     # demo_price_params (Πₚ, length 4): demo × price interactions.
-    # income_inv × price ≈ 0.5 → natural scale ±2; start at -1 (price sensitivity).
-    # urban/racial × price ≈ 12500 → natural scale ±8e-5; start at -5e-5.
-    # All negative: higher price reduces utility more for price-sensitive demographics.
-    out[@indexof demo_price_params out model] .= Float32[-1.0f0, -5f-5, -5f-5, -5f-5]
+    # After standardization, Πₚ[d] × D'_z[d] × p' has natural scale O(1) for all d.
+    # Uniform starting value -1.0 for all demographics (all now on unit-variance scale).
+    out[@indexof demo_price_params out model] .= -1.0f0
 
     return out
 end
