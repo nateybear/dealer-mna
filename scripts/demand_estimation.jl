@@ -300,6 +300,9 @@ with_logging() do
                     (@pull delta θ_tmp model) .= @pull delta θ model
                 end
             end
+            # Snapshot δ after warm-start resolution. Restored into θ_tmp on any failed exit so
+            # that _cached_θ_opt is never left with δ values corrupted by a partial Newton run.
+            δ_at_inner_start = copy(@pull delta θ_tmp model)
 
             newton_iter = 0
             stuck_iters = 0  # consecutive iterations with α < 1e-5 (Float32 underflow trap)
@@ -357,6 +360,7 @@ with_logging() do
                     @warn "  inner #$id newton iter $newton_iter: dϕ0=$(round(dϕ0; sigdigits=4)) not negative, falling back to gradient step ($nan_dϕ0_iters consecutive)"
                     if nan_dϕ0_iters >= 3
                         @warn "  inner #$id newton iter $newton_iter: $nan_dϕ0_iters consecutive non-descent steps, aborting — outer_f will return penalty"
+                        (@pull delta θ_tmp model) .= δ_at_inner_start
                         _inner_failed[] = true
                         break
                     end
@@ -385,6 +389,7 @@ with_logging() do
             end
             if gnorm > 1.0f4 && !_inner_failed[]
                 @warn "  inner #$id newton: exiting with gnorm=$(round(gnorm; sigdigits=4)) > 1e4 (unconverged), returning penalty"
+                (@pull delta θ_tmp model) .= δ_at_inner_start
                 _inner_failed[] = true
             end
             _cached_π .= π
@@ -398,7 +403,8 @@ with_logging() do
                 # Fast pre-screen: return penalty instantly for obviously infeasible π.
                 # At |η_dist| > 5 (one σ distance), exp(η₁ + 5) dominates and Float32 CCP
                 # underflow is inevitable. Each avoided scatter saves ~10s of MPI time.
-                if abs(π[end]) > 5.0f0 || abs(π[end-1]) > 10.0f0
+                if abs(π[end]) > 5.0f0 || abs(π[end-1]) > 10.0f0 ||
+                   maximum(abs, @view π[1:end-2]) > 15.0f0
                     return 1.0f10
                 end
                 Δπ = π .- _prev_π
