@@ -324,6 +324,7 @@ with_logging() do
                     ϕ0_shifted = mpi_scatter(LikelihoodRequest, zips, θ_tmp)
                     if isapprox(ϕ0_shifted, 0)
                         @warn "  inner #$id newton iter $newton_iter: deep underflow (δ shift +500 didn't help), exiting — outer_f will return penalty"
+                        δ_cur .-= 500.0f0  # restore so _cached_θ_opt stays clean
                         break
                     end
                     @info "  inner #$id newton iter $newton_iter: escaped underflow with δ shift +500, retrying Newton"
