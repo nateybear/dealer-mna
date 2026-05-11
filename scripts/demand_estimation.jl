@@ -287,7 +287,9 @@ with_logging() do
             # Guard: if the outer step was too large, the warm-started δ may produce
             # degenerate CCPs (Float32 underflow) that break the Woodbury Newton step.
             # Fall back to the initial δ when logL is >10x worse than the previous accepted value.
-            if !isnan(_last_ll[])
+            # Skip when _last_ll[]==0: that means a prior inner call exited via CCP underflow and
+            # the reference point is meaningless — any positive ϕ_warm would trigger a spurious reset.
+            if !isnan(_last_ll[]) && _last_ll[] > 0
                 ϕ_warm = mpi_scatter(LikelihoodRequest, zips, θ_tmp)
                 if ϕ_warm > 1.0f4 * _last_ll[]
                     @info "  inner #$id: warm start logL=$(round(ϕ_warm; sigdigits=4)) >> prev $(round(_last_ll[]; sigdigits=4)), resetting to initial δ"
@@ -296,8 +298,13 @@ with_logging() do
             end
 
             newton_iter = 0
+            stuck_iters = 0  # consecutive iterations with α < 1e-5 (Float32 underflow trap)
             while true
                 newton_iter += 1
+                if newton_iter > 30
+                    @warn "  inner #$id newton: exceeded 30 iters (gnorm=$gnorm), giving up"
+                    break
+                end
                 δ_cur = @pull delta θ_tmp model
                 # Combined round: gradient, Newton step, and ϕ0 in one MPI scatter.
                 t_combined = @elapsed begin
@@ -305,11 +312,35 @@ with_logging() do
                 end
                 g = @pull delta g_full model  # -∇_δ ℓ
                 gnorm = norm(g)
-                if gnorm ≤ 1.0f-3 || isapprox(ϕ0, 0)
+                # ϕ0≈0 means Float32 CCP underflow (all exp(utility)→0): logL returns 0 instead
+                # of -∞.  The gradient still points the right direction, so continue iterating
+                # rather than treating this as convergence.
+                if isapprox(ϕ0, 0)
+                    @warn "  inner #$id newton iter $newton_iter: ϕ0=0 (Float32 CCP underflow), continuing"
+                end
+                if gnorm ≤ 1.0f-3
                     @info "  inner #$id newton: converged in $newton_iter iters (gnorm=$gnorm)"
                     break
                 end
+                # Stuck detection: if the line search has returned α < 1e-5 for several
+                # consecutive iterations, the Newton direction d has enormous magnitude
+                # (from saturated Float32 CCPs) and δ+α*d==δ in Float32 arithmetic.
+                # Switch to a normalised gradient step, which has unit magnitude and a
+                # valid descent slope, so the line search can make actual progress.
+                if stuck_iters >= 5
+                    @info "  inner #$id newton iter $newton_iter: stuck for $stuck_iters iters, switching to gradient step"
+                    d = -g ./ max(gnorm, 1.0f-8)  # unit-magnitude descent direction for -ℓ
+                    stuck_iters = 0
+                end
                 dϕ0 = dot(g, d)  # ∇(-ℓ)·d ≤ 0 (valid descent direction)
+                # HagerZhang throws on a non-descent direction; guard here so the error doesn't
+                # propagate to Optim and kill the outer loop.  Degenerate CCPs (NaN/Inf from
+                # Float32 overflow) can produce a Newton step that is not a descent direction.
+                if !(dϕ0 < 0)
+                    @warn "  inner #$id newton iter $newton_iter: dϕ0=$(round(dϕ0; sigdigits=4)) not negative, falling back to gradient step"
+                    d = -g ./ max(gnorm, 1.0f-8)
+                    dϕ0 = -gnorm
+                end
                 @info "  inner #$id newton iter $newton_iter: gnorm=$(round(gnorm; sigdigits=4)) dϕ0=$(round(dϕ0; sigdigits=4)) combined_time=$(round(t_combined; sigdigits=3))s"
                 function ϕ(α)
                     θ_tmp_tmp = copy(θ_tmp)
@@ -325,24 +356,13 @@ with_logging() do
                 ϕdϕ(α) = (ϕ(α), dϕ(α))
                 alpha, phi_alpha = ls(ϕ, dϕ, ϕdϕ, 1.0f0, ϕ0, dϕ0)
                 @info "  inner #$id newton iter $newton_iter: -logL=$(round(phi_alpha; sigdigits=6)) α=$(round(alpha; sigdigits=4))"
+                stuck_iters = alpha < 1.0f-5 ? stuck_iters + 1 : 0
                 δ_cur .+= alpha * d
             end
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
             return _cached_θ_opt
         end
-
-        # Diagonal LBFGS preconditioner computed from the first gradient evaluation at π₀.
-        # ldiv!(s, P, q) computes s = q ./ P_diag, normalising each direction to O(1).
-        # Covariate standardization makes Πₚ gradients comparable in magnitude; the preconditioner
-        # handles residual Πₚ vs. η scale differences. Πᵦ entries are 1.0 (gradient ≈ 0 at
-        # starting point; curvature built from LBFGS history).
-        π₀ = Float32.(θ[i_nonδ])
-        θ_init_opt = concentrated_θ!(π₀)
-        G₀_nonδ = mpi_scatter(GradientRequest, zips, θ_init_opt)[i_nonδ]
-        n_Πᵦ = Demand.n_demo_product_params(model)
-        P_diag = Float32.(vcat(ones(n_Πᵦ), max.(abs.(G₀_nonδ[(n_Πᵦ + 1):end]), 1.0f0)))
-        @info "Dynamic preconditioner P_diag: $(round.(Float64.(P_diag); sigdigits=3))"
 
         function outer_optimize(π₀, label)
             _prev_π = copy(π₀)
@@ -376,7 +396,7 @@ with_logging() do
             return optimize(
                 OnceDifferentiable(outer_f, outer_g!, π₀),
                 π₀,
-                LBFGS(P = Diagonal(P_diag)),
+                LBFGS(),
                 Optim.Options(
                     store_trace = true,
                     show_trace = false,

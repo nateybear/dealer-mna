@@ -254,14 +254,17 @@ function initial_parameters(model)
     # Previous β=-0.1 → 500 utility units per $5K variation, far too large.
     # out[@indexof mean_price_params out model] .= -1.0f-4
 
-    # demo_product_params (Πᵦ, 4×4): demo × product-attribute interactions.
-    # All covariates are standardized (divided by sample std dev), so D'_z[d] has std ≈ 1.
-    # Start at 0; gradient will drive from here; LBFGS curvature builds from history.
+    # demo_product_params (Πᵦ, 4×4): demographics vary fastest, products slowest
+    # (ORDER = [coupe, suv, pickup, sedan] × [income, urban, black, hispanic]).
+    # Observed gradients at Πᵦ=0 are all negative, so we start positive.
+    # Pickup has the largest effect, suv medium, sedan small, coupe smallest.
+    out[@indexof demo_product_params out model] .=
+        repeat(Float32[0.1f0, 0.5f0, 1.0f0, 0.25f0], inner = n_demographics(model))
 
     # demo_price_params (Πₚ, length 4): demo × price interactions.
     # After standardization, Πₚ[d] × D'_z[d] × p' has natural scale O(1) for all d.
-    # Uniform starting value -1.0 for all demographics (all now on unit-variance scale).
-    out[@indexof demo_price_params out model] .= -1.0f0
+    # Uniform starting value -0.5 for all demographics.
+    out[@indexof demo_price_params out model] .= -0.5f0
 
     return out
 end
