@@ -289,7 +289,7 @@ with_logging() do
             # Fall back to the initial δ when logL is >10x worse than the previous accepted value.
             if !isnan(_last_ll[])
                 ϕ_warm = mpi_scatter(LikelihoodRequest, zips, θ_tmp)
-                if ϕ_warm > 10 * _last_ll[]
+                if ϕ_warm > 1.0f4 * _last_ll[]
                     @info "  inner #$id: warm start logL=$(round(ϕ_warm; sigdigits=4)) >> prev $(round(_last_ll[]; sigdigits=4)), resetting to initial δ"
                     (@pull delta θ_tmp model) .= @pull delta θ model
                 end
@@ -341,7 +341,7 @@ with_logging() do
         θ_init_opt = concentrated_θ!(π₀)
         G₀_nonδ = mpi_scatter(GradientRequest, zips, θ_init_opt)[i_nonδ]
         n_Πᵦ = Demand.n_demo_product_params(model)
-        P_diag = Float32.(vcat(ones(n_Πᵦ), max.(abs.(G₀_nonδ[(n_Πᵦ+1):end]), 1f0)))
+        P_diag = Float32.(vcat(ones(n_Πᵦ), max.(abs.(G₀_nonδ[(n_Πᵦ + 1):end]), 1.0f0)))
         @info "Dynamic preconditioner P_diag: $(round.(Float64.(P_diag); sigdigits=3))"
 
         function outer_optimize(π₀, label)
