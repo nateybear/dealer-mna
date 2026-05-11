@@ -295,7 +295,7 @@ with_logging() do
             # the reference point is meaningless — any positive ϕ_warm would trigger a spurious reset.
             if !isnan(_last_ll[]) && _last_ll[] > 0
                 ϕ_warm = mpi_scatter(LikelihoodRequest, zips, θ_tmp)
-                if ϕ_warm > 1.0f4 * _last_ll[]
+                if ϕ_warm > 1.0f3 * _last_ll[]
                     @info "  inner #$id: warm start logL=$(round(ϕ_warm; sigdigits=4)) >> prev $(round(_last_ll[]; sigdigits=4)), resetting to initial δ"
                     (@pull delta θ_tmp model) .= @pull delta θ model
                 end
@@ -346,7 +346,7 @@ with_logging() do
                 # (from saturated Float32 CCPs) and δ+α*d==δ in Float32 arithmetic.
                 # Switch to a normalised gradient step, which has unit magnitude and a
                 # valid descent slope, so the line search can make actual progress.
-                if stuck_iters >= 5
+                if stuck_iters >= 3
                     @info "  inner #$id newton iter $newton_iter: stuck for $stuck_iters iters, switching to gradient step"
                     d = -g ./ max(gnorm, 1.0f-8)  # unit-magnitude descent direction for -ℓ
                     stuck_iters = 0
