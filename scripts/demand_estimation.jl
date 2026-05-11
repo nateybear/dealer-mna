@@ -249,6 +249,8 @@ with_logging() do
         i_δ = @indexof delta θ model
         i_nonδ = setdiff(1:length(θ), i_δ)
 
+	π₀ = Float32.(θ[i_nonδ])
+
         # Cache: avoid re-running the inner problem when f, g!, h! are called at the same π.
         _cached_π = fill(NaN32, length(i_nonδ))
         _cached_θ_opt = copy(θ)
