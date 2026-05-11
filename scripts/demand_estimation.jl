@@ -314,11 +314,20 @@ with_logging() do
                 end
                 g = @pull delta g_full model  # -∇_δ ℓ
                 gnorm = norm(g)
-                # ϕ0≈0 means Float32 CCP underflow (all exp(utility)→0): logL returns 0 instead
-                # of -∞.  The gradient still points the right direction, so continue iterating
-                # rather than treating this as convergence.
+                # ϕ0≈0 means Float32 CCP underflow (all exp(utility)→0 due to extreme π).
+                # Try a uniform δ shift to bring utilities into the non-underflow regime: adding C
+                # to all δ in a block makes products more attractive vs. the outside good and can
+                # rescue moderate underflow.  If the shift doesn't help (e.g. η overflow dominates),
+                # exit immediately — outer_f will return a large penalty to force backtracking.
                 if isapprox(ϕ0, 0)
-                    @warn "  inner #$id newton iter $newton_iter: ϕ0=0 (Float32 CCP underflow), continuing"
+                    δ_cur .+= 500.0f0
+                    ϕ0_shifted = mpi_scatter(LikelihoodRequest, zips, θ_tmp)
+                    if isapprox(ϕ0_shifted, 0)
+                        @warn "  inner #$id newton iter $newton_iter: deep underflow (δ shift +500 didn't help), exiting — outer_f will return penalty"
+                        break
+                    end
+                    @info "  inner #$id newton iter $newton_iter: escaped underflow with δ shift +500, retrying Newton"
+                    continue
                 end
                 if gnorm ≤ 1.0f-3
                     @info "  inner #$id newton: converged in $newton_iter iters (gnorm=$gnorm)"
@@ -385,6 +394,13 @@ with_logging() do
                 _prev_π .= π
                 θ_opt = concentrated_θ!(π)
                 ll = mpi_scatter(LikelihoodRequest, zips, θ_opt)
+                if isapprox(ll, 0)
+                    # Inner Newton exited due to deep Float32 underflow: return a large penalty so
+                    # the outer HagerZhang line search rejects this point and backtracks.  Do NOT
+                    # update _last_ll[] — the warm-start guard needs the last valid reference logL.
+                    @warn "$label outer_f: inner Newton returned ll=0 (deep underflow), returning penalty to force backtrack"
+                    return 1.0f10
+                end
                 _last_ll[] = ll
                 return ll
             end
@@ -398,7 +414,7 @@ with_logging() do
             return optimize(
                 OnceDifferentiable(outer_f, outer_g!, π₀),
                 π₀,
-                LBFGS(),
+                LBFGS(alphaguess = LineSearches.InitialHagerZhang()),
                 Optim.Options(
                     store_trace = true,
                     show_trace = false,
