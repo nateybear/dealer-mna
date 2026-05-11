@@ -4,7 +4,7 @@ using StatsBase: cov
 using LinearAlgebra
 using Optim
 import Random: seed!
-import LineSearches: HagerZhang
+import LineSearches: HagerZhang, InitialHagerZhang
 
 seed!(78704)
 
@@ -249,7 +249,7 @@ with_logging() do
         i_δ = @indexof delta θ model
         i_nonδ = setdiff(1:length(θ), i_δ)
 
-	π₀ = Float32.(θ[i_nonδ])
+        π₀ = Float32.(θ[i_nonδ])
 
         # Cache: avoid re-running the inner problem when f, g!, h! are called at the same π.
         _cached_π = fill(NaN32, length(i_nonδ))
@@ -414,7 +414,7 @@ with_logging() do
             return optimize(
                 OnceDifferentiable(outer_f, outer_g!, π₀),
                 π₀,
-                LBFGS(alphaguess = LineSearches.InitialHagerZhang()),
+                LBFGS(alphaguess = InitialHagerZhang()),
                 Optim.Options(
                     store_trace = true,
                     show_trace = false,
