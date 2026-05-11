@@ -304,6 +304,7 @@ with_logging() do
             newton_iter = 0
             stuck_iters = 0  # consecutive iterations with α < 1e-5 (Float32 underflow trap)
             nan_dϕ0_iters = 0  # consecutive iterations where dϕ0 was NaN/non-negative
+            gnorm = Inf32
             while true
                 newton_iter += 1
                 if newton_iter > 30
@@ -382,6 +383,10 @@ with_logging() do
                 stuck_iters = alpha < 1.0f-5 ? stuck_iters + 1 : 0
                 δ_cur .+= alpha * d
             end
+            if gnorm > 1.0f4 && !_inner_failed[]
+                @warn "  inner #$id newton: exiting with gnorm=$(round(gnorm; sigdigits=4)) > 1e4 (unconverged), returning penalty"
+                _inner_failed[] = true
+            end
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
             return _cached_θ_opt
@@ -390,6 +395,12 @@ with_logging() do
         function outer_optimize(π₀, label)
             _prev_π = copy(π₀)
             function outer_f(π)
+                # Fast pre-screen: return penalty instantly for obviously infeasible π.
+                # At |η_dist| > 5 (one σ distance), exp(η₁ + 5) dominates and Float32 CCP
+                # underflow is inevitable. Each avoided scatter saves ~10s of MPI time.
+                if abs(π[end]) > 5.0f0 || abs(π[end-1]) > 10.0f0
+                    return 1.0f10
+                end
                 Δπ = π .- _prev_π
                 step_lines = join(
                     [
@@ -406,7 +417,7 @@ with_logging() do
                 _prev_π .= π
                 θ_opt = concentrated_θ!(π)
                 if _inner_failed[]
-                    @warn "$label outer_f: inner Newton aborted after consecutive non-descent steps, returning penalty to force backtrack"
+                    @warn "$label outer_f: inner Newton failed (non-descent abort or unconverged), returning penalty to force backtrack"
                     return 1.0f10
                 end
                 ll = mpi_scatter(LikelihoodRequest, zips, θ_opt)
