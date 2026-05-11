@@ -256,6 +256,7 @@ with_logging() do
         _cached_θ_opt = copy(θ)
         _inner_iter = Ref(0)
         _last_ll = Ref(NaN32)
+        _inner_failed = Ref(false)
 
         ls = HagerZhang()
 
@@ -278,6 +279,7 @@ with_logging() do
             if π == _cached_π
                 return _cached_θ_opt
             end
+            _inner_failed[] = false
             _inner_iter[] += 1
             @info "Starting inner optimization #$(_inner_iter[])"
             id = _inner_iter[]
@@ -301,6 +303,7 @@ with_logging() do
 
             newton_iter = 0
             stuck_iters = 0  # consecutive iterations with α < 1e-5 (Float32 underflow trap)
+            nan_dϕ0_iters = 0  # consecutive iterations where dϕ0 was NaN/non-negative
             while true
                 newton_iter += 1
                 if newton_iter > 30
@@ -349,9 +352,17 @@ with_logging() do
                 # propagate to Optim and kill the outer loop.  Degenerate CCPs (NaN/Inf from
                 # Float32 overflow) can produce a Newton step that is not a descent direction.
                 if !(dϕ0 < 0)
-                    @warn "  inner #$id newton iter $newton_iter: dϕ0=$(round(dϕ0; sigdigits=4)) not negative, falling back to gradient step"
+                    nan_dϕ0_iters += 1
+                    @warn "  inner #$id newton iter $newton_iter: dϕ0=$(round(dϕ0; sigdigits=4)) not negative, falling back to gradient step ($nan_dϕ0_iters consecutive)"
+                    if nan_dϕ0_iters >= 3
+                        @warn "  inner #$id newton iter $newton_iter: $nan_dϕ0_iters consecutive non-descent steps, aborting — outer_f will return penalty"
+                        _inner_failed[] = true
+                        break
+                    end
                     d = -g ./ max(gnorm, 1.0f-8)
                     dϕ0 = -gnorm
+                else
+                    nan_dϕ0_iters = 0
                 end
                 @info "  inner #$id newton iter $newton_iter: gnorm=$(round(gnorm; sigdigits=4)) dϕ0=$(round(dϕ0; sigdigits=4)) combined_time=$(round(t_combined; sigdigits=3))s"
                 function ϕ(α)
@@ -394,6 +405,10 @@ with_logging() do
                     step_lines
                 _prev_π .= π
                 θ_opt = concentrated_θ!(π)
+                if _inner_failed[]
+                    @warn "$label outer_f: inner Newton aborted after consecutive non-descent steps, returning penalty to force backtrack"
+                    return 1.0f10
+                end
                 ll = mpi_scatter(LikelihoodRequest, zips, θ_opt)
                 if isapprox(ll, 0)
                     # Inner Newton exited due to deep Float32 underflow: return a large penalty so
