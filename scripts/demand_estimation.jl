@@ -481,7 +481,12 @@ with_logging() do
                     store_trace = true,
                     show_trace = false,
                     iterations = 500,
-                    g_tol = 1.0f-3,
+                    g_abstol = 1.0f-3,
+                    x_abstol = NaN,
+                    x_reltol = NaN,
+                    f_abstol = NaN,
+                    f_reltol = NaN,
+                    allow_f_increases = true,
                     callback = state -> begin
                         π_cur = _cached_θ_opt[i_nonδ]
                         g = state.g_x
