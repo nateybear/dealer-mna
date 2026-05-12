@@ -306,6 +306,8 @@ with_logging() do
 
             newton_iter = 0
             stuck_iters = 0  # consecutive iterations with α < 1e-5 (Float32 underflow trap)
+            trying_to_unstick = false # if we are trying to get out of a hole, keep taking gradient steps
+            unstuck_iters = 0
             nan_dϕ0_iters = 0  # consecutive iterations where dϕ0 was NaN/non-negative
             gnorm = Inf32
             while true
@@ -346,9 +348,10 @@ with_logging() do
                 # (from saturated Float32 CCPs) and δ+α*d==δ in Float32 arithmetic.
                 # Switch to a normalised gradient step, which has unit magnitude and a
                 # valid descent slope, so the line search can make actual progress.
-                if stuck_iters >= 3
+                if stuck_iters >= 3 || (trying_to_unstick && unstuck_iters <= 1)
                     @info "  inner #$id newton iter $newton_iter: stuck for $stuck_iters iters, switching to gradient step"
                     d = -g ./ max(gnorm, 1.0f-8)  # unit-magnitude descent direction for -ℓ
+                    trying_to_unstick = true
                     stuck_iters = 0
                 end
                 dϕ0 = dot(g, d)  # ∇(-ℓ)·d ≤ 0 (valid descent direction)
@@ -384,7 +387,21 @@ with_logging() do
                 ϕdϕ(α) = (ϕ(α), dϕ(α))
                 alpha, phi_alpha = ls(ϕ, dϕ, ϕdϕ, 1.0f0, ϕ0, dϕ0)
                 @info "  inner #$id newton iter $newton_iter: -logL=$(round(phi_alpha; sigdigits=6)) α=$(round(alpha; sigdigits=4))"
-                stuck_iters = alpha < 1.0f-5 ? stuck_iters + 1 : 0
+                is_stuck = alpha < 1.0f-5
+                if is_stuck
+                    stuck_iters += 1
+                    unstuck_iters = 0
+                else
+                    stuck_iters = 0
+                    if trying_to_unstick
+                        unstuck_iters += 1
+                        if unstuck_iters > 1
+                            # we have unstuck now
+                            trying_to_unstick = false
+                            unstuck_iters = 0
+                        end
+                    end
+                end
                 δ_cur .+= alpha * d
             end
             if gnorm > 1.0f4 && !_inner_failed[]
@@ -403,8 +420,8 @@ with_logging() do
                 # Fast pre-screen: return penalty instantly for obviously infeasible π.
                 # At |η_dist| > 5 (one σ distance), exp(η₁ + 5) dominates and Float32 CCP
                 # underflow is inevitable. Each avoided scatter saves ~10s of MPI time.
-                if abs(π[end]) > 5.0f0 || abs(π[end-1]) > 10.0f0 ||
-                   maximum(abs, @view π[1:end-2]) > 15.0f0
+                if abs(π[end]) > 5.0f0 || abs(π[end - 1]) > 10.0f0 ||
+                    maximum(abs, @view π[1:(end - 2)]) > 15.0f0
                     return 1.0f10
                 end
                 Δπ = π .- _prev_π
