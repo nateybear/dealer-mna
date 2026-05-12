@@ -343,6 +343,18 @@ with_logging() do
                     @info "  inner #$id newton: converged in $newton_iter iters (gnorm=$gnorm)"
                     break
                 end
+                # First-iteration gnorm check: if the warm-started δ is far from δ*(π_new),
+                # the inner Newton will be stuck (astronomical Woodbury steps, α→1e-19).
+                # Bail immediately after one MPI round (~10s) rather than burning 30×10s.
+                # Threshold 1e3: requires the warm-started δ to already be quite close to
+                # δ*(π_new), enforcing local outer steps. Skipped for id==1 (cold start from
+                # initial δ=-10, which legitimately has large iter-1 gnorm ~10,600).
+                if newton_iter == 1 && id > 1 && gnorm > 1.0f3
+                    @warn "  inner #$id: gnorm=$(round(gnorm; sigdigits=4)) at first iter >> 1e3, outer step too large — returning penalty"
+                    (@pull delta θ_tmp model) .= δ_at_inner_start
+                    _inner_failed[] = true
+                    break
+                end
                 # Stuck detection: if the line search has returned α < 1e-5 for several
                 # consecutive iterations, the Newton direction d has enormous magnitude
                 # (from saturated Float32 CCPs) and δ+α*d==δ in Float32 arithmetic.
