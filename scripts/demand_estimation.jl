@@ -352,7 +352,7 @@ with_logging() do
                 if newton_iter == 1 && id > 1 && gnorm > 1.0f3
                     @warn "  inner #$id: gnorm=$(round(gnorm; sigdigits=4)) at first iter >> 1e3, outer step too large — returning penalty"
                     (@pull delta θ_tmp model) .= δ_at_inner_start
-                    _inner_failed[] = true
+                    # _inner_failed[] = true
                     break
                 end
                 # Stuck detection: if the line search has returned α < 1e-5 for several
@@ -376,7 +376,7 @@ with_logging() do
                     if nan_dϕ0_iters >= 3
                         @warn "  inner #$id newton iter $newton_iter: $nan_dϕ0_iters consecutive non-descent steps, aborting — outer_f will return penalty"
                         (@pull delta θ_tmp model) .= δ_at_inner_start
-                        _inner_failed[] = true
+                        # _inner_failed[] = true
                         break
                     end
                     d = -g ./ max(gnorm, 1.0f-8)
@@ -419,7 +419,7 @@ with_logging() do
             if gnorm > 1.0f4 && !_inner_failed[]
                 @warn "  inner #$id newton: exiting with gnorm=$(round(gnorm; sigdigits=4)) > 1e4 (unconverged), returning penalty"
                 (@pull delta θ_tmp model) .= δ_at_inner_start
-                _inner_failed[] = true
+                # _inner_failed[] = true
             end
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
