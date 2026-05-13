@@ -478,7 +478,7 @@ with_logging() do
                 π₀,
                 LBFGS(
                     alphaguess = InitialStatic(alpha = 1e-4),
-                    linesearch = BackTracking(order = 1, c_1 = 1e-4, ρ_lo = 0.1, ρ_hi = 0.5),
+                    linesearch = BackTracking(order = 2, c_1 = 1e-4, ρ_lo = 0.1, ρ_hi = 0.5),
                 ),
                 Optim.Options(
                     store_trace = true,
