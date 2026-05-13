@@ -477,7 +477,7 @@ with_logging() do
                 OnceDifferentiable(outer_f, outer_g!, π₀),
                 π₀,
                 LBFGS(
-                    alphaguess = InitialStatic(1e-4),
+                    alphaguess = InitialStatic(alpha = 1e-4),
                     linesearch = BackTracking(order = 1, c_1 = 1e-4, ρ_lo = 0.1, ρ_hi = 0.5),
                 ),
                 Optim.Options(
