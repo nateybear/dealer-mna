@@ -4,7 +4,7 @@ using StatsBase: cov
 using LinearAlgebra
 using Optim
 import Random: seed!
-import LineSearches: HagerZhang, InitialHagerZhang
+import LineSearches: BackTracking, InitialStatic, HagerZhang
 
 seed!(78704)
 
@@ -476,7 +476,10 @@ with_logging() do
             return optimize(
                 OnceDifferentiable(outer_f, outer_g!, π₀),
                 π₀,
-                LBFGS(alphaguess = InitialHagerZhang()),
+                LBFGS(
+                    alphaguess = InitialStatic(1e-4),
+                    linesearch = BackTracking(order = 1, c_1 = 1e-4, ρ_lo = 0.1, ρ_hi = 0.5),
+                ),
                 Optim.Options(
                     store_trace = true,
                     show_trace = false,
