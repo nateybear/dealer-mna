@@ -30,7 +30,7 @@ using Distributed
         M = Matrix(dealer_demographics[!, DEMOS])
         M .-= mean(M, dims = 1)
         M *= sqrt(inv(cov(M)))
-        dealer_demographics[!, DEMOS] .= M
+        dealer_demographics[!, DEMOS] .= M # demos now approx a multivariate standard normal
         return nothing
     end
 
@@ -70,6 +70,7 @@ using Distributed
         min_child_weight = 15,
         lambda = 10.0,
         max_bin = 32,
+        seed = 85704,
     )
 
     # calculate the log likelihood, concentrating out rho tilde
@@ -158,7 +159,7 @@ using Distributed
             end
             α -= a_opt * newton_step
         end
-        @warn "Uncoverged after 10 steps"
+        @warn "Uncoverged after $max_iter steps"
         return α
     end
 end
@@ -244,7 +245,10 @@ function (@main)(_)
             return softmax([ll_complier, ll_noncomplier])[1]
         end
 
-        if norm(E_step.p_compliant .- compliance.p_compliant) < 1e-4
+        step_change = norm(E_step.p_compliant - compliance.p_compliant)
+        @info "Change: $(round(step_change, digits = 6))"
+
+        if step_change < 1e-4
             @info "Wooohoo! We converged at step $i"
             Arrow.write("data/compliance.arrow", E_step)
             JLD2.write_object("data/compliance_fits.jld2", M_step)
