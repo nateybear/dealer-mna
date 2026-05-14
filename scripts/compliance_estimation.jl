@@ -36,14 +36,14 @@ using Distributed
         return nothing
     end
 
-    @memoize function X_matrix(compliers, dealer_demographics)
+    @memoize function X_matrix(compliers, dealer_demographics, compliance)
         X = mapreduce(vcat, eachrow(compliers)) do c
             others_D = Matrix(dealer_demographics[collect(c.closest_others), DEMOS])
             my_D = Vector(pluck(dealer_demographics, :uid => ByRow(==(c.dealer_uid)))[DEMOS])
             others_comply = map(c.closest_others) do i
                 try
                     pluck(
-                        cars,
+                        compliance,
                         :dealer_uid => ByRow(==(dealer_demographics.uid[i])),
                         :t => ByRow(==(c.t)),
                     ).is_compliant
@@ -76,7 +76,7 @@ using Distributed
 
     # calculate the log likelihood, concentrating out rho tilde
     function loglikelihood(α, params)
-        (; cars, dealer_demographics) = params
+        (; cars, dealer_demographics, compliance) = params
         α_intercept, α_demos... = α
         base_probs = DataFrame(
             dealer_uid = dealer_demographics.uid,
@@ -86,7 +86,7 @@ using Distributed
         cars = leftjoin(cars, base_probs, on = :dealer_uid)
         compliers = subset(cars, :is_compliant)
         ρ = @. FD.value((compliers.is_sold - compliers.p_base) / (1 - compliers.p_base))
-        X = X_matrix(compliers, dealer_demographics)
+        X = X_matrix(compliers, dealer_demographics, compliance)
         ρ_hat = with_logger(NullLogger()) do
             XGBoost.predict(xgboost((X, ρ); xgboost_params...), X)
         end
@@ -108,10 +108,10 @@ using Distributed
     α_0 = zeros(length(DEMOS) + 1)
     ls = BackTracking()
 
-    function custom_bhhh(cars, dealer_demographics; max_iter = 20)
+    function custom_bhhh(cars, dealer_demographics, compliance; max_iter = 20)
         (; model, model_year, extra) = cars[1, :]
         tag = "$model_year $model $extra"
-        F_i = Base.Fix2((-) ∘ loglikelihood, (; cars, dealer_demographics))
+        F_i = Base.Fix2((-) ∘ loglikelihood, (; cars, dealer_demographics, compliance))
         F = sum ∘ F_i
         G_i = let gcache = FD.JacobianConfig(F_i, α_0)
             @$ FD.jacobian(F_i, _, gcache)
@@ -148,6 +148,8 @@ using Distributed
                         if e isa XGBoost.XGBoostError
                             @warn "[$tag] XGBoost error at $(a_init)"
                             a_init /= 2
+                        else
+                            rethrow(e)
                         end
                     end
                 end
@@ -184,7 +186,7 @@ function (@main)(_)
         M_step =
             let mapped = pmap(collect(gdf)) do cars
                     cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
-                    coefs = custom_bhhh(cars, copy(dealer_demographics))
+                    coefs = custom_bhhh(cars, dealer_demographics, compliance)
                     α_intercept, α_demos... = coefs
                     base_probs = DataFrame(
                         dealer_uid = dealer_demographics.uid,
@@ -194,24 +196,25 @@ function (@main)(_)
                     cars = leftjoin(cars, base_probs, on = :dealer_uid)
                     compliers = subset(cars, :is_compliant)
                     ρ = @. FD.value((compliers.is_sold - compliers.p_base) / (1 - compliers.p_base))
-                    X = X_matrix(compliers, dealer_demographics)
+                    X = X_matrix(compliers, dealer_demographics, compliance)
                     booster = with_logger(NullLogger()) do
                         xgboost((X, ρ); xgboost_params...)
                     end
                     (; model, model_year, extra) = cars[1, :]
-                    return DataFrame(; model, model_year, extra, coefs, booster)
+                    return (model, model_year, extra) =>
+                        (Tuple(coefs), XGBoost.serialize(booster))
                 end
-                reduce(
-                    vcat,
+                mapreduce(
+                    Dict,
+                    merge,
                     mapped,
-                    init = DataFrame(
-                        model = String[],
-                        model_year = Int64[],
-                        extra = String[],
-                        coefs = Vector{Float64}[],
-                        booster = XGBoost.Booster[],
-                    ),
+                    init = Dict{
+                        Tuple{String, Int64, String},
+                        Tuple{NTuple{7, Float64}, Vector{UInt8}},
+                    }(),
                 )
             end
+
+        compliance_new = copy(compliance)
     end
 end
