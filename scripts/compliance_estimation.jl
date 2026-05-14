@@ -130,7 +130,7 @@ using Distributed
                 @info "[$tag] Gradient convergence achieved, exiting"
                 return α
             end
-            if i % 1 == 0
+            if i % 10 == 0
                 @info "[$tag] Progress $i" F(α) norm(g)
             end
 
@@ -186,7 +186,7 @@ function (@main)(_)
         M_step =
             let mapped = pmap(collect(gdf)) do cars
                     cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
-                    coefs = custom_bhhh(cars, dealer_demographics, compliance)
+                    coefs = custom_bhhh(cars, dealer_demographics, compliance, max_iter = 20)
                     α_intercept, α_demos... = coefs
                     base_probs = DataFrame(
                         dealer_uid = dealer_demographics.uid,
