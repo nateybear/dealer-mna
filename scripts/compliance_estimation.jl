@@ -10,9 +10,7 @@ using Distributed
     using LoggingExtras
     using LineSearches
     using LinearAlgebra
-    using Memoize
-    import Folds
-    using FoldsThreads
+    using LogExpFunctions
 
     Φ = cdf$(Normal())
 
@@ -177,12 +175,16 @@ function (@main)(_)
     select!(panel, :dealer_uid, :t, :model, :model_year, :extra, :is_sold)
 
     compliance = selectunique(panel, [:dealer_uid, :t])
-    compliance.is_compliant = rand(nrow(compliance)) .> 0.5
+    compliance.p_compliant = rand(nrow(compliance))
 
     gdf = groupby(panel, [:model, :model_year, :extra])
 
+    M_step = Dict()
+    E_step = empty!(copy(compliance))
+
     for i in 1:100
         @info "Starting round $i"
+        compliance.is_compliant = compliance.p_compliant .> 0.5
         M_step =
             let mapped = pmap(collect(gdf)) do cars
                     cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
@@ -215,6 +217,41 @@ function (@main)(_)
                 )
             end
 
-        compliance_new = copy(compliance)
+        E_step = copy(compliance)
+        E_step.p_compliant = pmap(eachrow(E_step)) do r
+            cars = subset(panel, :dealer_uid => ByRow(==(r.dealer_uid)), :t => ByRow(==(r.t)))
+            demos = pluck(dealer_demographics, :uid => ByRow(==(r.dealer_uid)))
+            cars.p_base = map(eachrow(cars)) do (; model, model_year, extra)
+                α_intercept, α_demo... = M_step[(model, model_year, extra)][1]
+                Φ(α_intercept + dot(α_demo, demos[DEMOS]))
+            end
+            X = X_matrix(hcat(cars[[1], :], DataFrame(demos)), dealer_demographics, compliance)
+            cars.ρ_tilde = map(eachrow(cars)) do (; model, model_year, extra)
+                booster = XGBoost.Booster(X)
+                XGBoost.deserialize!(booster, M_step[(model, model_year, extra)][2])
+                clamp(only(XGBoost.predict(booster, X)), 1e-12, 1 - 1e-12)
+            end
+            ll_complier = let (; is_sold, p_base, ρ_tilde) = cars
+                sum(
+                    @. is_sold * log(p_base + (1 - p_base) * ρ_tilde) +
+                        (1 - is_sold) * log((1 - p_base) * (1 - ρ_tilde))
+                )
+            end
+
+            ll_noncomplier = let (; is_sold, p_base) = cars
+                sum(@. is_sold * log(p_base) + (1 - is_sold) * log(1 - p_base))
+            end
+            return softmax([ll_complier, ll_noncomplier])[1]
+        end
+
+        if norm(E_step.p_compliant .- compliance.p_compliant) < 1e-4
+            @info "Wooohoo! We converged at step $i"
+            Arrow.write("data/compliance.arrow", E_step)
+            JLD2.write_object("data/compliance_fits.jld2", M_step)
+            break
+        end
+        compliance.p_compliant .= E_step.p_compliant
     end
+    @error "Boohoo, no convergence after 100 steps"
+    return nothing
 end
