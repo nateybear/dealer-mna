@@ -339,7 +339,7 @@ with_logging() do
                     @info "  inner #$id newton iter $newton_iter: escaped underflow with δ shift +500, retrying Newton"
                     continue
                 end
-                if gnorm ≤ 1.0f-3
+                if gnorm ≤ 1.0f-2
                     @info "  inner #$id newton: converged in $newton_iter iters (gnorm=$gnorm)"
                     break
                 end
@@ -477,7 +477,7 @@ with_logging() do
                 OnceDifferentiable(outer_f, outer_g!, π₀),
                 π₀,
                 LBFGS(
-                    alphaguess = InitialStatic(scaled = true, alpha = 1e0),
+                    alphaguess = InitialStatic(scaled = true, alpha = 0.25),
                     linesearch = BackTracking(order = 2),
                 ),
                 Optim.Options(
