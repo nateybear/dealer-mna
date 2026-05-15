@@ -1,10 +1,9 @@
 using DealerMnA
 import .Demand: DemandModel, FixedCoefType, initial_parameters, @indexof, @pull
-using StatsBase: cov
 using LinearAlgebra
 using Optim
 import Random: seed!
-import LineSearches: BackTracking, InitialStatic, HagerZhang
+import LineSearches: BackTracking
 
 seed!(78704)
 
@@ -18,6 +17,13 @@ model = DemandModel{FixedCoefType}(; JLD2.load_object(snakemake.input["model"]).
 # Sorted so parent and child agree on iteration order regardless of Dict hashing.
 const T_BLOCK_ORDER = sort(collect(pairs(Demand.δ_t_blocks(model))), by = first)
 
+# Delta is ORDER[1] so it always occupies 1:N_Δ; non-delta follows contiguously.
+# Pre-computed here so all ranks (workers included) share the same indices without closures.
+const N_Δ = Demand.n_delta(model)
+const N_θ = length(initial_parameters(model))
+const I_NONδ_ALL = (N_Δ + 1):N_θ
+const N_NONδ = N_θ - N_Δ
+
 comm = MPI.COMM_WORLD
 rank = MPI.Comm_rank(comm)
 syze = MPI.Comm_size(comm)
@@ -28,20 +34,10 @@ MPI.Barrier(comm)
 
 struct LikelihoodRequest
     params::Vector{Float32}
-    zs::Vector{String}
-end
-
-struct GradientRequest
-    params::Vector{Float32}
-    zs::Vector{String}
+    zips::Vector{String}
 end
 
 struct StopSignal end
-
-struct CCPsRequest
-    params::Vector{Float32}
-    zips::Vector{String}
-end
 
 struct CombinedRequest
     params::Vector{Float32}
@@ -70,44 +66,11 @@ function mpi_scatter(T, zips, params)
 end
 
 function child_handle(r::LikelihoodRequest)
-    resp = mapreduce(+, r.zs, init = 0.0f0) do z
+    resp = mapreduce(+, r.zips, init = 0.0f0) do z
         Demand.loglikelihood(model, r.params, z)
     end
     MPI.send(resp, 0, 0, comm)
     return nothing
-end
-
-function child_handle(r::GradientRequest)
-    resp = mapreduce(+, r.zs, init = zeros(Float32, length(r.params))) do z
-        Demand.dloglikelihood(model, r.params, z)
-    end
-    MPI.send(resp, 0, 0, comm)
-    return nothing
-end
-
-function child_handle(r::CCPsRequest)
-    all_idxs = Demand.δ_indices(model)
-    Z_local = length(r.zips)
-    S = length(model.u.draws)
-    inv_S = 1.0f0 / Float32(S)
-
-    # Averaged CCPs for each assigned zip: one row per δ group, one column per zip.
-    all_ccps = Matrix{Float32}(undef, length(all_idxs), Z_local)
-    for (zi, z) in enumerate(r.zips)
-        ccp_S = Demand.CCPs(model, r.params, z)  # S × T × J × F
-        @inbounds for (i, idx) in enumerate(all_idxs)
-            s = 0.0f0
-            for si in 1:S
-                s += ccp_S[si, Tuple(idx)...]
-            end
-            all_ccps[i, zi] = s * inv_S
-        end
-    end
-
-    # Send each time-block slice; tag = block index (1-based) so parent can receive in order.
-    for (bi, (_, i_δs)) in enumerate(T_BLOCK_ORDER)
-        MPI.send(all_ccps[i_δs, :], 0, bi, comm)  # N_t × Z_local
-    end
 end
 
 function child_handle(r::CombinedRequest)
@@ -116,13 +79,16 @@ function child_handle(r::CombinedRequest)
     ll_sum = 0.0f0
     grad_sum = zeros(Float32, length(r.params))
     all_ccps = Matrix{Float32}(undef, length(all_idxs), Z_local)
+    bhhh_sum = zeros(Float32, N_NONδ, N_NONδ)
     for (zi, z) in enumerate(r.zips)
         ll_z, grad_z, ccp_vec = Demand.loglikelihood_gradient_and_ccps(model, r.params, z)
         ll_sum += ll_z
         grad_sum .+= grad_z
         all_ccps[:, zi] .= ccp_vec
+        g_π = grad_z[I_NONδ_ALL]
+        BLAS.ger!(1.0f0, g_π, g_π, bhhh_sum)
     end
-    MPI.send((grad_sum, ll_sum), 0, 0, comm)
+    MPI.send((grad_sum, ll_sum, bhhh_sum), 0, 0, comm)
     for (bi, (_, i_δs)) in enumerate(T_BLOCK_ORDER)
         MPI.send(all_ccps[i_δs, :], 0, bi, comm)
     end
@@ -138,81 +104,58 @@ function woodbury_newton_step(
     M_z::Vector{Float32},  # Z: market sizes in the same column order as U
     g_t::Vector{Float32},  # N_t: loglikelihood gradient for this block
 )::Vector{Float32}
-    d = U * M_z                                    # N_t: diagonal of -H_t = D
+    Z = length(M_z)
+    d = U * M_z                                     # N_t: diagonal of -H_t = D
     inv_d = 1.0f0 ./ max.(d, 1.0f-12)
-    v = inv_d .* g_t                               # v = D⁻¹g
-    DinvU = inv_d .* U                             # D⁻¹U, N_t × Z
-    middle = Diagonal(1.0f0 ./ M_z) - U' * DinvU  # M⁻¹ - U'D⁻¹U, Z × Z
+    sqrt_inv_d = sqrt.(inv_d)
+    A = sqrt_inv_d .* U                             # D^{-1/2} U, N_t × Z (no DinvU allocation)
+    v = inv_d .* g_t                                # D⁻¹g
+    middle = zeros(Float32, Z, Z)
+    middle[diagind(middle)] .= 1.0f0 ./ M_z         # start with M⁻¹
+    BLAS.syrk!('U', 'T', -1.0f0, A, 1.0f0, middle) # middle ← M⁻¹ - A'A = M⁻¹ - U'D⁻¹U (2× faster than gemm)
+    rhs = A' * (sqrt_inv_d .* g_t)                  # U'D⁻¹g, Z-vector
     # Degenerate CCPs (extreme utilities after a large outer step) can make middle singular in
     # Float32. Fall back to g_t (gradient ascent); the line search provides the step size, and
     # the Woodbury is retried automatically once δ has moved and CCPs recover.
     try
-        w = Symmetric(middle) \ (U' * v)           # (M⁻¹ - U'D⁻¹U)⁻¹ U'v, Z-vector
-        return v + DinvU * w                        # = (-H_t)⁻¹ g_t via Woodbury
+        w = Symmetric(middle, :U) \ rhs             # (M⁻¹ - U'D⁻¹U)⁻¹ U'D⁻¹g
+        return v .+ sqrt_inv_d .* (A * w)           # D⁻¹g + D⁻¹U w = (-H_t)⁻¹ g_t
     catch e
         e isa SingularException || rethrow(e)
         return g_t
     end
 end
 
-# Scatter a CCPsRequest, collect per-block CCP matrices, and return the block-wise
-# Woodbury Newton ascent direction for all δ parameters.
-# g_δ: loglikelihood gradient for δ (length n_delta), NOT negated.
-# Returns (-∂²ℓ/∂δ²)^{-1} g_δ; negate this to get the descent direction for -ℓ.
-function mpi_newton_delta_direction(
-    params::Vector{Float32},
-    zips::Vector{String},
-    g_δ::Vector{Float32},
-)::Vector{Float32}
-    chunksize = cld(length(zips), syze - 1)
-    zip_chunks = collect(Iterators.partition(zips, chunksize))
-    maxrank = length(zip_chunks)
-    for (i, chunk) in enumerate(zip_chunks)
-        MPI.send(CCPsRequest(params, collect(chunk)), i, 0, comm)
-    end
-    # M_z in the same order as zips (which matches the concatenated chunk columns in U)
-    M_zs = Float32[model.agent_data[z].M for z in zips]
-
-    step = Vector{Float32}(undef, length(g_δ))
-    for (bi, (_, i_δs)) in enumerate(T_BLOCK_ORDER)
-        N_t = length(i_δs)
-        U = Matrix{Float32}(undef, N_t, length(zips))
-        col = 1
-        for i in 1:maxrank
-            ccp_block, _ = MPI.recv(i, bi, comm)  # N_t × Z_child
-            ncols = size(ccp_block, 2)
-            U[:, col:(col + ncols - 1)] .= ccp_block
-            col += ncols
-        end
-        step[i_δs] .= woodbury_newton_step(U, M_zs, g_δ[i_δs])
-    end
-    return step
-end
-
-# Scatter a CombinedRequest; receive (grad, ll) on tag 0 from all workers, then assemble
+# Scatter a CombinedRequest; receive (grad, ll, bhhh) on tag 0 from all workers, then assemble
 # per-block CCP matrices and compute Woodbury Newton step.
-# Returns (-∇ℓ, Newton ascent step for ℓ over δ, -ℓ) — matching mpi_scatter sign convention.
+# M_zs: market sizes indexed by the same zip order as `zips` (pre-computed, constant across calls).
+# Returns (-∇ℓ, Newton ascent step for ℓ over δ, -ℓ, BHHH matrix for non-δ params).
+# BHHH = Σ_z (∂ℓ_z/∂π)(∂ℓ_z/∂π)ᵀ ≈ -E[∂²ℓ/∂π²] — PSD approx of Hessian of -ℓ.
 function mpi_combined_newton_step(
     params::Vector{Float32},
     zips::Vector{String},
-)::Tuple{Vector{Float32}, Vector{Float32}, Float32}
+    M_zs::Vector{Float32},
+)::Tuple{Vector{Float32}, Vector{Float32}, Float32, Matrix{Float32}}
     chunksize = cld(length(zips), syze - 1)
     zip_chunks = collect(Iterators.partition(zips, chunksize))
     maxrank = length(zip_chunks)
     for (i, chunk) in enumerate(zip_chunks)
         MPI.send(CombinedRequest(params, collect(chunk)), i, 0, comm)
     end
-    M_zs = Float32[model.agent_data[z].M for z in zips]
     g_full = zeros(Float32, length(params))  # accumulates +∇ℓ
     ll_sum = 0.0f0                           # accumulates +ℓ
+    bhhh_sum = zeros(Float32, N_NONδ, N_NONδ)
     for i in 1:maxrank
-        (grad_i, ll_i), _ = MPI.recv(i, 0, comm)
+        (grad_i, ll_i, bhhh_i), _ = MPI.recv(i, 0, comm)
         g_full .+= grad_i
         ll_sum += ll_i
+        bhhh_sum .+= bhhh_i
     end
     i_δ_all = @indexof delta params model
     g_δ = g_full[i_δ_all]  # +∇_δ ℓ
-    step = Vector{Float32}(undef, length(g_δ))
+    n_blocks = length(T_BLOCK_ORDER)
+    # Collect all CCP blocks sequentially (MPI receives cannot be parallelized).
+    U_blocks = Vector{Matrix{Float32}}(undef, n_blocks)
     for (bi, (_, i_δs)) in enumerate(T_BLOCK_ORDER)
         N_t = length(i_δs)
         U = Matrix{Float32}(undef, N_t, length(zips))
@@ -223,9 +166,15 @@ function mpi_combined_newton_step(
             U[:, col:(col + ncols - 1)] .= ccp_block
             col += ncols
         end
-        step[i_δs] .= woodbury_newton_step(U, M_zs, g_δ[i_δs])
+        U_blocks[bi] = U
     end
-    return -g_full, step, -ll_sum
+    # Woodbury solve is independent across time blocks — thread for throughput.
+    step = Vector{Float32}(undef, length(g_δ))
+    Threads.@threads for bi in 1:n_blocks
+        _, i_δs = T_BLOCK_ORDER[bi]
+        step[i_δs] .= woodbury_newton_step(U_blocks[bi], M_zs, g_δ[i_δs])
+    end
+    return -g_full, step, -ll_sum, bhhh_sum
 end
 
 stop!() =
@@ -246,6 +195,7 @@ with_logging() do
             end
         @info "Initial parameters set"
         zips = Registrations.zips().zip_code
+        M_zs = Float32[model.agent_data[z].M for z in zips]
         i_δ = @indexof delta θ model
         i_nonδ = setdiff(1:length(θ), i_δ)
 
@@ -256,9 +206,13 @@ with_logging() do
         _cached_θ_opt = copy(θ)
         _inner_iter = Ref(0)
         _last_ll = Ref(NaN32)
-        _inner_failed = Ref(false)
+        # Convergence cache: populated only when the inner Newton converges (gnorm ≤ 1e-2).
+        # Avoids a separate scatter after concentrated_θ!.
+        _cached_conv_ll = Ref(NaN32)
+        _cached_conv_grad = zeros(Float32, length(i_nonδ))
+        _cached_conv_bhhh = 1.0f-4 * Matrix{Float32}(I, length(i_nonδ), length(i_nonδ))
 
-        ls = HagerZhang()
+        ls = BackTracking(order = 2)
 
         # Labels for the non-delta params in vector order (column-major: demographics vary fastest).
         nonδ_labels =
@@ -279,7 +233,7 @@ with_logging() do
             if π == _cached_π
                 return _cached_θ_opt
             end
-            _inner_failed[] = false
+            _cached_conv_ll[] = NaN32  # reset; only set on successful convergence
             _inner_iter[] += 1
             @info "Starting inner optimization #$(_inner_iter[])"
             id = _inner_iter[]
@@ -290,7 +244,7 @@ with_logging() do
             (@pull delta θ_tmp model) .= @pull delta _cached_θ_opt model
             # Guard: if the outer step was too large, the warm-started δ may produce
             # degenerate CCPs (Float32 underflow) that break the Woodbury Newton step.
-            # Fall back to the initial δ when logL is >10x worse than the previous accepted value.
+            # Fall back to the initial δ when logL is >1000x worse than the previous accepted value.
             # Skip when _last_ll[]==0: that means a prior inner call exited via CCP underflow and
             # the reference point is meaningless — any positive ϕ_warm would trigger a spurious reset.
             if !isnan(_last_ll[]) && _last_ll[] > 0
@@ -317,9 +271,9 @@ with_logging() do
                     break
                 end
                 δ_cur = @pull delta θ_tmp model
-                # Combined round: gradient, Newton step, and ϕ0 in one MPI scatter.
+                # Combined round: gradient, Newton step, ϕ0, and BHHH in one MPI scatter.
                 t_combined = @elapsed begin
-                    g_full, d, ϕ0 = mpi_combined_newton_step(θ_tmp, zips)
+                    g_full, d, ϕ0, bhhh = mpi_combined_newton_step(θ_tmp, zips, M_zs)
                 end
                 g = @pull delta g_full model  # -∇_δ ℓ
                 gnorm = norm(g)
@@ -341,6 +295,9 @@ with_logging() do
                 end
                 if gnorm ≤ 1.0f-2
                     @info "  inner #$id newton: converged in $newton_iter iters (gnorm=$gnorm)"
+                    _cached_conv_ll[] = -ϕ0
+                    _cached_conv_grad .= g_full[i_nonδ]
+                    _cached_conv_bhhh .= bhhh .+ 1.0f-4 * I
                     break
                 end
                 # First-iteration gnorm check: if the warm-started δ is far from δ*(π_new),
@@ -352,7 +309,6 @@ with_logging() do
                 if newton_iter == 1 && id > 1 && gnorm > 1.0f5
                     @warn "  inner #$id: gnorm=$(round(gnorm; sigdigits=4)) at first iter >> 1e3, outer step too large — returning penalty"
                     (@pull delta θ_tmp model) .= δ_at_inner_start
-                    # _inner_failed[] = true
                     break
                 end
                 # Stuck detection: if the line search has returned α < 1e-5 for several
@@ -367,16 +323,16 @@ with_logging() do
                     stuck_iters = 0
                 end
                 dϕ0 = dot(g, d)  # ∇(-ℓ)·d ≤ 0 (valid descent direction)
-                # HagerZhang throws on a non-descent direction; guard here so the error doesn't
-                # propagate to Optim and kill the outer loop.  Degenerate CCPs (NaN/Inf from
-                # Float32 overflow) can produce a Newton step that is not a descent direction.
+                # BackTracking's Armijo condition uses dϕ₀ as a slope: with dϕ₀ ≥ 0 the condition
+                # is vacuously satisfied and BackTracking accepts any step regardless of quality.
+                # Guard here before calling ls.  Degenerate CCPs (NaN/Inf from Float32 overflow)
+                # can produce a Newton step that is not a descent direction.
                 if !(dϕ0 < 0)
                     nan_dϕ0_iters += 1
                     @warn "  inner #$id newton iter $newton_iter: dϕ0=$(round(dϕ0; sigdigits=4)) not negative, falling back to gradient step ($nan_dϕ0_iters consecutive)"
                     if nan_dϕ0_iters >= 3
                         @warn "  inner #$id newton iter $newton_iter: $nan_dϕ0_iters consecutive non-descent steps, aborting — outer_f will return penalty"
                         (@pull delta θ_tmp model) .= δ_at_inner_start
-                        # _inner_failed[] = true
                         break
                     end
                     d = -g ./ max(gnorm, 1.0f-8)
@@ -390,14 +346,7 @@ with_logging() do
                     (@pull delta θ_tmp_tmp model) .= δ_cur + α * d
                     return mpi_scatter(LikelihoodRequest, zips, θ_tmp_tmp)
                 end
-                function dϕ(α)
-                    θ_tmp_tmp = copy(θ_tmp)
-                    (@pull delta θ_tmp_tmp model) .= δ_cur + α * d
-                    g_trial = mpi_scatter(GradientRequest, zips, θ_tmp_tmp)
-                    return dot(@pull(delta, g_trial, model), d)
-                end
-                ϕdϕ(α) = (ϕ(α), dϕ(α))
-                alpha, phi_alpha = ls(ϕ, dϕ, ϕdϕ, 1.0f0, ϕ0, dϕ0)
+                alpha, phi_alpha = ls(ϕ, 1.0f0, ϕ0, dϕ0)
                 @info "  inner #$id newton iter $newton_iter: -logL=$(round(phi_alpha; sigdigits=6)) α=$(round(alpha; sigdigits=4))"
                 is_stuck = alpha < 1.0f-5
                 if is_stuck
@@ -416,10 +365,9 @@ with_logging() do
                 end
                 δ_cur .+= alpha * d
             end
-            if gnorm > 1.0f4 && !_inner_failed[]
+            if gnorm > 1.0f4
                 @warn "  inner #$id newton: exiting with gnorm=$(round(gnorm; sigdigits=4)) > 1e4 (unconverged), returning penalty"
                 (@pull delta θ_tmp model) .= δ_at_inner_start
-                # _inner_failed[] = true
             end
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
@@ -450,17 +398,12 @@ with_logging() do
                 @info "\n$label outer_f: step_norm=$(round(Float64(norm(Δπ)); sigdigits=4))\n" *
                     step_lines
                 _prev_π .= π
-                θ_opt = concentrated_θ!(π)
-                if _inner_failed[]
-                    @warn "$label outer_f: inner Newton failed (non-descent abort or unconverged), returning penalty to force backtrack"
-                    return 1.0f10
-                end
-                ll = mpi_scatter(LikelihoodRequest, zips, θ_opt)
-                if isapprox(ll, 0)
-                    # Inner Newton exited due to deep Float32 underflow: return a large penalty so
-                    # the outer HagerZhang line search rejects this point and backtracks.  Do NOT
-                    # update _last_ll[] — the warm-start guard needs the last valid reference logL.
-                    @warn "$label outer_f: inner Newton returned ll=0 (deep underflow), returning penalty to force backtrack"
+                concentrated_θ!(π)
+                ll = _cached_conv_ll[]
+                if isnan(ll) || isapprox(ll, 0)
+                    # Inner Newton exited without converging (gnorm too large, underflow, etc.).
+                    # Do NOT update _last_ll[] — the warm-start guard needs the last valid reference.
+                    @warn "$label outer_f: inner Newton didn't converge (ll=$(ll)), returning penalty to force backtrack"
                     return 1.0f10
                 end
                 _last_ll[] = ll
@@ -468,18 +411,21 @@ with_logging() do
             end
 
             function outer_g!(G, π)
-                θ_opt = concentrated_θ!(π)
-                G .= mpi_scatter(GradientRequest, zips, θ_opt)[i_nonδ]
+                concentrated_θ!(π)  # no-op if same π as outer_f just ran
+                G .= _cached_conv_grad
+                return nothing
+            end
+
+            function outer_h!(H, π)
+                concentrated_θ!(π)  # no-op if same π as outer_f just ran
+                H .= _cached_conv_bhhh
                 return nothing
             end
 
             return optimize(
-                OnceDifferentiable(outer_f, outer_g!, π₀),
+                TwiceDifferentiable(outer_f, outer_g!, outer_h!, π₀),
                 π₀,
-                LBFGS(
-                    alphaguess = InitialStatic(scaled = true, alpha = 0.25),
-                    linesearch = BackTracking(order = 2),
-                ),
+                NewtonTrustRegion(initial_delta = 0.5, delta_hat = 5.0),
                 Optim.Options(
                     store_trace = true,
                     show_trace = false,
@@ -492,7 +438,7 @@ with_logging() do
                     allow_f_increases = true,
                     callback = state -> begin
                         π_cur = _cached_θ_opt[i_nonδ]
-                        g = state.g_x
+                        g = _cached_conv_grad
                         param_lines = join(
                             [
                                 "  " *
@@ -503,8 +449,8 @@ with_logging() do
                             ],
                             "\n",
                         )
-                        @info "\n$label iter $(state.pseudo_iteration): " *
-                            "total=$(round(state.f_x; sigdigits=6)) " *
+                        @info "\n$label iter $(state.iteration): " *
+                            "total=$(round(state.value; sigdigits=6)) " *
                             "-logL=$(round(_last_ll[]; sigdigits=6)) " *
                             "gnorm=$(round(norm(g); sigdigits=4)) " *
                             "inner_iters=$(_inner_iter[])\n" *
