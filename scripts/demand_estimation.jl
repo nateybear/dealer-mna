@@ -3,7 +3,7 @@ import .Demand: DemandModel, FixedCoefType, initial_parameters, @indexof, @pull
 using LinearAlgebra
 using Optim
 import Random: seed!
-import LineSearches: BackTracking
+import LineSearches: HagerZhang
 
 seed!(78704)
 
@@ -33,6 +33,11 @@ LinearAlgebra.BLAS.set_num_threads(rank == 0 ? 2 : 1)
 MPI.Barrier(comm)
 
 struct LikelihoodRequest
+    params::Vector{Float32}
+    zips::Vector{String}
+end
+
+struct GradientRequest
     params::Vector{Float32}
     zips::Vector{String}
 end
@@ -70,6 +75,16 @@ function child_handle(r::LikelihoodRequest)
         Demand.loglikelihood(model, r.params, z)
     end
     MPI.send(resp, 0, 0, comm)
+    return nothing
+end
+
+function child_handle(r::GradientRequest)
+    grad_sum = zeros(Float32, length(r.params))
+    for z in r.zips
+        _, grad_z, _ = Demand.loglikelihood_gradient_and_ccps(model, r.params, z)
+        grad_sum .+= grad_z
+    end
+    MPI.send(grad_sum, 0, 0, comm)
     return nothing
 end
 
@@ -212,7 +227,7 @@ with_logging() do
         _cached_conv_grad = zeros(Float32, length(i_nonδ))
         _cached_conv_bhhh = 1.0f-4 * Matrix{Float32}(I, length(i_nonδ), length(i_nonδ))
 
-        ls = BackTracking(order = 2)
+        ls = HagerZhang()
 
         # Labels for the non-delta params in vector order (column-major: demographics vary fastest).
         nonδ_labels =
@@ -323,10 +338,9 @@ with_logging() do
                     stuck_iters = 0
                 end
                 dϕ0 = dot(g, d)  # ∇(-ℓ)·d ≤ 0 (valid descent direction)
-                # BackTracking's Armijo condition uses dϕ₀ as a slope: with dϕ₀ ≥ 0 the condition
-                # is vacuously satisfied and BackTracking accepts any step regardless of quality.
-                # Guard here before calling ls.  Degenerate CCPs (NaN/Inf from Float32 overflow)
-                # can produce a Newton step that is not a descent direction.
+                # HagerZhang throws on a non-descent direction; guard here so the error doesn't
+                # propagate to Optim and kill the outer loop.  Degenerate CCPs (NaN/Inf from
+                # Float32 overflow) can produce a Newton step that is not a descent direction.
                 if !(dϕ0 < 0)
                     nan_dϕ0_iters += 1
                     @warn "  inner #$id newton iter $newton_iter: dϕ0=$(round(dϕ0; sigdigits=4)) not negative, falling back to gradient step ($nan_dϕ0_iters consecutive)"
@@ -346,7 +360,14 @@ with_logging() do
                     (@pull delta θ_tmp_tmp model) .= δ_cur + α * d
                     return mpi_scatter(LikelihoodRequest, zips, θ_tmp_tmp)
                 end
-                alpha, phi_alpha = ls(ϕ, 1.0f0, ϕ0, dϕ0)
+                function dϕ(α)
+                    θ_tmp_tmp = copy(θ_tmp)
+                    (@pull delta θ_tmp_tmp model) .= δ_cur + α * d
+                    g_trial = mpi_scatter(GradientRequest, zips, θ_tmp_tmp)
+                    return dot(@pull(delta, g_trial, model), d)
+                end
+                ϕdϕ(α) = (ϕ(α), dϕ(α))
+                alpha, phi_alpha = ls(ϕ, dϕ, ϕdϕ, 1.0f0, ϕ0, dϕ0)
                 @info "  inner #$id newton iter $newton_iter: -logL=$(round(phi_alpha; sigdigits=6)) α=$(round(alpha; sigdigits=4))"
                 is_stuck = alpha < 1.0f-5
                 if is_stuck
