@@ -3,7 +3,7 @@ import .Demand: DemandModel, FixedCoefType, initial_parameters, @indexof, @pull
 using LinearAlgebra
 using Optim
 import Random: seed!
-import LineSearches: HagerZhang
+import LineSearches: HagerZhang, InitialStatic
 
 seed!(78704)
 
@@ -312,7 +312,7 @@ with_logging() do
                     @info "  inner #$id newton: converged in $newton_iter iters (gnorm=$gnorm)"
                     _cached_conv_ll[] = -ϕ0
                     _cached_conv_grad .= g_full[i_nonδ]
-                    _cached_conv_bhhh .= bhhh .+ 1.0f-4 * I
+                    _cached_conv_bhhh .= bhhh .+ Matrix(1.0f-4I, size(bhhh))
                     break
                 end
                 # First-iteration gnorm check: if the warm-started δ is far from δ*(π_new),
@@ -446,7 +446,7 @@ with_logging() do
             return optimize(
                 TwiceDifferentiable(outer_f, outer_g!, outer_h!, π₀),
                 π₀,
-                NewtonTrustRegion(initial_delta = 0.5, delta_hat = 5.0),
+                Newton(alphaguess = InitialStatic(scaled = true, alpha = 1.0e1)),
                 Optim.Options(
                     store_trace = true,
                     show_trace = false,
@@ -470,8 +470,8 @@ with_logging() do
                             ],
                             "\n",
                         )
-                        @info "\n$label iter $(state.iteration): " *
-                            "total=$(round(state.value; sigdigits=6)) " *
+                        @info "\n$label" *
+                            "total=$(round(state.f_x; sigdigits=6)) " *
                             "-logL=$(round(_last_ll[]; sigdigits=6)) " *
                             "gnorm=$(round(norm(g); sigdigits=4)) " *
                             "inner_iters=$(_inner_iter[])\n" *
