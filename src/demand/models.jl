@@ -247,24 +247,24 @@ function initial_parameters(model)
     # η₁=-4 → baseline cost exp(-4)≈0.018 at d=0 (unchanged by standardization).
     # η₂: old 0.01/mile × σ_dist ≈ 1.0 per std-dev (σ_dist ≈ 100 miles).
     # After standardization |∂ℓ/∂η₂| / |∂ℓ/∂η₁| ≈ mean(dist') = O(1).
-    out[@indexof dist_params out model] .= Float32[-4.0f0, 1.0f0]
+    out[@indexof dist_params out model] .= Float32[-3.0f0, 2.0f0]
 
     # β in ξ̂ = δ_res - β×p_res where p_res is residualized price in DOLLARS.
     # With residualized price std ≈ $5000, β=-1e-4 → ≈0.5 utility units.
     # Previous β=-0.1 → 500 utility units per $5K variation, far too large.
-    # out[@indexof mean_price_params out model] .= -1.0f-4
+    # out[@indexof mean_price_params out model] .= -1.0f-3
 
     # demo_product_params (Πᵦ, 4×4): demographics vary fastest, products slowest
     # (ORDER = [coupe, suv, pickup, sedan] × [income, urban, black, hispanic]).
     # Observed gradients at Πᵦ=0 are all negative, so we start positive.
     # Pickup has the largest effect, suv medium, sedan small, coupe smallest.
     out[@indexof demo_product_params out model] .=
-        repeat(Float32[0.1f0, 0.5f0, 1.0f0, 0.25f0], inner = n_demographics(model))
+        repeat(Float32[1.1f0, 1.5f0, 2.0f0, 1.25f0], inner = n_demographics(model))
 
     # demo_price_params (Πₚ, length 4): demo × price interactions.
     # After standardization, Πₚ[d] × D'_z[d] × p' has natural scale O(1) for all d.
     # Uniform starting value -0.5 for all demographics.
-    out[@indexof demo_price_params out model] .= -0.5f0
+    out[@indexof demo_price_params out model] .= -1.5f0
 
     return out
 end

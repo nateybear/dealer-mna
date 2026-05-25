@@ -312,7 +312,7 @@ with_logging() do
                     @info "  inner #$id newton: converged in $newton_iter iters (gnorm=$gnorm)"
                     _cached_conv_ll[] = -ϕ0
                     _cached_conv_grad .= g_full[i_nonδ]
-                    _cached_conv_bhhh .= bhhh .+ Matrix(1.0f-4I, size(bhhh))
+                    _cached_conv_bhhh .= bhhh .+ Matrix(1.0f-8I, size(bhhh))
                     break
                 end
                 # First-iteration gnorm check: if the warm-started δ is far from δ*(π_new),
@@ -446,7 +446,7 @@ with_logging() do
             return optimize(
                 TwiceDifferentiable(outer_f, outer_g!, outer_h!, π₀),
                 π₀,
-                Newton(alphaguess = InitialStatic(scaled = true, alpha = 1.0e1)),
+                Newton(),
                 Optim.Options(
                     store_trace = true,
                     show_trace = false,
