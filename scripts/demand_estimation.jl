@@ -183,7 +183,7 @@ function mpi_combined_newton_step(
         N_t = length(i_δs)
         U = Matrix{Float32}(undef, N_t, length(zips))
         col = 1
-        for i in 1:maxrank
+        for i in eachindex(chunks)
             ccp_block, _ = MPI.recv(i, bi, comm)
             ncols = size(ccp_block, 2)
             U[:, col:(col + ncols - 1)] .= ccp_block
@@ -277,8 +277,6 @@ with_logging() do
                     (@pull delta θ_tmp model) .= @pull delta θ model
                 end
             end
-            # Snapshot δ after warm-start resolution. Restored into θ_tmp on any failed exit so
-            # that _cached_θ_opt is never left with δ values corrupted by a partial Newton run.
 
             newton_iter = 0
             gnorm = Inf32
