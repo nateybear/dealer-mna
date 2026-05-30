@@ -281,13 +281,8 @@ with_logging() do
             end
             # Snapshot δ after warm-start resolution. Restored into θ_tmp on any failed exit so
             # that _cached_θ_opt is never left with δ values corrupted by a partial Newton run.
-            δ_at_inner_start = copy(@pull delta θ_tmp model)
 
             newton_iter = 0
-            stuck_iters = 0  # consecutive iterations with α < 1e-5 (Float32 underflow trap)
-            trying_to_unstick = false # if we are trying to get out of a hole, keep taking gradient steps
-            unstuck_iters = 0
-            nan_dϕ0_iters = 0  # consecutive iterations where dϕ0 was NaN/non-negative
             gnorm = Inf32
             while true
                 newton_iter += 1
@@ -308,62 +303,19 @@ with_logging() do
                 # rescue moderate underflow.  If the shift doesn't help (e.g. η overflow dominates),
                 # exit immediately — outer_f will return a large penalty to force backtracking.
                 if isapprox(ϕ0, 0)
-                    δ_cur .+= 500.0f0
-                    ϕ0_shifted = mpi_scatter(LikelihoodRequest, zips, θ_tmp)
-                    if isapprox(ϕ0_shifted, 0)
-                        @warn "  inner #$id newton iter $newton_iter: deep underflow (δ shift +500 didn't help), exiting — outer_f will return penalty"
-                        δ_cur .-= 500.0f0  # restore so _cached_θ_opt stays clean
-                        break
-                    end
-                    @info "  inner #$id newton iter $newton_iter: escaped underflow with δ shift +500, retrying Newton"
-                    continue
+                    error(
+                        "  inner #$id newton iter $newton_iter: deep underflow (δ shift +500 didn't help), exiting"
+                    )
                 end
                 if gnorm ≤ 1.0f-2
                     @info "  inner #$id newton: converged in $newton_iter iters (gnorm=$gnorm)"
                     _cached_conv_ll[] = ϕ0
                     _cached_conv_grad .= g_full[i_nonδ]
-                    _cached_conv_bhhh .= bhhh .+ Matrix(1.0f-4I, size(bhhh))
+                    _cached_conv_bhhh .= bhhh .+ Matrix(1.0f-6I, size(bhhh))
+                    (@pull delta π model) .= δ_cur
                     break
-                end
-                # First-iteration gnorm check: if the warm-started δ is far from δ*(π_new),
-                # the inner Newton will be stuck (astronomical Woodbury steps, α→1e-19).
-                # Bail immediately after one MPI round (~10s) rather than burning 30×10s.
-                # Threshold 1e3: requires the warm-started δ to already be quite close to
-                # δ*(π_new), enforcing local outer steps. Skipped for id==1 (cold start from
-                # initial δ=-10, which legitimately has large iter-1 gnorm ~10,600).
-                if newton_iter == 1 && id > 1 && gnorm > 1.0f5
-                    @warn "  inner #$id: gnorm=$(round(gnorm; sigdigits=4)) at first iter >> 1e3, outer step too large — returning penalty"
-                    (@pull delta θ_tmp model) .= δ_at_inner_start
-                    break
-                end
-                # Stuck detection: if the line search has returned α < 1e-5 for several
-                # consecutive iterations, the Newton direction d has enormous magnitude
-                # (from saturated Float32 CCPs) and δ+α*d==δ in Float32 arithmetic.
-                # Switch to a normalised gradient step, which has unit magnitude and a
-                # valid descent slope, so the line search can make actual progress.
-                if stuck_iters >= 3 || (trying_to_unstick && unstuck_iters <= 1)
-                    @info "  inner #$id newton iter $newton_iter: stuck for $stuck_iters iters, switching to gradient step"
-                    d = -g ./ max(gnorm, 1.0f-8)  # unit-magnitude descent direction for -ℓ
-                    trying_to_unstick = true
-                    stuck_iters = 0
                 end
                 dϕ0 = dot(g, d)  # ∇(-ℓ)·d ≤ 0 (valid descent direction)
-                # HagerZhang throws on a non-descent direction; guard here so the error doesn't
-                # propagate to Optim and kill the outer loop.  Degenerate CCPs (NaN/Inf from
-                # Float32 overflow) can produce a Newton step that is not a descent direction.
-                if !(dϕ0 < 0)
-                    nan_dϕ0_iters += 1
-                    @warn "  inner #$id newton iter $newton_iter: dϕ0=$(round(dϕ0; sigdigits=4)) not negative, falling back to gradient step ($nan_dϕ0_iters consecutive)"
-                    if nan_dϕ0_iters >= 3
-                        @warn "  inner #$id newton iter $newton_iter: $nan_dϕ0_iters consecutive non-descent steps, aborting — outer_f will return penalty"
-                        (@pull delta θ_tmp model) .= δ_at_inner_start
-                        break
-                    end
-                    d = -g ./ max(gnorm, 1.0f-8)
-                    dϕ0 = -gnorm
-                else
-                    nan_dϕ0_iters = 0
-                end
                 @info "  inner #$id newton iter $newton_iter: gnorm=$(round(gnorm; sigdigits=4)) dϕ0=$(round(dϕ0; sigdigits=4)) combined_time=$(round(t_combined; sigdigits=3))s"
                 function ϕ(α)
                     θ_tmp_tmp = copy(θ_tmp)
@@ -379,26 +331,7 @@ with_logging() do
                 ϕdϕ(α) = (ϕ(α), dϕ(α))
                 alpha, phi_alpha = ls(ϕ, dϕ, ϕdϕ, 1.0f0, ϕ0, dϕ0)
                 @info "  inner #$id newton iter $newton_iter: -logL=$(round(phi_alpha; sigdigits=6)) α=$(round(alpha; sigdigits=4))"
-                is_stuck = alpha < 1.0f-5
-                if is_stuck
-                    stuck_iters += 1
-                    unstuck_iters = 0
-                else
-                    stuck_iters = 0
-                    if trying_to_unstick
-                        unstuck_iters += 1
-                        if unstuck_iters > 1
-                            # we have unstuck now
-                            trying_to_unstick = false
-                            unstuck_iters = 0
-                        end
-                    end
-                end
                 δ_cur .+= alpha * d
-            end
-            if gnorm > 1.0f4
-                @warn "  inner #$id newton: exiting with gnorm=$(round(gnorm; sigdigits=4)) > 1e4 (unconverged), returning penalty"
-                (@pull delta θ_tmp model) .= δ_at_inner_start
             end
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
@@ -431,12 +364,6 @@ with_logging() do
                 _prev_π .= π
                 concentrated_θ!(π)
                 ll = _cached_conv_ll[]
-                if isnan(ll) || isapprox(ll, 0)
-                    # Inner Newton exited without converging (gnorm too large, underflow, etc.).
-                    # Do NOT update _last_ll[] — the warm-start guard needs the last valid reference.
-                    @warn "$label outer_f: inner Newton didn't converge (ll=$(ll)), returning penalty to force backtrack"
-                    return 1.0f10
-                end
                 _last_ll[] = ll
                 return ll
             end
@@ -472,7 +399,7 @@ with_logging() do
                         π_cur = _cached_θ_opt[i_nonδ]
                         g = _cached_conv_grad
                         bhhh_d = diag(_cached_conv_bhhh)
-			(; delta, interior) = state
+                        (; delta, interior) = state
                         param_lines = join(
                             [
                                 "  " *
