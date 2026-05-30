@@ -484,7 +484,6 @@ with_logging() do
                             "\n",
                         )
                         @info "\n$label" *
-                            "iter=$(state.iteration) " *
                             "NLL=$(round(state.value; sigdigits=6)) " *
                             "gnorm=$(round(norm(g); sigdigits=4)) " *
                             "delta=$(round(Float64(delta); sigdigits=4)) " *
