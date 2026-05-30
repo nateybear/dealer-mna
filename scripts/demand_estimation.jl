@@ -4,6 +4,7 @@ using LinearAlgebra
 using Optim
 import Random: seed!
 import LineSearches: HagerZhang, InitialStatic
+using Memoize
 
 seed!(78704)
 
@@ -50,20 +51,20 @@ struct CombinedRequest
 end
 
 # better than partition, uses all available workers
-function fullychunk(N, w)
+@memoize function fullychunk(N, w)
     if N % w == 0
         chunksize = N ÷ w
         return [(1:chunksize) .+ offset for offset in chunksize .* (0:(w - 1))]
     else
         thischunk = cld(N, w)
-        return vcat([1:thischunk], [thischunk .+ r for r in chunk(N - thischunk, w - 1)])
+        return vcat([1:thischunk], [thischunk .+ r for r in fullychunk(N - thischunk, w - 1)])
     end
 end
 
 function mpi_scatter(T, zips, params)
     chunks = fullychunk(length(zips), syze - 1)
     for (i, chunk) in enumerate(chunks)
-        MPI.send(T(params, chunk), i, 0, comm)
+        MPI.send(T(params, zips[chunk]), i, 0, comm)
     end
     out = T === LikelihoodRequest ? 0.0f0 : zeros(Float32, length(params))
     for i in eachindex(chunks)
@@ -455,7 +456,7 @@ with_logging() do
             return optimize(
                 TwiceDifferentiable(outer_f, outer_g!, outer_h!, π₀),
                 π₀,
-                NewtonTrustRegion(initial_delta = 0.5, delta_hat = 5.0),
+		Newton(),
                 Optim.Options(
                     store_trace = true,
                     show_trace = false,
