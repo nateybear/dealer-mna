@@ -395,7 +395,6 @@ with_logging() do
                         π_cur = _cached_θ_opt[i_nonδ]
                         g = _cached_conv_grad
                         bhhh_d = diag(_cached_conv_bhhh)
-                        (; delta, interior) = state
                         param_lines = join(
                             [
                                 "  " *
@@ -409,8 +408,6 @@ with_logging() do
                         @info "\n$label" *
                             "NLL=$(round(state.f_x; sigdigits=6)) " *
                             "gnorm=$(round(norm(g); sigdigits=4)) " *
-                            "delta=$(round(Float64(delta); sigdigits=4)) " *
-                            "interior=$interior " *
                             "bhhh_diag=[$(round(minimum(bhhh_d); sigdigits=3))," *
                             "$(round(maximum(bhhh_d); sigdigits=3))] " *
                             "inner_iters=$(_inner_iter[])\n" *
