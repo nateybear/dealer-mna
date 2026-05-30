@@ -312,7 +312,6 @@ with_logging() do
                     _cached_conv_ll[] = ϕ0
                     _cached_conv_grad .= g_full[i_nonδ]
                     _cached_conv_bhhh .= bhhh .+ Matrix(1.0f-6I, size(bhhh))
-                    (@pull delta π model) .= δ_cur
                     break
                 end
                 dϕ0 = dot(g, d)  # ∇(-ℓ)·d ≤ 0 (valid descent direction)
@@ -335,6 +334,7 @@ with_logging() do
             end
             _cached_π .= π
             _cached_θ_opt .= θ_tmp
+            θ .= θ_tmp
             return _cached_θ_opt
         end
 
