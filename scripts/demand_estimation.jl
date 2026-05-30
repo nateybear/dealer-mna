@@ -472,8 +472,7 @@ with_logging() do
                         π_cur = _cached_θ_opt[i_nonδ]
                         g = _cached_conv_grad
                         bhhh_d = diag(_cached_conv_bhhh)
-                        delta = get(state.metadata, "delta", NaN)
-                        interior = get(state.metadata, "interior", "?")
+			(; delta, interior) = state
                         param_lines = join(
                             [
                                 "  " *
