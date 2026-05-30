@@ -49,15 +49,24 @@ struct CombinedRequest
     zips::Vector{String}
 end
 
+# better than partition, uses all available workers
+function fullychunk(N, w)
+    if N % w == 0
+        chunksize = N ÷ w
+        return [(1:chunksize) .+ offset for offset in chunksize .* (0:(w - 1))]
+    else
+        thischunk = cld(N, w)
+        return vcat([1:thischunk], [thischunk .+ r for r in chunk(N - thischunk, w - 1)])
+    end
+end
+
 function mpi_scatter(T, zips, params)
-    chunksize = cld(length(zips), syze - 1)
-    maxrank = 0 # might not use all of the ranks in edge cases...
-    for (i, chunk) in enumerate(Iterators.partition(zips, chunksize))
+    chunks = fullychunk(length(zips), syze - 1)
+    for (i, chunk) in enumerate(chunks)
         MPI.send(T(params, chunk), i, 0, comm)
-        maxrank = i
     end
     out = T === LikelihoodRequest ? 0.0f0 : zeros(Float32, length(params))
-    for i in 1:maxrank
+    for i in eachindex(chunks)
         msg, _ = MPI.recv(i, 0, comm)
         if msg isa StopSignal
             @info "Process $i signaled to stop"
