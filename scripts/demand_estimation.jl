@@ -454,11 +454,12 @@ with_logging() do
             end
 
             return optimize(
-                OnceDifferentiable(outer_f, outer_g!, π₀),
+                TwiceDifferentiable(outer_f, outer_g!, outer_h!, π₀),
                 π₀,
-                LBFGS(alphaguess = InitialStatic(scaled = true)),
+                NewtonTrustRegion(initial_delta = 0.5, delta_hat = 5.0),
                 Optim.Options(
                     store_trace = true,
+                    extended_trace = true,
                     show_trace = false,
                     iterations = 500,
                     g_abstol = 1.0f-3,
@@ -470,6 +471,9 @@ with_logging() do
                     callback = state -> begin
                         π_cur = _cached_θ_opt[i_nonδ]
                         g = _cached_conv_grad
+                        bhhh_d = diag(_cached_conv_bhhh)
+                        delta = get(state.metadata, "delta", NaN)
+                        interior = get(state.metadata, "interior", "?")
                         param_lines = join(
                             [
                                 "  " *
@@ -481,9 +485,13 @@ with_logging() do
                             "\n",
                         )
                         @info "\n$label" *
-                            "total=$(round(state.f_x; sigdigits=6)) " *
-                            "-logL=$(round(_last_ll[]; sigdigits=6)) " *
+                            "iter=$(state.iteration) " *
+                            "NLL=$(round(state.value; sigdigits=6)) " *
                             "gnorm=$(round(norm(g); sigdigits=4)) " *
+                            "delta=$(round(Float64(delta); sigdigits=4)) " *
+                            "interior=$interior " *
+                            "bhhh_diag=[$(round(minimum(bhhh_d); sigdigits=3))," *
+                            "$(round(maximum(bhhh_d); sigdigits=3))] " *
                             "inner_iters=$(_inner_iter[])\n" *
                             param_lines
                         return false
