@@ -161,16 +161,14 @@ function mpi_combined_newton_step(
     zips::Vector{String},
     M_zs::Vector{Float32},
 )::Tuple{Vector{Float32}, Vector{Float32}, Float32, Matrix{Float32}}
-    chunksize = cld(length(zips), syze - 1)
-    zip_chunks = collect(Iterators.partition(zips, chunksize))
-    maxrank = length(zip_chunks)
-    for (i, chunk) in enumerate(zip_chunks)
-        MPI.send(CombinedRequest(params, collect(chunk)), i, 0, comm)
+    chunks = fullychunk(length(zips), syze - 1)
+    for (i, chunk) in enumerate(chunks)
+        MPI.send(CombinedRequest(params, zips[chunk]), i, 0, comm)
     end
     g_full = zeros(Float32, length(params))  # accumulates +∇ℓ
     ll_sum = 0.0f0                           # accumulates +ℓ
     bhhh_sum = zeros(Float32, N_NONδ, N_NONδ)
-    for i in 1:maxrank
+    for i in eachindex(chunks)
         (grad_i, ll_i, bhhh_i), _ = MPI.recv(i, 0, comm)
         g_full .+= grad_i
         ll_sum += ll_i
