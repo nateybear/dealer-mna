@@ -454,9 +454,9 @@ with_logging() do
             end
 
             return optimize(
-                TwiceDifferentiable(outer_f, outer_g!, outer_h!, π₀),
+                OnceDifferentiable(outer_f, outer_g!, π₀),
                 π₀,
-		NewtonTrustRegion(),
+                LBFGS(alphaguess = InitialStatic(scaled = true)),
                 Optim.Options(
                     store_trace = true,
                     show_trace = false,
