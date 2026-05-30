@@ -379,11 +379,11 @@ with_logging() do
             return optimize(
                 TwiceDifferentiable(outer_f, outer_g!, outer_h!, π₀),
                 π₀,
-                NewtonTrustRegion(initial_delta = 0.5, delta_hat = 5.0),
+                Newton(),
                 Optim.Options(
                     store_trace = true,
                     extended_trace = true,
-                    show_trace = false,
+                    show_trace = true,
                     iterations = 500,
                     g_abstol = 1.0f-3,
                     x_abstol = NaN,
