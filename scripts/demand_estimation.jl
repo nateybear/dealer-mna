@@ -379,7 +379,7 @@ with_logging() do
             return optimize(
                 TwiceDifferentiable(outer_f, outer_g!, outer_h!, π₀),
                 π₀,
-                Newton(),
+                Newton(alphaguess = InitialStatic(alpha = 0.25))),
                 Optim.Options(
                     store_trace = true,
                     extended_trace = true,
