@@ -379,7 +379,7 @@ with_logging() do
             return optimize(
                 TwiceDifferentiable(outer_f, outer_g!, outer_h!, π₀),
                 π₀,
-                Newton(alphaguess = InitialStatic(alpha = 0.25))),
+                NewtonTrustRegion(),
                 Optim.Options(
                     store_trace = true,
                     extended_trace = true,
@@ -405,7 +405,7 @@ with_logging() do
                             ],
                             "\n",
                         )
-                        @info "\n$label" *
+                        @info "\n$label " *
                             "NLL=$(round(state.f_x; sigdigits=6)) " *
                             "gnorm=$(round(norm(g); sigdigits=4)) " *
                             "bhhh_diag=[$(round(minimum(bhhh_d); sigdigits=3))," *
