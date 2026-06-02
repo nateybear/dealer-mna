@@ -337,7 +337,7 @@ with_logging() do
 
         function outer_optimize(π₀, label)
             _prev_π = copy(π₀)
-            function outer_fgh!(_, G, H, π)
+            function outer_fgh!(F, G, H, π)
                 Δπ = π .- _prev_π
                 step_lines = join(
                     [
@@ -355,9 +355,10 @@ with_logging() do
                 concentrated_θ!(π)
                 ll = _cached_conv_ll[]
                 _last_ll[] = ll
-                G .= _cached_conv_grad
-                H .= _cached_conv_bhhh
-                return ll
+                isnothing(G) || (G .= _cached_conv_grad)
+                isnothing(H) || (H .= _cached_conv_bhhh)
+                isnothing(F) || return ll
+                return nothing
             end
 
             return optimize(
