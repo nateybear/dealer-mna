@@ -4,6 +4,7 @@ using LinearAlgebra
 using Optim
 import Random: seed!
 import LineSearches: HagerZhang, InitialStatic
+import Optim.NLSolversBase: only_fgh!
 using Memoize
 
 seed!(78704)
@@ -336,14 +337,7 @@ with_logging() do
 
         function outer_optimize(π₀, label)
             _prev_π = copy(π₀)
-            function outer_f(π)
-                # Fast pre-screen: return penalty instantly for obviously infeasible π.
-                # At |η_dist| > 5 (one σ distance), exp(η₁ + 5) dominates and Float32 CCP
-                # underflow is inevitable. Each avoided scatter saves ~10s of MPI time.
-                if abs(π[end]) > 5.0f0 || abs(π[end - 1]) > 10.0f0 ||
-                    maximum(abs, @view π[1:(end - 2)]) > 15.0f0
-                    return 1.0f10
-                end
+            function outer_fgh!(_, G, H, π)
                 Δπ = π .- _prev_π
                 step_lines = join(
                     [
@@ -361,30 +355,20 @@ with_logging() do
                 concentrated_θ!(π)
                 ll = _cached_conv_ll[]
                 _last_ll[] = ll
+                G .= _cached_conv_grad
+                H .= _cached_conv_bhhh
                 return ll
             end
 
-            function outer_g!(G, π)
-                concentrated_θ!(π)  # no-op if same π as outer_f just ran
-                G .= _cached_conv_grad
-                return nothing
-            end
-
-            function outer_h!(H, π)
-                concentrated_θ!(π)  # no-op if same π as outer_f just ran
-                H .= _cached_conv_bhhh
-                return nothing
-            end
-
             return optimize(
-                TwiceDifferentiable(outer_f, outer_g!, outer_h!, π₀),
+                only_fgh!(outer_fgh!),
                 π₀,
                 NewtonTrustRegion(),
                 Optim.Options(
                     store_trace = true,
                     extended_trace = true,
                     show_trace = true,
-                    iterations = 500,
+                    iterations = 5000,
                     g_abstol = 1.0f-3,
                     x_abstol = NaN,
                     x_reltol = NaN,
