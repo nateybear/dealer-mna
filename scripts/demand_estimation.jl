@@ -364,7 +364,7 @@ with_logging() do
             return optimize(
                 only_fgh!(outer_fgh!),
                 π₀,
-                NewtonTrustRegion(),
+                NewtonTrustRegion(initial_delta = 10.0, delta_hat = 1000.0),
                 Optim.Options(
                     store_trace = true,
                     extended_trace = true,
