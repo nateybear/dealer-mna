@@ -336,22 +336,7 @@ with_logging() do
         end
 
         function outer_optimize(π₀, label)
-            _prev_π = copy(π₀)
             function outer_fgh!(F, G, H, π)
-                Δπ = π .- _prev_π
-                step_lines = join(
-                    [
-                        "  " *
-                        rpad(nonδ_labels[k], 36) *
-                        "val=$(rpad(string(round(Float64(π[k]); sigdigits=4)), 14))" *
-                        "Δ=$(round(Float64(Δπ[k]); sigdigits=4))" for
-                        k in eachindex(nonδ_labels)
-                    ],
-                    "\n",
-                )
-                @info "\n$label outer_f: step_norm=$(round(Float64(norm(Δπ)); sigdigits=4))\n" *
-                    step_lines
-                _prev_π .= π
                 concentrated_θ!(π)
                 ll = _cached_conv_ll[]
                 _last_ll[] = ll
@@ -364,10 +349,9 @@ with_logging() do
             return optimize(
                 only_fgh!(outer_fgh!),
                 π₀,
-                NewtonTrustRegion(),
+                NewtonTrustRegion(initial_delta = 10.0, delta_hat = 1000.0),
                 Optim.Options(
                     store_trace = true,
-                    extended_trace = true,
                     show_trace = true,
                     iterations = 5000,
                     g_abstol = 1.0f-3,
@@ -376,29 +360,6 @@ with_logging() do
                     f_abstol = NaN,
                     f_reltol = NaN,
                     allow_f_increases = true,
-                    callback = state -> begin
-                        π_cur = _cached_θ_opt[i_nonδ]
-                        g = _cached_conv_grad
-                        bhhh_d = diag(_cached_conv_bhhh)
-                        param_lines = join(
-                            [
-                                "  " *
-                                rpad(nonδ_labels[k], 36) *
-                                "val=$(rpad(string(round(Float64(π_cur[k]); sigdigits=4)), 14))" *
-                                "grad=$(round(Float64(g[k]); sigdigits=4))" for
-                                k in eachindex(nonδ_labels)
-                            ],
-                            "\n",
-                        )
-                        @info "\n$label " *
-                            "NLL=$(round(state.f_x; sigdigits=6)) " *
-                            "gnorm=$(round(norm(g); sigdigits=4)) " *
-                            "bhhh_diag=[$(round(minimum(bhhh_d); sigdigits=3))," *
-                            "$(round(maximum(bhhh_d); sigdigits=3))] " *
-                            "inner_iters=$(_inner_iter[])\n" *
-                            param_lines
-                        return false
-                    end,
                 ),
             )
         end
