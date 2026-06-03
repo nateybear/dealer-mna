@@ -134,5 +134,6 @@ Base.zero(::Type{<:NamedTuple}) = NamedTuple()
 include("loading.jl")
 include("models.jl")
 include("estimation.jl")
+include("dense.jl")
 
 end
