@@ -158,14 +158,7 @@ with_logging() do
                 @info "  inner #$id converged in $newton_iter newton iters (gnorm=$gnorm)"
                 _cached_conv_ll[] = ϕ0
                 _cached_conv_grad .= .-grad_buf[i_nonδ]
-                if tr(bhhh_buf) > 1e5
-                    fill!(_cached_conv_bhhh, 0.0f0)
-                    @inbounds for i in axes(_cached_conv_bhhh, 1)
-                        _cached_conv_bhhh[i, i] = bhhh_buf[i, i] + 1.0f-4
-                    end
-                else
-                    _cached_conv_bhhh .= bhhh_buf
-                end
+                _cached_conv_bhhh .= bhhh_buf
                 break
             end
 
@@ -303,7 +296,7 @@ with_logging() do
         return optimize(
             only_fgh!(outer_fgh!),
             π₀,
-            NewtonTrustRegion(),
+            Newton(alphaguess = InitialStatic(scaled = true)),
             Optim.Options(
                 store_trace = true,
                 extended_trace = true,
