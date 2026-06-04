@@ -296,7 +296,7 @@ with_logging() do
         return optimize(
             only_fg!(outer_fg!),
             π₀,
-            LBFGS(alphaguess = InitialStatic(scaled = true)),
+            LBFGS(P = _cached_conv_bhhh, alphaguess = InitialStatic(scaled = true)),
             Optim.Options(
                 store_trace = true,
                 extended_trace = true,
