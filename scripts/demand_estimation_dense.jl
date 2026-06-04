@@ -158,7 +158,10 @@ with_logging() do
                 @info "  inner #$id converged in $newton_iter newton iters (gnorm=$gnorm)"
                 _cached_conv_ll[] = ϕ0
                 _cached_conv_grad .= .-grad_buf[i_nonδ]
-                _cached_conv_bhhh .= bhhh_buf .+ Matrix(1.0f-6I, size(bhhh_buf))
+                fill!(_cached_conv_bhhh, 0.0f0)
+                @inbounds for i in axes(_cached_conv_bhhh, 1)
+                    _cached_conv_bhhh[i, i] = bhhh_buf[i, i] + 1.0f-4
+                end
                 break
             end
 
@@ -279,6 +282,17 @@ with_logging() do
             return isnothing(F) ? nothing : ll
         end
 
+        _checkpoint_path = snakemake.output[1] * ".checkpoint.jld2"
+        _cb_iter = Ref(0)
+        function checkpoint_cb(state)
+            _cb_iter[] += 1
+            if _cb_iter[] % 25 == 0
+                JLD2.save_object(_checkpoint_path, (minimizer = _cached_θ_opt[i_nonδ], value = state.value))
+                @info "  checkpoint saved at outer_iter=$(_cb_iter[]) NLL=$(round(state.value; sigdigits=6))"
+            end
+            return false
+        end
+
         return optimize(
             only_fgh!(outer_fgh!),
             π₀,
@@ -294,6 +308,7 @@ with_logging() do
                 f_abstol = NaN,
                 f_reltol = NaN,
                 allow_f_increases = true,
+                callback = checkpoint_cb,
             ),
         )
     end
