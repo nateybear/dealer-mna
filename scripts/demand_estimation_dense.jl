@@ -158,7 +158,8 @@ with_logging() do
                 @info "  inner #$id converged in $newton_iter newton iters (gnorm=$gnorm)"
                 _cached_conv_ll[] = ϕ0
                 _cached_conv_grad .= .-grad_buf[i_nonδ]
-                _cached_conv_bhhh .= bhhh_buf
+                lambda = (max(diag(bhhh_buf)) + min(diag(bhhh_buf))) / 2
+                _cached_conv_bhhh .= bhhh_buf + lambda * Matrix(I, size(bhhh_buf))
                 break
             end
 
