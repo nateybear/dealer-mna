@@ -23,7 +23,7 @@ import .Demand.Dense:
 using LinearAlgebra
 using Optim
 import Random: seed!
-import LineSearches: HagerZhang
+import LineSearches: HagerZhang, InitialStatic
 import Optim.NLSolversBase: only_fgh!
 
 seed!(78704)
@@ -282,43 +282,18 @@ with_logging() do
         return optimize(
             only_fgh!(outer_fgh!),
             π₀,
-            NewtonTrustRegion(initial_delta = 0.5, delta_hat = 5.0),
+	    NewtonTrustRegion(),
             Optim.Options(
                 store_trace = true,
                 extended_trace = true,
                 show_trace = true,
-                iterations = 500,
+                iterations = 5000,
                 g_abstol = 1.0f-3,
                 x_abstol = NaN,
                 x_reltol = NaN,
                 f_abstol = NaN,
                 f_reltol = NaN,
                 allow_f_increases = true,
-                callback = state -> begin
-                    π_cur = _cached_θ_opt[i_nonδ]
-                    g = _cached_conv_grad
-                    bhhh_d = diag(_cached_conv_bhhh)
-                    param_lines = join(
-                        [
-                            "  " *
-                            rpad(nonδ_labels[k], 36) *
-                            "val=$(rpad(string(round(Float64(π_cur[k]); sigdigits=4)), 14))" *
-                            "grad=$(round(Float64(g[k]); sigdigits=4))" for
-                            k in eachindex(nonδ_labels)
-                        ],
-                        "\n",
-                    )
-                    delta_str = haskey(state.metadata, "delta") ?
-                        " delta=$(round(state.metadata["delta"]; sigdigits=4))" : ""
-                    @info "\nstep1 iter=$(state.iteration) " *
-                        "NLL=$(round(state.value; sigdigits=6)) " *
-                        "gnorm=$(round(state.g_norm; sigdigits=4))" * delta_str *
-                        " bhhh_diag=[$(round(minimum(bhhh_d); sigdigits=3))," *
-                        "$(round(maximum(bhhh_d); sigdigits=3))] " *
-                        "inner_iters=$(_inner_iter[])\n" *
-                        param_lines
-                    return false
-                end,
             ),
         )
     end
