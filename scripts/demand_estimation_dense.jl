@@ -24,7 +24,7 @@ using LinearAlgebra
 using Optim
 import Random: seed!
 import LineSearches: HagerZhang, InitialStatic
-import Optim.NLSolversBase: only_fgh!
+import Optim.NLSolversBase: only_fgh!, only_fg!
 
 seed!(78704)
 snakemake!()
@@ -63,9 +63,9 @@ with_logging() do
     π₀ = Float32.(θ[i_nonδ])
 
     # Per-call buffers (allocated once, reused)
-    grad_buf  = zeros(Float32, N_θ)
-    bhhh_buf  = zeros(Float32, N_NONδ, N_NONδ)
-    step_buf  = zeros(Float32, N_δ)
+    grad_buf = zeros(Float32, N_θ)
+    bhhh_buf = zeros(Float32, N_NONδ, N_NONδ)
+    step_buf = zeros(Float32, N_δ)
     δ_grad_buf = zeros(Float32, N_δ)
 
     # Outer-iter state
@@ -90,7 +90,7 @@ with_logging() do
 
     # Bounds pre-screen — identical to MPI script. Cheap rejection of obviously bad proposals.
     function bounds_violated(π)
-        η_dist     = π[end]
+        η_dist = π[end]
         η_baseline = π[end - 1]
         return abs(η_dist) > 5 || abs(η_baseline) > 10 ||
                any(>(15), abs.(π[1:(end - 2)]))
@@ -174,7 +174,7 @@ with_logging() do
             # dϕ0 = ∇NLL · d. Must be < 0 for HagerZhang. Fall back to -g/gnorm otherwise.
             dϕ0 = Float32(dot(g_δ_nll, d))
             if !(dϕ0 < 0) || (stuck_iters ≥ 3) ||
-               (trying_to_unstick && unstuck_iters ≤ 1)
+                (trying_to_unstick && unstuck_iters ≤ 1)
                 d .= -g_δ_nll ./ max(gnorm, 1.0f-8)
                 dϕ0 = Float32(dot(g_δ_nll, d))
                 bad_descent_count = !(dϕ0 < 0) ? bad_descent_count + 1 : 0
@@ -189,8 +189,8 @@ with_logging() do
             end
 
             @info "  inner #$id newton iter $newton_iter: " *
-                  "gnorm=$(round(gnorm; sigdigits=4)) dϕ0=$(round(dϕ0; sigdigits=4)) " *
-                  "combined_time=$(round(t_combined; sigdigits=3))s"
+                "gnorm=$(round(gnorm; sigdigits=4)) dϕ0=$(round(dϕ0; sigdigits=4)) " *
+                "combined_time=$(round(t_combined; sigdigits=3))s"
 
             δ_cur = copy(θ_tmp[i_δ])
             θ_trial = copy(θ_tmp)
@@ -251,10 +251,9 @@ with_logging() do
 
     function outer_optimize(π₀)
         _prev_π = copy(π₀)
-        function outer_fgh!(F, G, H, π)
+        function outer_fg!(F, G, π)
             if bounds_violated(π)
                 isnothing(G) || (G .= 0)
-                isnothing(H) || (H .= _cached_conv_bhhh)
                 return isnothing(F) ? nothing : 1.0f10
             end
             Δπ = π .- _prev_π
@@ -267,18 +266,17 @@ with_logging() do
                 ],
                 "\n",
             )
-            @info "\nstep1 outer_f: step_norm=$(round(Float64(norm(Δπ)); sigdigits=4))\n" * step_lines
+            @info "\nstep1 outer_f: step_norm=$(round(Float64(norm(Δπ)); sigdigits=4))\n" *
+                step_lines
             _prev_π .= π
             concentrated_θ!(π)
             ll = _cached_conv_ll[]
             if isnan(ll) || isapprox(ll, 0)
                 isnothing(G) || (G .= 0)
-                isnothing(H) || (H .= _cached_conv_bhhh)
                 return isnothing(F) ? nothing : 1.0f10
             end
             _last_ll[] = ll
             isnothing(G) || (G .= _cached_conv_grad)
-            isnothing(H) || (H .= _cached_conv_bhhh)
             return isnothing(F) ? nothing : ll
         end
 
@@ -287,16 +285,18 @@ with_logging() do
         function checkpoint_cb(state)
             _cb_iter[] += 1
             if _cb_iter[] % 25 == 0
-                JLD2.save_object(_checkpoint_path, (minimizer = _cached_θ_opt[i_nonδ], value = state.value))
-                @info "  checkpoint saved at outer_iter=$(_cb_iter[]) NLL=$(round(state.value; sigdigits=6))"
+                JLD2.save_object(
+                    _checkpoint_path, (minimizer = _cached_θ_opt[i_nonδ], value = state.f_x)
+                )
+                @info "  checkpoint saved at outer_iter=$(_cb_iter[]) NLL=$(round(state.f_x; sigdigits=6))"
             end
             return false
         end
 
         return optimize(
-            only_fgh!(outer_fgh!),
+            only_fg!(outer_fg!),
             π₀,
-	    NewtonTrustRegion(),
+            LBFGS(),
             Optim.Options(
                 store_trace = true,
                 extended_trace = true,
