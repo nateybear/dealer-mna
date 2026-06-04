@@ -303,7 +303,7 @@ with_logging() do
         return optimize(
             only_fgh!(outer_fgh!),
             π₀,
-            Newton(alphaguess = InitialStatic(alpha = 0.1)),
+            NewtonTrustRegion(),
             Optim.Options(
                 store_trace = true,
                 extended_trace = true,
