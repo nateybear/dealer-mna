@@ -158,9 +158,13 @@ with_logging() do
                 @info "  inner #$id converged in $newton_iter newton iters (gnorm=$gnorm)"
                 _cached_conv_ll[] = ϕ0
                 _cached_conv_grad .= .-grad_buf[i_nonδ]
-                fill!(_cached_conv_bhhh, 0.0f0)
-                @inbounds for i in axes(_cached_conv_bhhh, 1)
-                    _cached_conv_bhhh[i, i] = bhhh_buf[i, i] + 1.0f-4
+                if trace(bhhh_buf) > 1e5
+                    fill!(_cached_conv_bhhh, 0.0f0)
+                    @inbounds for i in axes(_cached_conv_bhhh, 1)
+                        _cached_conv_bhhh[i, i] = bhhh_buf[i, i] + 1.0f-4
+                    end
+                else
+                    _cached_conv_bhhh .= bhhh_buf
                 end
                 break
             end
