@@ -57,13 +57,14 @@ DenseModel(model, zips)
 Precomputes per-block dense data for evaluation across all `zips` simultaneously.
 
 Field shapes (N = n_delta, Z = length(zips), K = n_product_attributes, Dn = n_demographics):
-- `block_param_idxs[bi]::Vector{Int32}` (length N_bi): block-local row → param index in δ
-- `X_blocks[bi]::Matrix{Float32}` ((K+1) × N_bi): product attributes + price, gathered per block
-- `dist_blocks[bi]::Matrix{Float32}` (N_bi × Z): standardized distance dist[z, k_to_f[k]]
-- `counts_blocks[bi]::SparseMatrixCSC{Int32,Int32}` (N_bi × Z): purchase counts
-- `t_obs::Matrix{Int32}` (n_blocks × Z): total inside-good purchases per (block, zip)
-- `D_dense::Matrix{Float32}` (Dn × Z): standardized demographics per zip
-- `M_zs::Vector{Float32}` (Z): market sizes
+
+  - `block_param_idxs[bi]::Vector{Int32}` (length N_bi): block-local row → param index in δ
+  - `X_blocks[bi]::Matrix{Float32}` ((K+1) × N_bi): product attributes + price, gathered per block
+  - `dist_blocks[bi]::Matrix{Float32}` (N_bi × Z): standardized distance dist[z, k_to_f[k]]
+  - `counts_blocks[bi]::SparseMatrixCSC{Int32,Int32}` (N_bi × Z): purchase counts
+  - `t_obs::Matrix{Int32}` (n_blocks × Z): total inside-good purchases per (block, zip)
+  - `D_dense::Matrix{Float32}` (Dn × Z): standardized demographics per zip
+  - `M_zs::Vector{Float32}` (Z): market sizes
 """
 struct DenseModel{T <: AbstractDemandModel}
     model::T
@@ -212,9 +213,9 @@ struct DenseWork
 end
 
 function DenseWork(dm::DenseModel)
-    U_blocks = [zeros(Float32, length(dm.block_param_idxs[bi]), dm.Z) for bi in 1:dm.n_blocks]
-    E_blocks = [zeros(Float32, length(dm.block_param_idxs[bi]), dm.Z) for bi in 1:dm.n_blocks]
-    resid_blocks = [zeros(Float32, length(dm.block_param_idxs[bi]), dm.Z) for bi in 1:dm.n_blocks]
+    U_blocks = [zeros(Float32, length(dm.block_param_idxs[bi]), dm.Z) for bi in 1:(dm.n_blocks)]
+    E_blocks = [zeros(Float32, length(dm.block_param_idxs[bi]), dm.Z) for bi in 1:(dm.n_blocks)]
+    resid_blocks = [zeros(Float32, length(dm.block_param_idxs[bi]), dm.Z) for bi in 1:(dm.n_blocks)]
     inside_sum = zeros(Float32, dm.n_blocks, dm.Z)
     N_NONδ = (dm.K + 1) * dm.Dn + 2  # Πᵦ (Dn × K) + Πp (Dn) + η (2)
     α = zeros(Float32, dm.K + 1, dm.Z)
@@ -265,7 +266,7 @@ function compute_ΠtD!(
     ΠtD::Matrix{Float32}, Πᵦ::Matrix{Float32}, Πp::AbstractVector{Float32},
     D::Matrix{Float32},
 )
-    K, _ = size(Πᵦ)  # Πᵦ is Dn × K → we want Πᵦ' · D which is K × Z
+    _, K = size(Πᵦ)  # Πᵦ is Dn × K → we want Πᵦ' · D which is K × Z
     mul!(view(ΠtD, 1:K, :), Πᵦ', D)
     Z = size(D, 2)
     @inbounds for z in 1:Z
@@ -297,7 +298,7 @@ function forward_pass!(work::DenseWork, dm::DenseModel, params::AbstractVector{F
     ΠtD = Matrix{Float32}(undef, dm.K + 1, dm.Z)
     compute_ΠtD!(ΠtD, Πᵦ, Πp, dm.D_dense)
 
-    @threads :static for bi in 1:dm.n_blocks
+    @threads :static for bi in 1:(dm.n_blocks)
         U_bi = work.U_blocks[bi]
         E_bi = work.E_blocks[bi]
         X_bi = dm.X_blocks[bi]
@@ -309,7 +310,7 @@ function forward_pass!(work::DenseWork, dm::DenseModel, params::AbstractVector{F
         mul!(U_bi, X_bi', ΠtD)
 
         # Add δ and subtract exp distance disutility; store E for later use
-        @inbounds for z in 1:dm.Z
+        @inbounds for z in 1:(dm.Z)
             for k in 1:N_bi
                 e = @fastmath exp(η1 + η2 * dist_bi[k, z])
                 E_bi[k, z] = e
@@ -339,8 +340,8 @@ end
 # Outside-good ll: Σ_{bi, z} (M_z - t_obs[bi,z]) · log(max(1 - inside_sum[bi,z], ε))
 function _outside_ll(work::DenseWork, dm::DenseModel)
     ll = 0.0f0
-    @inbounds for z in 1:dm.Z
-        for bi in 1:dm.n_blocks
+    @inbounds for z in 1:(dm.Z)
+        for bi in 1:(dm.n_blocks)
             n_out = dm.M_zs[z] - Float32(dm.t_obs[bi, z])
             if n_out > 0.0f0
                 p_out = max(1.0f0 - work.inside_sum[bi, z], 1.0f-10)
@@ -360,7 +361,7 @@ no resid, no gradient, no BHHH. Used by the inner-Newton line search.
 function eval_ll!(work::DenseWork, dm::DenseModel, params::AbstractVector{Float32})
     forward_pass!(work, dm, params)
     ll_in = 0.0f0
-    for bi in 1:dm.n_blocks
+    for bi in 1:(dm.n_blocks)
         ll_in += _inside_ll_block(work.U_blocks[bi], dm.counts_blocks[bi])
     end
     return ll_in + _outside_ll(work, dm)
@@ -379,14 +380,14 @@ function eval_ll_δgrad!(
     forward_pass!(work, dm, params)
     fill!(δ_grad, 0.0f0)
     ll_in = 0.0f0
-    @inbounds for bi in 1:dm.n_blocks
+    @inbounds for bi in 1:(dm.n_blocks)
         U_bi = work.U_blocks[bi]
         resid_bi = work.resid_blocks[bi]
         counts_bi = dm.counts_blocks[bi]
         param_idxs = dm.block_param_idxs[bi]
         N_bi = size(U_bi, 1)
         # resid_bi = -M_z · CCP
-        for z in 1:dm.Z
+        for z in 1:(dm.Z)
             mz = dm.M_zs[z]
             for k in 1:N_bi
                 resid_bi[k, z] = -mz * U_bi[k, z]
@@ -394,7 +395,7 @@ function eval_ll_δgrad!(
         end
         # add counts and accumulate inside ll
         ll_block = 0.0f0
-        for col in 1:dm.Z
+        for col in 1:(dm.Z)
             for nz in counts_bi.colptr[col]:(counts_bi.colptr[col + 1] - 1)
                 row = counts_bi.rowval[nz]
                 val = Float32(counts_bi.nzval[nz])
@@ -406,7 +407,7 @@ function eval_ll_δgrad!(
         # δ_grad: row sums
         for k in 1:N_bi
             s = 0.0f0
-            for z in 1:dm.Z
+            for z in 1:(dm.Z)
                 s += resid_bi[k, z]
             end
             δ_grad[param_idxs[k]] = s
@@ -425,11 +426,12 @@ eval_combined!(work, dm, params; grad, bhhh) → ll::Float32
 Single pass: forward, ll, full gradient (∂ℓ/∂params), BHHH (∂ℓ/∂π outer products).
 
 Layout:
-- `grad[i_δ]`  = Σ_z (counts[k,z] - M_z·CCP[k,z])           # δ ascent gradient of ℓ
-- `grad[i_Πᵦ]` = (D · α[1:K,:]')[d,p]                        # column-major (d fastest)
-- `grad[i_Πp]` = D · α[K+1,:]'                                # Dn-vector
-- `grad[i_η]`  = -(sum E·resid, sum dist·E·resid)             # 2-vector
-- `bhhh`       = G_π · G_π'                                   # N_NONδ × N_NONδ, symmetric
+
+  - `grad[i_δ]`  = Σ_z (counts[k,z] - M_z·CCP[k,z])           # δ ascent gradient of ℓ
+  - `grad[i_Πᵦ]` = (D · α[1:K,:]')[d,p]                        # column-major (d fastest)
+  - `grad[i_Πp]` = D · α[K+1,:]'                                # Dn-vector
+  - `grad[i_η]`  = -(sum E·resid, sum dist·E·resid)             # 2-vector
+  - `bhhh`       = G_π · G_π'                                   # N_NONδ × N_NONδ, symmetric
 
 `work.U_blocks` still holds CCPs on exit (needed by Woodbury Newton step).
 """
@@ -447,7 +449,7 @@ function eval_combined!(
 
     ll_inside = 0.0f0
     # Per-block: build resid, fill δ grad, accumulate α (Π contributions) and per-zip η scores
-    for bi in 1:dm.n_blocks
+    for bi in 1:(dm.n_blocks)
         U_bi = work.U_blocks[bi]
         E_bi = work.E_blocks[bi]
         resid_bi = work.resid_blocks[bi]
@@ -458,7 +460,7 @@ function eval_combined!(
         N_bi = size(U_bi, 1)
 
         # resid = -M_z · CCP
-        @inbounds for z in 1:dm.Z
+        @inbounds for z in 1:(dm.Z)
             mz = dm.M_zs[z]
             for k in 1:N_bi
                 resid_bi[k, z] = -mz * U_bi[k, z]
@@ -466,7 +468,7 @@ function eval_combined!(
         end
         # add counts and inside ll
         ll_block = 0.0f0
-        @inbounds for col in 1:dm.Z
+        @inbounds for col in 1:(dm.Z)
             for nz in counts_bi.colptr[col]:(counts_bi.colptr[col + 1] - 1)
                 row = counts_bi.rowval[nz]
                 val = Float32(counts_bi.nzval[nz])
@@ -479,7 +481,7 @@ function eval_combined!(
         # δ grad: row sums of resid_bi
         @inbounds for k in 1:N_bi
             s = 0.0f0
-            for z in 1:dm.Z
+            for z in 1:(dm.Z)
                 s += resid_bi[k, z]
             end
             grad[param_idxs[k]] = s
@@ -489,7 +491,7 @@ function eval_combined!(
         BLAS.gemm!('N', 'N', 1.0f0, X_bi, resid_bi, 1.0f0, work.α)
 
         # η: per-zip column sums (s1, s2) and global sums
-        @inbounds for z in 1:dm.Z
+        @inbounds for z in 1:(dm.Z)
             s1 = 0.0f0
             s2 = 0.0f0
             for k in 1:N_bi
@@ -510,36 +512,36 @@ function eval_combined!(
 
     # Πᵦ layout: column-major over (d, p) with d varying fastest (matches @indexof in models.jl)
     i_Πᵦ_start = first(idx.i_Πᵦ)
-    @inbounds for p in 1:dm.K, d in 1:dm.Dn
+    @inbounds for p in 1:(dm.K), d in 1:(dm.Dn)
         grad[i_Πᵦ_start + (p - 1) * dm.Dn + (d - 1)] = Π_grad[d, p]
     end
     i_Πp_start = first(idx.i_Πp)
-    @inbounds for d in 1:dm.Dn
+    @inbounds for d in 1:(dm.Dn)
         grad[i_Πp_start + (d - 1)] = Π_grad[d, dm.K + 1]
     end
 
     # η gradient (global sums of per-zip scores)
     i_η_start = first(idx.i_η)
-    grad[i_η_start]     = sum(work.score_η1)
+    grad[i_η_start] = sum(work.score_η1)
     grad[i_η_start + 1] = sum(work.score_η2)
 
     # Per-zip score G_π (N_NONδ × Z) for BHHH
     N_NONδ = size(work.G_π, 1)
-    @inbounds for p in 1:dm.K, d in 1:dm.Dn
+    @inbounds for p in 1:(dm.K), d in 1:(dm.Dn)
         row = (p - 1) * dm.Dn + d
-        for z in 1:dm.Z
+        for z in 1:(dm.Z)
             work.G_π[row, z] = dm.D_dense[d, z] * work.α[p, z]
         end
     end
-    @inbounds for d in 1:dm.Dn
+    @inbounds for d in 1:(dm.Dn)
         row = dm.K * dm.Dn + d
-        for z in 1:dm.Z
+        for z in 1:(dm.Z)
             work.G_π[row, z] = dm.D_dense[d, z] * work.α[dm.K + 1, z]
         end
     end
-    @inbounds for z in 1:dm.Z
+    @inbounds for z in 1:(dm.Z)
         work.G_π[N_NONδ - 1, z] = work.score_η1[z]
-        work.G_π[N_NONδ, z]     = work.score_η2[z]
+        work.G_π[N_NONδ, z] = work.score_η2[z]
     end
 
     # BHHH = G_π · G_π'  (single SYRK, then symmetrize)
@@ -560,7 +562,7 @@ end
 # Returns (-H_t)^{-1} g_t — Newton ascent direction for ℓ over δ_t.
 # Falls back to g_t on Float32 SingularException in the inner Cholesky (degenerate CCPs).
 function _woodbury_block(
-    U::Matrix{Float32}, M_z::Vector{Float32}, g_t::Vector{Float32},
+    U::Matrix{Float32}, M_z::Vector{Float32}, g_t::Vector{Float32}
 )::Vector{Float32}
     Z = length(M_z)
     d = U * M_z
@@ -589,9 +591,9 @@ Writes Newton ascent direction over δ (length N) into `step`, using `work.U_blo
 Threaded across time blocks.
 """
 function woodbury_newton_step!(
-    step::AbstractVector{Float32}, work::DenseWork, dm::DenseModel, g_δ::AbstractVector{Float32},
+    step::AbstractVector{Float32}, work::DenseWork, dm::DenseModel, g_δ::AbstractVector{Float32}
 )
-    @threads :static for bi in 1:dm.n_blocks
+    @threads :static for bi in 1:(dm.n_blocks)
         param_idxs = dm.block_param_idxs[bi]
         g_t = Float32[g_δ[k] for k in param_idxs]
         d_t = _woodbury_block(work.U_blocks[bi], dm.M_zs, g_t)

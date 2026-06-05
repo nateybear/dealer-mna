@@ -64,7 +64,7 @@ end
 n_delta(model::DemandModel) = length(keys(model.product_lookup.tjf))
 n_demographics(_) = length(DEMOGRAPHIC_ATTRIBUTES) # median income, urban, pct_black, pct_hispanic
 n_demo_product_params(x) = n_demographics(x) * n_product_attributes(x) # median income, urban, pct_black, pct_hispanic
-n_product_attributes(_) = length(PRODUCT_ATTRIBUTES) # suv, truck, electric
+n_product_attributes(_) = length(PRODUCT_ATTRIBUTES) # suv, truck, sedan
 n_demo_price_params(x) = n_demographics(x) # median income, urban
 n_random_coefs(::DemandModel{RandomCoefType}) = 1 # price
 n_random_coefs(::DemandModel{FixedCoefType}) = 0
