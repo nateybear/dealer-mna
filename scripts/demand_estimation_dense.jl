@@ -314,7 +314,7 @@ with_logging() do
             _cb_iter[] += 1
             if _cb_iter[] % 25 == 0
                 JLD2.save_object(
-                    _checkpoint_path, (minimizer = _cached_θ_opt[i_nonδ], value = state.f_x)
+                    _checkpoint_path, (minimizer = _prev_π, value = state.f_x)
                 )
                 @info "  checkpoint saved at outer_iter=$(_cb_iter[]) NLL=$(round(state.f_x; sigdigits=6))"
             end
@@ -338,6 +338,8 @@ with_logging() do
             Newton(alphaguess = InitialStatic(scaled = true)),
             Optim.Options(; options..., iterations = 50),
         )
+
+        JLD2.save_object(snakemake.output[1] * ".initial_newton.jld2", initial_newton)
 
         return optimize(
             only_fg!(outer_fg!),
