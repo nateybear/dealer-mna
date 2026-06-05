@@ -23,7 +23,7 @@ import .Demand.Dense:
 using LinearAlgebra
 using Optim
 import Random: seed!
-import LineSearches: HagerZhang, InitialStatic
+import LineSearches: HagerZhang, InitialStatic, InitialHagerZhang
 import Optim.NLSolversBase: only_fgh!, only_fg!
 
 seed!(78704)
@@ -130,8 +130,8 @@ with_logging() do
 
         while true
             newton_iter += 1
-            if newton_iter > 30
-                @warn "  inner #$id: exceeded 30 newton iters (gnorm=$gnorm)"
+            if newton_iter > 60
+                @warn "  inner #$id: exceeded 60 newton iters (gnorm=$gnorm)"
                 break
             end
 
@@ -295,7 +295,9 @@ with_logging() do
         return optimize(
             only_fg!(outer_fg!),
             π₀,
-            BFGS(alphaguess = InitialStatic(alpha = 0.1), initial_invH = _ -> inv(_cached_conv_bhhh)),
+            BFGS(
+                alphaguess = InitialHagerZhang(α0 = 0.1), initial_invH = _ -> inv(_cached_conv_bhhh)
+            ),
             Optim.Options(
                 store_trace = true,
                 extended_trace = true,
