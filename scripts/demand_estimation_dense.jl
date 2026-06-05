@@ -296,7 +296,7 @@ with_logging() do
             only_fg!(outer_fg!),
             π₀,
             BFGS(
-                alphaguess = InitialHagerZhang(α0 = 0.1), initial_invH = _ -> inv(_cached_conv_bhhh)
+                alphaguess = InitialStatic(alpha = 0.05), initial_invH = _ -> inv(_cached_conv_bhhh)
             ),
             Optim.Options(
                 store_trace = true,
