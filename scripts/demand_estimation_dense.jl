@@ -295,7 +295,7 @@ with_logging() do
         return optimize(
             only_fg!(outer_fg!),
             π₀,
-            BFGS(initial_invH = inv(_cached_conv_bhhh)),
+            BFGS(initial_invH = _ -> inv(_cached_conv_bhhh)),
             Optim.Options(
                 store_trace = true,
                 extended_trace = true,
