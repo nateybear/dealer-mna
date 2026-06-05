@@ -158,8 +158,7 @@ with_logging() do
                 @info "  inner #$id converged in $newton_iter newton iters (gnorm=$gnorm)"
                 _cached_conv_ll[] = ϕ0
                 _cached_conv_grad .= .-grad_buf[i_nonδ]
-                lambda = (maximum(diag(bhhh_buf)) + minimum(diag(bhhh_buf))) / 200 # add some dampening
-                _cached_conv_bhhh .= bhhh_buf + lambda * Matrix(I, size(bhhh_buf))
+                _cached_conv_bhhh .= bhhh_buf
                 break
             end
 
@@ -297,7 +296,7 @@ with_logging() do
         return optimize(
             only_fgh!(outer_fgh!),
             π₀,
-            Newton(),
+            Newton(alphaguess = InitialStatic(alpha = 0.1)),
             Optim.Options(
                 store_trace = true,
                 extended_trace = true,
