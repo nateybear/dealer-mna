@@ -259,7 +259,7 @@ function initial_parameters(model)
     # Observed gradients at Πᵦ=0 are all negative, so we start positive.
     # Pickup has the largest effect, suv medium, sedan small, coupe smallest.
     out[@indexof demo_product_params out model] .=
-        repeat(Float32[0.1f0, 0.5f0, 1.0f0, 0.25f0], inner = n_demographics(model))
+        repeat(Float32[0.5f0, 1.0f0, 0.25f0], inner = n_demographics(model))
 
     # demo_price_params (Πₚ, length 4): demo × price interactions.
     # After standardization, Πₚ[d] × D'_z[d] × p' has natural scale O(1) for all d.
