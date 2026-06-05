@@ -341,7 +341,7 @@ with_logging() do
             outer_zeroth,
             π₀,
             NelderMead(initial_simplex = AffineSimplexer(a = 0.1, b = 0.2)),
-            Optim.Options(; options..., iterations = 50),
+            Optim.Options(; options..., iterations = 500),
         )
 
         JLD2.save_object(snakemake.output[1] * ".initial_nelder.jld2", initial_nelder)
