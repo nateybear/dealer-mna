@@ -248,10 +248,9 @@ with_logging() do
 
     function outer_optimize(π₀)
         _prev_π = copy(π₀)
-        function outer_fgh!(F, G, H, π)
+        function outer_fgh!(F, G, π)
             if bounds_violated(π)
                 isnothing(G) || (G .= 0)
-                isnothing(H) || (H .= 0)
                 return isnothing(F) ? nothing : 1.0f10
             end
             Δπ = π .- _prev_π
@@ -271,12 +270,10 @@ with_logging() do
             ll = _cached_conv_ll[]
             if isnan(ll) || isapprox(ll, 0)
                 isnothing(G) || (G .= 0)
-                isnothing(G) || (H .= 0)
                 return isnothing(F) ? nothing : 1.0f10
             end
             _last_ll[] = ll
             isnothing(G) || (G .= _cached_conv_grad)
-            isnothing(H) || (H .= _cached_conv_bhhh)
             return isnothing(F) ? nothing : ll
         end
 
@@ -293,10 +290,12 @@ with_logging() do
             return false
         end
 
+        concentrated_θ!(π₀)
+
         return optimize(
-            only_fgh!(outer_fgh!),
+            only_fg!(outer_fg!),
             π₀,
-            NewtonTrustRegion(initial_delta = 0.01, rho_upper = 0.5),
+            BFGS(initial_invH = inv(_cached_conv_bhhh)),
             Optim.Options(
                 store_trace = true,
                 extended_trace = true,
