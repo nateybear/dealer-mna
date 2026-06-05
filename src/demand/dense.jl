@@ -263,7 +263,7 @@ Top K rows are Πᵦ' · D; last row is Πp' · D. Used as the "shared per-zip c
 that multiplies each block's X to give the demographic utility contribution.
 """
 function compute_ΠtD!(
-    ΠtD::Matrix{Float32}, Πᵦ::Matrix{Float32}, Πp::AbstractVector{Float32},
+    ΠtD::Matrix{Float32}, Πᵦ::AbstractMatrix{Float32}, Πp::AbstractVector{Float32},
     D::Matrix{Float32},
 )
     _, K = size(Πᵦ)  # Πᵦ is Dn × K → we want Πᵦ' · D which is K × Z
