@@ -307,6 +307,10 @@ with_logging() do
             isnothing(H) || (H .= _cached_conv_bhhh)
             return isnothing(F) ? nothing : ll
         end
+        function outer_zeroth(π)
+            concentrated_θ!(π)
+            return _cached_conv_ll[]
+        end
 
         _checkpoint_path = snakemake.output[1] * ".checkpoint.jld2"
         _cb_iter = Ref(0)
@@ -332,21 +336,19 @@ with_logging() do
             allow_f_increases = true,
             callback = checkpoint_cb,
         )
-        initial_newton = optimize(
-            only_fgh!(outer_fgh!),
+        initial_nelder = optimize(
+            outer_zeroth,
             π₀,
-            Newton(alphaguess = InitialStatic(scaled = true)),
+            NelderMead(),
             Optim.Options(; options..., iterations = 50),
         )
 
-        JLD2.save_object(snakemake.output[1] * ".initial_newton.jld2", initial_newton)
+        JLD2.save_object(snakemake.output[1] * ".initial_nelder.jld2", initial_nelder)
 
         return optimize(
-            only_fg!(outer_fg!),
-            initial_newton.minimizer,
-            BFGS(
-                alphaguess = InitialStatic(alpha = 0.05), initial_invH = _ -> inv(_cached_conv_bhhh)
-            ),
+            only_fgh!(outer_fgh!),
+            initial_nelder.minimizer,
+            Newton(alphaguess = InitialStatic(alpha = 0.1)),
             Optim.Options(; options..., iterations = 5000),
         )
     end
