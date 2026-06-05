@@ -276,6 +276,37 @@ with_logging() do
             isnothing(G) || (G .= _cached_conv_grad)
             return isnothing(F) ? nothing : ll
         end
+        function outer_fgh!(F, G, H, π)
+            if bounds_violated(π)
+                isnothing(G) || (G .= 0)
+                isnothing(H) || (H .= 0)
+                return isnothing(F) ? nothing : 1.0f10
+            end
+            Δπ = π .- _prev_π
+            step_lines = join(
+                [
+                    "  " *
+                    rpad(nonδ_labels[k], 36) *
+                    "val=$(rpad(string(round(Float64(π[k]); sigdigits=4)), 14))" *
+                    "Δ=$(round(Float64(Δπ[k]); sigdigits=4))" for k in eachindex(nonδ_labels)
+                ],
+                "\n",
+            )
+            @info "\nstep1 outer_f: step_norm=$(round(Float64(norm(Δπ)); sigdigits=4))\n" *
+                step_lines
+            _prev_π .= π
+            concentrated_θ!(π)
+            ll = _cached_conv_ll[]
+            if isnan(ll) || isapprox(ll, 0)
+                isnothing(G) || (G .= 0)
+                isnothing(H) || (H .= 0)
+                return isnothing(F) ? nothing : 1.0f10
+            end
+            _last_ll[] = ll
+            isnothing(G) || (G .= _cached_conv_grad)
+            isnothing(H) || (H .= _cached_conv_bhhh)
+            return isnothing(F) ? nothing : ll
+        end
 
         _checkpoint_path = snakemake.output[1] * ".checkpoint.jld2"
         _cb_iter = Ref(0)
@@ -289,28 +320,32 @@ with_logging() do
             end
             return false
         end
-
-        concentrated_θ!(π₀)
+        options = (
+            store_trace = true,
+            extended_trace = true,
+            show_trace = true,
+            g_abstol = 1.0f-3,
+            x_abstol = NaN,
+            x_reltol = NaN,
+            f_abstol = NaN,
+            f_reltol = NaN,
+            allow_f_increases = true,
+            callback = checkpoint_cb,
+        )
+        initial_newton = optimize(
+            only_fgh!(outer_fgh!),
+            π₀,
+            Newton(alphaguess = InitialStatic(scaled = true)),
+            Optim.Options(; options..., iterations = 50),
+        )
 
         return optimize(
             only_fg!(outer_fg!),
-            π₀,
+            initial_newton.minimizer,
             BFGS(
                 alphaguess = InitialStatic(alpha = 0.05), initial_invH = _ -> inv(_cached_conv_bhhh)
             ),
-            Optim.Options(
-                store_trace = true,
-                extended_trace = true,
-                show_trace = true,
-                iterations = 5000,
-                g_abstol = 1.0f-3,
-                x_abstol = NaN,
-                x_reltol = NaN,
-                f_abstol = NaN,
-                f_reltol = NaN,
-                allow_f_increases = true,
-                callback = checkpoint_cb,
-            ),
+            Optim.Options(; options..., iterations = 5000),
         )
     end
 
