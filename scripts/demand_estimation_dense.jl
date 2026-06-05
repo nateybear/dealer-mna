@@ -248,7 +248,7 @@ with_logging() do
 
     function outer_optimize(π₀)
         _prev_π = copy(π₀)
-        function outer_fgh!(F, G, π)
+        function outer_fg!(F, G, π)
             if bounds_violated(π)
                 isnothing(G) || (G .= 0)
                 return isnothing(F) ? nothing : 1.0f10
