@@ -339,7 +339,7 @@ with_logging() do
         initial_nelder = optimize(
             outer_zeroth,
             π₀,
-            NelderMead(),
+            NelderMead(initial_simplex = AffineSimplexer(a = 1.1, b = 0.1)),
             Optim.Options(; options..., iterations = 50),
         )
 
