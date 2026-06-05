@@ -40,7 +40,7 @@ import LinearMaps: LinearMap
 # include("keyedsparsearray.jl")
 # __init__() = _generate_method_overrides()
 
-const PRODUCT_ATTRIBUTES = [:is_coupe, :is_suv, :is_pickup, :is_sedan]
+const PRODUCT_ATTRIBUTES = [:is_suv, :is_pickup, :is_sedan] # MISSING: is_coupe, everything is relative to that
 const DEMOGRAPHIC_ATTRIBUTES = [:median_earnings_inv, :urban_pct, :black_pct, :hispanic_pct]
 
 ProductInfo = @NamedTuple begin
