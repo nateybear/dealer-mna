@@ -25,6 +25,7 @@ using Optim
 import Random: seed!
 import LineSearches: HagerZhang, InitialStatic, InitialHagerZhang
 import Optim.NLSolversBase: only_fgh!, only_fg!
+import Optim: AffineSimplexer
 
 seed!(78704)
 snakemake!()
