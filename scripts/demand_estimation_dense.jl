@@ -337,10 +337,14 @@ with_logging() do
             allow_f_increases = true,
             callback = checkpoint_cb,
         )
+        # AffineSimplexer sets vertex j to (1+b)*π₀[j] + a.  With a=0.1, b=0.2 the
+        # fixed point is -a/b = -0.5, which is exactly the initial Πp value, so those
+        # four simplex vertices are identical to π₀ and Nelder-Mead never explores Πp.
+        # Use a=0.05, b=0.5 → fixed point at -0.1, safe for all current initial values.
         initial_nelder = optimize(
             outer_zeroth,
             π₀,
-            NelderMead(initial_simplex = AffineSimplexer(a = 0.1, b = 0.2)),
+            NelderMead(initial_simplex = AffineSimplexer(a = 0.05, b = 0.5)),
             Optim.Options(; options..., iterations = 500),
         )
 

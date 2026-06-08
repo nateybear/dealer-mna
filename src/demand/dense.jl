@@ -23,27 +23,24 @@ import ..n_delta, ..n_demographics, ..n_product_attributes
 import ..n_demo_product_params, ..n_demo_price_params, ..n_dist_params
 import ..n_random_coefs, ..total_n_params
 import ..δ_indices, ..δ_t_blocks, ..collected_zips
+import ..ORDER
 import SparseArrayKit
+import ..@indexof
 
 export DenseModel, DenseWork,
     forward_pass!, eval_ll!, eval_ll_δgrad!, eval_combined!,
     woodbury_newton_step!, param_indices
 
 # -------------------------------------------------------------------------------------------------
-# Parameter-vector index ranges (mirrors @indexof from models.jl, inlined here to avoid
-# pulling the macro into a submodule namespace).
+# Parameter-vector index ranges — delegate to @indexof so ORDER changes propagate here.
 # -------------------------------------------------------------------------------------------------
 
 function param_indices(model::AbstractDemandModel)
-    N_δ = n_delta(model)
-    N_Πᵦ = n_demo_product_params(model)
-    N_Πp = n_demo_price_params(model)
-    N_rc = n_random_coefs(model)
-    N_η = n_dist_params(model)
-    i_δ = 1:N_δ
-    i_Πᵦ = (N_δ + 1):(N_δ + N_Πᵦ)
-    i_Πp = (N_δ + N_Πᵦ + 1):(N_δ + N_Πᵦ + N_Πp)
-    i_η = (N_δ + N_Πᵦ + N_Πp + N_rc + 1):(N_δ + N_Πᵦ + N_Πp + N_rc + N_η)
+    # @indexof ignores its second argument (it's only used by @pull); pass nothing.
+    i_δ = @indexof delta nothing model
+    i_Πᵦ = @indexof demo_product_params nothing model
+    i_Πp = @indexof demo_price_params nothing model
+    i_η = @indexof dist_params nothing model
     return (; i_δ, i_Πᵦ, i_Πp, i_η)
 end
 

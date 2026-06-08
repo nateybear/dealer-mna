@@ -140,13 +140,14 @@ end
 function _fe_linear_map(t_refs, j_refs, f_refs, n_t, n_j, n_f)
     N = length(t_refs)
     M = Int(n_t + n_j + n_f)
-    fwd! = (y, x) -> begin
-        fill!(y, zero(Float32))
-        @fastmath @inbounds for i in 1:N
-            y[i] = x[t_refs[i]] + x[n_t + j_refs[i]] + x[n_t + n_j + f_refs[i]]
+    fwd! =
+        (y, x) -> begin
+            fill!(y, zero(Float32))
+            @fastmath @inbounds for i in 1:N
+                y[i] = x[t_refs[i]] + x[n_t + j_refs[i]] + x[n_t + n_j + f_refs[i]]
+            end
+            return y
         end
-        return y
-    end
     adj! = (y, x) -> begin
         fill!(y, zero(Float32))
         @fastmath @inbounds for i in 1:N
@@ -185,7 +186,14 @@ end
         end
     end
 
-    A = _fe_linear_map(t_refs, j_refs, f_refs, Int32(length(t_lookup)), Int32(length(j_lookup)), Int32(length(f_lookup)))
+    A = _fe_linear_map(
+        t_refs,
+        j_refs,
+        f_refs,
+        Int32(length(t_lookup)),
+        Int32(length(j_lookup)),
+        Int32(length(f_lookup)),
+    )
     ws = LsmrWorkspace(N, size(A, 2), Vector{Float32})
     return obs_keys, A, ws
 end
@@ -197,7 +205,7 @@ function residualize!(X, lookup)
     @inbounds for (i, k) in enumerate(obs_keys)
         b[i] = X[k]
     end
-    lsmr!(ws, A, b; atol = 1f-4, btol = 1f-4, itmax = 500)
+    lsmr!(ws, A, b; atol = 1.0f-4, btol = 1.0f-4, itmax = 500)
     ws.stats.solved || @warn "residualize! did not converge in $(ws.stats.niter) iterations"
     @info "residualize! solved in $(ws.stats.niter) LSMR iterations"
     fitted = ws.Av  # reuse workspace buffer (length m = N)
@@ -258,8 +266,9 @@ function initial_parameters(model)
     # (ORDER = [coupe, suv, pickup, sedan] × [income, urban, black, hispanic]).
     # Observed gradients at Πᵦ=0 are all negative, so we start positive.
     # Pickup has the largest effect, suv medium, sedan small, coupe smallest.
-    out[@indexof demo_product_params out model] .=
-        repeat(Float32[0.5f0, 1.0f0, 0.25f0], inner = n_demographics(model))
+    out[@indexof demo_product_params out model] .= repeat(
+        Float32[0.1f0, 0.5f0, 1.0f0, 0.25f0], inner = n_demographics(model)
+    )
 
     # demo_price_params (Πₚ, length 4): demo × price interactions.
     # After standardization, Πₚ[d] × D'_z[d] × p' has natural scale O(1) for all d.
