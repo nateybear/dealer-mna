@@ -39,6 +39,11 @@ settings = ArgParseSettings()
     action = :command
     "bfgs"
     action = :command
+    "--rand-offset"
+    arg_type = Float64
+    default = 0.0
+    "--prefix"
+    default = ""
 end
 
 @add_arg_table settings["nelder-mead"] begin
@@ -95,13 +100,23 @@ with_logging() do
     work = DenseWork(dm)
     @info "DenseModel built" n_blocks = dm.n_blocks
 
+    cmdargs = parse_args(settings)
+
     θ =
         if haskey(snakemake.input, "params_restart") &&
-            !isempty(snakemake.input["params_restart"]) &&
-            isfile(snakemake.input["params_restart"])
-            JLD2.load_object(snakemake.input["params_restart"]).minimizer
+            !isempty(snakemake.input["params_restart"])
+            fname = snakemake.input["params_restart"]
+            params_name = splitext(fname)[1] * cmdargs["prefix"] * ".jld2"
+
+            if isfile(params_name)
+                JLD2.load_object(params_name).minimizer
+            else
+                out = initial_parameters(model)
+                out += cmdargs["rand-offset"] * (rand(length(out)) .- 0.5)
+            end
         else
-            initial_parameters(model)
+            out = initial_parameters(model)
+            out += cmdargs["rand-offset"] * (rand(length(out)) .- 0.5)
         end
     θ = Float32.(θ)
     i_δ = collect(IDX.i_δ)
@@ -358,7 +373,8 @@ with_logging() do
             return _cached_conv_ll[]
         end
 
-        _checkpoint_path = snakemake.output[1] * ".checkpoint.jld2"
+        _checkpoint_path =
+            splitext(snakemake.output[1])[1] * ".checkpoint" * cmdargs["prefix"] * ".jld2"
         _cb_iter = Ref(0)
         function checkpoint_cb(state)
             _cb_iter[] += 1
@@ -382,9 +398,9 @@ with_logging() do
             allow_f_increases = true,
             callback = checkpoint_cb,
         )
-        method, objective = let d = parse_args(settings)
-            methodname = d["%COMMAND%"]
-            args = d[methodname]
+        method, objective = let
+            methodname = cmdargs["%COMMAND%"]
+            args = cmdargs[methodname]
             if methodname == "nelder-mead"
                 NelderMead(intial_simplex = AffineSimplexer(a = args["a"], b = args["b"])), outer_zeroth
             elseif methodname == "newton"
