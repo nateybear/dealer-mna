@@ -27,8 +27,53 @@ import LineSearches: HagerZhang, InitialStatic, InitialHagerZhang
 import Optim.NLSolversBase: only_fgh!, only_fg!
 import Optim: AffineSimplexer
 
+using ArgParse
+
+settings = ArgParseSettings()
+@add_arg_table settings begin
+    "nelder-mead"
+    action = :command
+    "newton"
+    action = :command
+    "newton-tro"
+    action = :command
+    "bfgs"
+    action = :command
+end
+
+@add_arg_table settings["nelder-mead"] begin
+    "-a"
+    arg_type = Float64
+    default = 0.5
+    "-b"
+    arg_type = Float64
+    default = 0.5
+end
+
+@add_arg_table settings["newton"] begin
+    "--scale"
+    action = :store_true
+    "--alpha"
+    arg_type = Float64
+    default = 0.1
+end
+
+@add_arg_table settings["newton-tro"] begin
+    "--initial-delta"
+    arg_type = Float64
+    default = 0.01
+end
+
+@add_arg_table settings["bfgs"] begin
+    "--scale"
+    action = :store_true
+    "--alpha"
+    arg_type = Float64
+    default = 0.1
+end
+
 seed!(78704)
-snakemake!()
+snakemake!(stdin)
 
 model = DemandModel{FixedCoefType}(; JLD2.load_object(snakemake.input["model"])...)
 
@@ -319,7 +364,7 @@ with_logging() do
             _cb_iter[] += 1
             if _cb_iter[] % 25 == 0
                 JLD2.save_object(
-                    _checkpoint_path, (minimizer = _prev_π, value = state.f_x)
+                    _checkpoint_path, (minimizer = θ, value = state.f_x)
                 )
                 @info "  checkpoint saved at outer_iter=$(_cb_iter[]) NLL=$(round(state.f_x; sigdigits=6))"
             end
@@ -337,23 +382,29 @@ with_logging() do
             allow_f_increases = true,
             callback = checkpoint_cb,
         )
-        # AffineSimplexer sets vertex j to (1+b)*π₀[j] + a.  With a=0.1, b=0.2 the
-        # fixed point is -a/b = -0.5, which is exactly the initial Πp value, so those
-        # four simplex vertices are identical to π₀ and Nelder-Mead never explores Πp.
-        # Use a=0.05, b=0.5 → fixed point at -0.1, safe for all current initial values.
-        initial_nelder = optimize(
-            outer_zeroth,
-            π₀,
-            NelderMead(initial_simplex = AffineSimplexer(a = 0.05, b = 0.5)),
-            Optim.Options(; options..., iterations = 500),
-        )
-
-        JLD2.save_object(snakemake.output[1] * ".initial_nelder.jld2", initial_nelder)
-
+        method, objective = let d = parse_args(settings)
+            methodname = d["%COMMAND%"]
+            args = d[methodname]
+            if methodname == "nelder-mead"
+                NelderMead(intial_simplex = AffineSimplexer(a = args["a"], b = args["b"])), outer_zeroth
+            elseif methodname == "newton"
+                Newton(alphaguess = InitialStatic(scaled = args["scale"], alpha = args["alpha"])),
+                only_fgh!(outer_fgh!)
+            elseif methodname == "newton-tro"
+                NewtonTrustRegion(initial_delta = args["initial_delta"]), only_fgh!(outer_fgh!)
+            else # BFGS
+                concentrated_θ!(π₀)
+                BFGS(
+                    initial_invH = _ -> inv(_cached_conv_bhhh),
+                    alphaguess = InitialStatic(scaled = args["scale"], alpha = args["alpha"]),
+                ),
+                only_fg!(outer_fg!)
+            end
+        end
         return optimize(
-            only_fgh!(outer_fgh!),
-            initial_nelder.minimizer,
-            Newton(alphaguess = InitialStatic(alpha = 0.1)),
+            objective,
+            π₀,
+            method,
             Optim.Options(; options..., iterations = 5000),
         )
     end
