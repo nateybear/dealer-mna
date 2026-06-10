@@ -407,7 +407,8 @@ with_logging() do
                 Newton(alphaguess = InitialStatic(scaled = args["scale"], alpha = args["alpha"])),
                 only_fgh!(outer_fgh!)
             elseif methodname == "newton-tro"
-                NewtonTrustRegion(initial_delta = args["initial-delta"]), only_fgh!(outer_fgh!)
+                NewtonTrustRegion(initial_delta = args["initial-delta"], eta = 0.01, rho_lower = 0.025),
+                only_fgh!(outer_fgh!)
             else # BFGS
                 concentrated_θ!(π₀)
                 BFGS(
