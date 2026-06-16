@@ -18,8 +18,10 @@
 using DealerMnA
 import .Demand: DemandModel, FixedCoefType, initial_parameters
 import .Demand.Dense:
-    DenseModel, DenseWork, forward_pass!, eval_ll!, eval_ll_δgrad!,
-    eval_combined!, woodbury_newton_step!, param_indices
+    DenseModel, DenseWork, EnvelopeHessWork,
+    forward_pass!, eval_ll!, eval_ll_δgrad!,
+    eval_combined!, woodbury_newton_step!,
+    eval_envelope_hessian!, definiteness_shift!, param_indices
 using LinearAlgebra
 using Optim
 import Random: seed!
@@ -52,6 +54,13 @@ function build_argparse_settings()
         default = 0.0
         "--prefix"
         default = ""
+        "--fd-check"
+        action = :store_true
+        help = "Run the finite-difference envelope-Hessian verification and exit (no optimization)."
+        "--fd-check-h"
+        arg_type = Float64
+        default = 1.0e-3
+        help = "Step size for --fd-check central differences."
     end
     @add_arg_table settings["nelder-mead"] begin
         "-a"
@@ -168,7 +177,7 @@ end
 # Shared by the inner Newton, the Optim outer wrappers, and the KNITRO branch.
 # -------------------------------------------------------------------------------------------------
 
-mutable struct EstimationState{M, DM, W, LS}
+mutable struct EstimationState{M, DM, W, LS, EHW}
     model::M
     dm::DM
     work::W
@@ -180,6 +189,9 @@ mutable struct EstimationState{M, DM, W, LS}
     bhhh_buf::Matrix{Float32}
     step_buf::Vector{Float32}
     δ_grad_buf::Vector{Float32}
+    # Envelope-Hessian workspace and per-call buffer.
+    envwork::EHW
+    envelope_H_buf::Matrix{Float32}
     # Caches: cached_π / cached_θ_opt are the (π → δ*) map at the latest evaluated point.
     # cached_conv_* hold the convergence-point statistics for the outer optimizer.
     cached_π::Vector{Float32}
@@ -189,6 +201,8 @@ mutable struct EstimationState{M, DM, W, LS}
     cached_conv_ll::Base.RefValue{Float32}     # NLL at δ*(π) on inner Newton convergence
     cached_conv_grad::Vector{Float32}          # ∇NLL wrt π
     cached_conv_bhhh::Matrix{Float32}
+    cached_conv_envelope_H::Matrix{Float32}   # envelope-corrected H̃_NLL (Newton/BFGS use this)
+    diag_logged::Base.RefValue{Bool}           # whether the iter-0 BHHH/H̃ diagnostic has been emitted
     ls::LS
     nonδ_labels::Vector{String}
 end
@@ -199,6 +213,7 @@ function EstimationState(model, dm, work, θ::Vector{Float32})
     i_nonδ = collect(idx.i_Πᵦ[1]:idx.i_η[end])
     N_θ = length(θ)
     N_NONδ = length(i_nonδ)
+    envwork = EnvelopeHessWork(dm)
     return EstimationState(
         model, dm, work, copy(θ),
         i_δ, i_nonδ,
@@ -206,6 +221,8 @@ function EstimationState(model, dm, work, θ::Vector{Float32})
         zeros(Float32, N_NONδ, N_NONδ),
         zeros(Float32, length(i_δ)),
         zeros(Float32, length(i_δ)),
+        envwork,
+        zeros(Float32, N_NONδ, N_NONδ),
         fill(NaN32, N_NONδ),
         copy(θ),
         Ref(0),
@@ -213,14 +230,48 @@ function EstimationState(model, dm, work, θ::Vector{Float32})
         Ref(NaN32),
         zeros(Float32, N_NONδ),
         1.0f-4 * Matrix{Float32}(I, N_NONδ, N_NONδ),
+        1.0f-4 * Matrix{Float32}(I, N_NONδ, N_NONδ),
+        Ref(false),
         HagerZhang(),
         build_nonδ_labels(),
     )
 end
 
 # -------------------------------------------------------------------------------------------------
+# Hessian diagnostics — emitted once at the first inner-Newton convergence so we can
+# eyeball the magnitude gap between BHHH (∂²NLL/∂π²) and the envelope-corrected
+# H̃_NLL = ∂²NLL/∂π² − C̃·(∂²NLL/∂δ²)⁻¹·C̃ᵀ.
+# -------------------------------------------------------------------------------------------------
+
+function _eig_extremes(M::AbstractMatrix{Float32})
+    Md = Symmetric(Float64.(M))
+    return (Float32(eigmin(Md)), Float32(eigmax(Md)))
+end
+
+function log_hessian_diagnostics!(
+    state::EstimationState, n_singular::Int, shift::Float32, elapsed::Float64,
+)
+    bhhh = state.cached_conv_bhhh
+    H̃ = state.cached_conv_envelope_H
+    db = diag(bhhh)
+    dh = diag(H̃)
+    λb_min, λb_max = _eig_extremes(bhhh)
+    λh_min, λh_max = _eig_extremes(H̃)
+    @info "envelope-Hessian diagnostic (t=$(round(elapsed; sigdigits=3))s, " *
+        "singular blocks=$n_singular, λ-shift=$(round(shift; sigdigits=4)))"
+    @info "  BHHH  diag: min=$(round(minimum(db); sigdigits=4)) " *
+        "max=$(round(maximum(db); sigdigits=4))   λ: $(round(λb_min; sigdigits=4)) … $(round(λb_max; sigdigits=4))"
+    @info "  H̃    diag: min=$(round(minimum(dh); sigdigits=4)) " *
+        "max=$(round(maximum(dh); sigdigits=4))   λ: $(round(λh_min; sigdigits=4)) … $(round(λh_max; sigdigits=4))"
+    @info "  ratio diag(BHHH)/diag(H̃): " *
+        "min=$(round(minimum(db ./ max.(dh, 1.0f-12)); sigdigits=4)) " *
+        "max=$(round(maximum(db ./ max.(dh, 1.0f-12)); sigdigits=4))"
+    return nothing
+end
+
+# -------------------------------------------------------------------------------------------------
 # Inner Newton over δ (concentrated likelihood).
-# Populates state.cached_conv_{ll,grad,bhhh} on success; leaves cached_conv_ll = NaN on failure.
+# On convergence populates state.cached_conv_{ll,grad,bhhh,envelope_H}; leaves cached_conv_ll = NaN on failure.
 # -------------------------------------------------------------------------------------------------
 
 function concentrated_θ!(state::EstimationState, π::AbstractVector{Float32})
@@ -289,6 +340,24 @@ function concentrated_θ!(state::EstimationState, π::AbstractVector{Float32})
             state.cached_conv_ll[] = ϕ0
             state.cached_conv_grad .= .-state.grad_buf[state.i_nonδ]
             state.cached_conv_bhhh .= state.bhhh_buf
+            # Envelope-corrected concentrated Hessian. Reuses forward-pass buffers
+            # populated by the just-completed eval_combined!. Falls back to BHHH
+            # if the computation throws.
+            try
+                t_env = @elapsed n_singular = eval_envelope_hessian!(
+                    state.work, state.dm, state.envwork;
+                    H = state.envelope_H_buf,
+                )
+                shift = definiteness_shift!(state.envelope_H_buf, 1.0f-3)
+                state.cached_conv_envelope_H .= state.envelope_H_buf
+                if !state.diag_logged[]
+                    log_hessian_diagnostics!(state, n_singular, shift, t_env)
+                    state.diag_logged[] = true
+                end
+            catch e
+                @warn "  inner #$id: envelope Hessian failed ($e), falling back to BHHH"
+                state.cached_conv_envelope_H .= state.bhhh_buf
+            end
             break
         end
 
@@ -395,10 +464,10 @@ function select_optim_method(cmdargs, state, π₀, outer_fg!, outer_fgh!, outer
         return NewtonTrustRegion(
             initial_delta = args["initial-delta"], eta = 0.01, rho_lower = 0.025,
         ), only_fgh!(outer_fgh!)
-    else  # "bfgs" — seed BFGS's initial inverse Hessian with BHHH at π₀
+    else  # "bfgs" — seed BFGS's initial inverse Hessian with the envelope-corrected H̃ at π₀
         concentrated_θ!(state, π₀)
         return BFGS(
-            initial_invH = _ -> inv(state.cached_conv_bhhh),
+            initial_invH = _ -> inv(state.cached_conv_envelope_H),
             alphaguess = InitialStatic(scaled = args["scale"], alpha = args["alpha"]),
         ), only_fg!(outer_fg!)
     end
@@ -442,7 +511,7 @@ function outer_optimize(state::EstimationState, π₀, cmdargs)
         end
         state.last_ll[] = ll
         isnothing(G) || (G .= state.cached_conv_grad)
-        isnothing(H) || (H .= state.cached_conv_bhhh)
+        isnothing(H) || (H .= state.cached_conv_envelope_H)
         return isnothing(F) ? nothing : ll
     end
 
@@ -486,7 +555,7 @@ end
 # -------------------------------------------------------------------------------------------------
 # JuMP + KNITRO outer optimizer.
 # Wraps concentrated_θ! as a user-defined operator with manually supplied gradient
-# (∇NLL from envelope theorem) and Hessian (BHHH).
+# (∇NLL from envelope theorem) and Hessian (envelope-corrected H̃_NLL).
 # KNITRO is loaded only when this branch is taken — it's not in Project.toml.
 # -------------------------------------------------------------------------------------------------
 
@@ -520,7 +589,7 @@ function build_jump_callbacks(state::EstimationState)
         ll = state.cached_conv_ll[]
         (isnan(ll) || isapprox(Float64(ll), 0)) && return
         @inbounds for i in 1:size(H, 1), j in 1:i
-            H[i, j] = T(state.cached_conv_bhhh[i, j])
+            H[i, j] = T(state.cached_conv_envelope_H[i, j])
         end
         return
     end

@@ -27,9 +27,9 @@ import ..ORDER
 import SparseArrayKit
 import ..@indexof
 
-export DenseModel, DenseWork,
+export DenseModel, DenseWork, EnvelopeHessWork,
     forward_pass!, eval_ll!, eval_ll_δgrad!, eval_combined!,
-    woodbury_newton_step!, param_indices
+    woodbury_newton_step!, eval_envelope_hessian!, definiteness_shift!, param_indices
 
 # -------------------------------------------------------------------------------------------------
 # Parameter-vector index ranges — delegate to @indexof so ORDER changes propagate here.
@@ -599,6 +599,334 @@ function woodbury_newton_step!(
         end
     end
     return step
+end
+
+# -------------------------------------------------------------------------------------------------
+# Envelope-corrected concentrated Hessian
+#
+# Computes H̃_NLL = ∂²NLL/∂π² − C̃ · (∂²NLL/∂δ²)⁻¹ · C̃ᵀ, the actual Hessian of the
+# concentrated NLL viewed as a function of π (BHHH ≈ ∂²NLL/∂π² alone overestimates
+# this by orders of magnitude because the envelope correction is dominant).
+#
+# Uses the same Woodbury structure as the inner Newton: the middle Z×Z system is
+# factorized once per time block and solved against all 22 π-derivative columns.
+#
+# Must be called *after* a successful `eval_combined!` so that work.U_blocks (P),
+# work.E_blocks (E), and work.resid_blocks are populated.
+# -------------------------------------------------------------------------------------------------
+
+struct EnvelopeHessWork
+    partial_H::Matrix{Float32}
+    K_corr::Matrix{Float32}
+    H_per_thread::Vector{Matrix{Float32}}
+    K_per_thread::Vector{Matrix{Float32}}
+    singular_block::Vector{Bool}
+end
+
+function EnvelopeHessWork(dm::DenseModel)
+    N_NONδ = (dm.K + 1) * dm.Dn + 2
+    nt = Threads.nthreads()
+    return EnvelopeHessWork(
+        zeros(Float32, N_NONδ, N_NONδ),
+        zeros(Float32, N_NONδ, N_NONδ),
+        [zeros(Float32, N_NONδ, N_NONδ) for _ in 1:nt],
+        [zeros(Float32, N_NONδ, N_NONδ) for _ in 1:nt],
+        falses(dm.n_blocks),
+    )
+end
+
+# Multi-RHS Woodbury solve. Solves W = (-H_t)⁻¹ · G where G is N_bi × n_rhs.
+# Factorizes the Z × Z middle matrix once via Cholesky.
+# Returns `true` if singular (W is filled with G as a fallback).
+function _woodbury_solve_multi!(
+    W::Matrix{Float32}, U::Matrix{Float32}, M_z::Vector{Float32}, G::Matrix{Float32},
+)
+    Z = length(M_z)
+    N_bi = size(U, 1)
+    @assert size(G, 1) == N_bi
+    @assert size(W) == size(G)
+    d = U * M_z                                  # N_bi
+    inv_d = 1.0f0 ./ max.(d, 1.0f-12)            # N_bi
+    sqrt_inv_d = sqrt.(inv_d)                    # N_bi
+    A = sqrt_inv_d .* U                          # N_bi × Z
+    middle = zeros(Float32, Z, Z)
+    middle[diagind(middle)] .= 1.0f0 ./ M_z
+    BLAS.syrk!('U', 'T', -1.0f0, A, 1.0f0, middle)
+    try
+        F = cholesky!(Symmetric(middle, :U))
+        SG = sqrt_inv_d .* G                     # N_bi × n_rhs (broadcast)
+        rhs = A' * SG                            # Z × n_rhs
+        w = F \ rhs                              # Z × n_rhs
+        W .= inv_d .* G .+ sqrt_inv_d .* (A * w)
+        return false
+    catch e
+        e isa Union{LinearAlgebra.PosDefException, SingularException} || rethrow(e)
+        W .= G
+        return true
+    end
+end
+
+"""
+eval_envelope_hessian!(work, dm, envwork; H) → singular_blocks_count
+
+Computes H̃_NLL into `H` (22 × 22). Assumes `eval_combined!` has just run so the
+forward-pass buffers (U, E, resid) reflect the current params. Returns the number
+of time blocks that hit a singular Woodbury solve (fell back to identity).
+"""
+function eval_envelope_hessian!(
+    work::DenseWork, dm::DenseModel, envwork::EnvelopeHessWork;
+    H::AbstractMatrix{Float32},
+)
+    N_NONδ = (dm.K + 1) * dm.Dn + 2
+    @assert size(H, 1) == size(H, 2) == N_NONδ
+    Kx = dm.K
+    Dn = dm.Dn
+    Z = dm.Z
+    row_η1 = N_NONδ - 1
+    row_η2 = N_NONδ
+
+    for buf in envwork.H_per_thread
+        fill!(buf, 0.0f0)
+    end
+    for buf in envwork.K_per_thread
+        fill!(buf, 0.0f0)
+    end
+    fill!(envwork.singular_block, false)
+
+    @threads :static for bi in 1:(dm.n_blocks)
+        tid = Threads.threadid()
+        H_local = envwork.H_per_thread[tid]
+        K_local = envwork.K_per_thread[tid]
+
+        U_bi = work.U_blocks[bi]
+        E_bi = work.E_blocks[bi]
+        resid_bi = work.resid_blocks[bi]
+        X_bi = dm.X_blocks[bi]
+        dist_bi = dm.dist_blocks[bi]
+        N_bi = size(U_bi, 1)
+        Kp1 = Kx + 1
+
+        # --- Per-block precomputations (Z-indexed reductions) ---
+
+        # xbar[k, z] = Σ_j P_j[z] · X_bi[k, j] = (X_bi · U_bi)[k, z]   (Kp1 × Z)
+        xbar = X_bi * U_bi
+
+        # XEbar[k, z]  = Σ_j P_j[z] · X_bi[k, j] · E_bi[j, z]      (Kp1 × Z)
+        # XdEbar[k, z] = Σ_j P_j[z] · X_bi[k, j] · dist[j, z] · E_bi[j, z]
+        # Ebar[z]      = Σ_j P_j[z] · E_bi[j, z]
+        # dEbar[z]     = Σ_j P_j[z] · dist[j, z] · E_bi[j, z]
+        # EEbar[z]     = Σ_j P_j[z] · E_bi[j, z]²
+        # dEEbar[z]    = Σ_j P_j[z] · dist[j, z] · E_bi[j, z]²
+        # dEdEbar[z]   = Σ_j P_j[z] · dist[j, z]² · E_bi[j, z]²
+        XEbar = zeros(Float32, Kp1, Z)
+        XdEbar = zeros(Float32, Kp1, Z)
+        Ebar = zeros(Float32, Z)
+        dEbar = zeros(Float32, Z)
+        EEbar = zeros(Float32, Z)
+        dEEbar = zeros(Float32, Z)
+        dEdEbar = zeros(Float32, Z)
+        # Also the per-block CCP-weighted (Kp1 × Kp1) covariance contribution M_pp'[z],
+        # accumulated only into the Πᵦ/Πp Hessian block as we walk z.
+
+        # --- Walk zips: build the Πᵦ/Πp partial-Hessian block + sum up bars ---
+        PX = Matrix{Float32}(undef, Kp1, N_bi)
+        Mzx = Matrix{Float32}(undef, Kp1, Kp1)
+        Vz = Matrix{Float32}(undef, Kp1, Kp1)
+
+        @inbounds for z in 1:Z
+            Mz = dm.M_zs[z]
+
+            # PX[k, j] = U_bi[j, z] · X_bi[k, j]
+            for j in 1:N_bi
+                Pjz = U_bi[j, z]
+                Ejz = E_bi[j, z]
+                Djz = dist_bi[j, z]
+                for k in 1:Kp1
+                    PX[k, j] = Pjz * X_bi[k, j]
+                end
+                # Accumulate η-related bars
+                Ebar[z] += Pjz * Ejz
+                dEbar[z] += Pjz * Djz * Ejz
+                EEbar[z] += Pjz * Ejz * Ejz
+                dEEbar[z] += Pjz * Djz * Ejz * Ejz
+                dEdEbar[z] += Pjz * Djz * Djz * Ejz * Ejz
+                # XEbar / XdEbar
+                for k in 1:Kp1
+                    XEbar[k, z] += Pjz * X_bi[k, j] * Ejz
+                    XdEbar[k, z] += Pjz * X_bi[k, j] * Djz * Ejz
+                end
+            end
+
+            # Mzx = PX · X_biᵀ   (Kp1 × Kp1)
+            BLAS.gemm!('N', 'T', 1.0f0, PX, X_bi, 0.0f0, Mzx)
+
+            # V_z[k1, k2] = Mzx[k1, k2] − xbar[k1, z] · xbar[k2, z]
+            for k2 in 1:Kp1, k1 in 1:Kp1
+                Vz[k1, k2] = Mzx[k1, k2] - xbar[k1, z] * xbar[k2, z]
+            end
+
+            # H_Πβ/Πp block: H[(k1-1)Dn+d1, (k2-1)Dn+d2] += M_z · V_z[k1,k2] · D_z[d1] · D_z[d2]
+            for k2 in 1:Kp1, k1 in 1:Kp1
+                coef = Mz * Vz[k1, k2]
+                col_off = (k2 - 1) * Dn
+                row_off = (k1 - 1) * Dn
+                for d2 in 1:Dn
+                    dd = coef * dm.D_dense[d2, z]
+                    for d1 in 1:Dn
+                        H_local[row_off + d1, col_off + d2] += dd * dm.D_dense[d1, z]
+                    end
+                end
+            end
+
+            # η×η partial-Hessian contributions
+            H_local[row_η1, row_η1] += Mz * (EEbar[z] - Ebar[z]^2)
+            mix = Mz * (dEEbar[z] - Ebar[z] * dEbar[z])
+            H_local[row_η1, row_η2] += mix
+            H_local[row_η2, row_η1] += mix
+            H_local[row_η2, row_η2] += Mz * (dEdEbar[z] - dEbar[z]^2)
+        end
+
+        # --- η × (Πᵦ/Πp) cross block of partial Hessian ---
+        # H[(k-1)Dn + d, η₁] -= Σ_z M_z · D_z[d] · (XEbar[k,z] − xbar[k,z]·Ebar[z])
+        # H[(k-1)Dn + d, η₂] -= Σ_z M_z · D_z[d] · (XdEbar[k,z] − xbar[k,z]·dEbar[z])
+        diff_E = XEbar .- xbar .* reshape(Ebar, 1, Z)
+        diff_dE = XdEbar .- xbar .* reshape(dEbar, 1, Z)
+        Mz_row = reshape(dm.M_zs, 1, Z)
+        M_diff_E = diff_E .* Mz_row                # Kp1 × Z
+        M_diff_dE = diff_dE .* Mz_row
+        D_diff_E = dm.D_dense * M_diff_E'          # Dn × Kp1
+        D_diff_dE = dm.D_dense * M_diff_dE'
+        @inbounds for k in 1:Kp1, d in 1:Dn
+            row_idx = (k - 1) * Dn + d
+            H_local[row_idx, row_η1] -= D_diff_E[d, k]
+            H_local[row_η1, row_idx] -= D_diff_E[d, k]
+            H_local[row_idx, row_η2] -= D_diff_dE[d, k]
+            H_local[row_η2, row_idx] -= D_diff_dE[d, k]
+        end
+
+        # --- Second-order η contributions (resid · ∂²u/∂η_k∂η_l, NLL sign-flipped) ---
+        s_rE = 0.0f0; s_rdE = 0.0f0; s_rddE = 0.0f0
+        @inbounds for z in 1:Z, j in 1:N_bi
+            r = resid_bi[j, z]
+            e = E_bi[j, z]
+            di = dist_bi[j, z]
+            s_rE += r * e
+            s_rdE += r * di * e
+            s_rddE += r * di * di * e
+        end
+        H_local[row_η1, row_η1] += s_rE
+        H_local[row_η1, row_η2] += s_rdE
+        H_local[row_η2, row_η1] += s_rdE
+        H_local[row_η2, row_η2] += s_rddE
+
+        # --- Build C̃_bi: cross-partial ∂²NLL/∂π_l ∂δ_{bi,j}   (N_NONδ × N_bi) ---
+        # For Πᵦ/Πp[d, k]: C̃[(k-1)Dn+d, j] = D_z[d]-weighted sum over z of
+        #    M_z · P_j[z] · (X_bi[k, j] − xbar[k, z])
+        # For η₁: C̃[η₁, j] = Σ_z M_z · P_j[z] · (Ebar[z] − E_bi[j, z])
+        # For η₂: C̃[η₂, j] = Σ_z M_z · P_j[z] · (dEbar[z] − dist[j,z] · E_bi[j,z])
+        Ctilde = zeros(Float32, N_NONδ, N_bi)
+
+        # Πᵦ/Πp part. Vectorize over (k, d):
+        #   C̃[(k-1)Dn+d, j] = X_bi[k,j] · S1[d, j] − S2[d, k, j]
+        # where
+        #   S1[d, j] = Σ_z M_z · D_z[d] · P_j[z]               (Dn × N_bi)
+        #   S2[d, k, j] = Σ_z M_z · D_z[d] · P_j[z] · xbar[k, z]  (Dn × Kp1 × N_bi)
+        # Compute S1 = D · diag(M_z) · U_biᵀ   (cheap)
+        MzU = dm.M_zs .* U_bi'                     # Z × N_bi  (M_z · P_j[z])
+        S1 = dm.D_dense * MzU                       # Dn × N_bi
+
+        # For S2 we need a 3-index sum. Equivalently, define
+        #   T[d, k, z] = M_z · D_z[d] · xbar[k, z]   (Dn × Kp1 × Z)
+        # Then S2[d, k, j] = Σ_z T[d, k, z] · U_bi[j, z]
+        # Compute via a Kp1-loop:
+        @inbounds for k in 1:Kp1
+            # T_k[d, z] = M_z · D_z[d] · xbar[k, z] = D_z[d] · (M_z · xbar[k, z])
+            Mxk = dm.M_zs .* view(xbar, k, :)       # Z
+            T_k = dm.D_dense .* reshape(Mxk, 1, Z)  # Dn × Z
+            # S2_k[d, j] = T_k · U_biᵀ  (Dn × N_bi)
+            S2_k = T_k * U_bi'
+            for d in 1:Dn, j in 1:N_bi
+                row_idx = (k - 1) * Dn + d
+                Ctilde[row_idx, j] = X_bi[k, j] * S1[d, j] - S2_k[d, j]
+            end
+        end
+
+        # η rows
+        # η₁: Σ_z M_z · P_j[z] · Ebar[z]   −   Σ_z M_z · P_j[z] · E_bi[j, z]
+        # First term: U_bi · (M_z .* Ebar)   length N_bi (U_bi is N_bi × Z; sum over z)
+        MzEbar = dm.M_zs .* Ebar                    # Z
+        MzdEbar = dm.M_zs .* dEbar
+        term1_η1 = U_bi * MzEbar                    # N_bi
+        term1_η2 = U_bi * MzdEbar
+        # Second term: Σ_z M_z · P_j[z] · E_bi[j, z]   per j, computed in-line.
+        @inbounds for j in 1:N_bi
+            s_e = 0.0f0
+            s_de = 0.0f0
+            for z in 1:Z
+                Mz = dm.M_zs[z]
+                Pjz = U_bi[j, z]
+                Ejz = E_bi[j, z]
+                Djz = dist_bi[j, z]
+                s_e += Mz * Pjz * Ejz
+                s_de += Mz * Pjz * Djz * Ejz
+            end
+            Ctilde[row_η1, j] = term1_η1[j] - s_e
+            Ctilde[row_η2, j] = term1_η2[j] - s_de
+        end
+
+        # --- Apply Woodbury: W = (−H_δδ_bi)⁻¹ · C̃ᵀ   (N_bi × N_NONδ) ---
+        # _woodbury_solve_multi! treats G = C̃ᵀ.
+        Gt = Matrix(Ctilde')                        # N_bi × N_NONδ
+        W = Matrix{Float32}(undef, N_bi, N_NONδ)
+        singular = _woodbury_solve_multi!(W, U_bi, dm.M_zs, Gt)
+        envwork.singular_block[bi] = singular
+
+        # K_block += C̃ · W   (22 × 22).  Note Wᵀ is N_NONδ × N_bi, but we have W as
+        # N_bi × N_NONδ, so C̃ · W is (N_NONδ × N_bi) · (N_bi × N_NONδ) = N_NONδ × N_NONδ. ✓
+        # If singular, the fallback W=G means K += C̃ · C̃ᵀ which is still PSD (just
+        # not the correct envelope correction) — degrades gracefully toward BHHH-like.
+        BLAS.gemm!('N', 'N', 1.0f0, Ctilde, W, 1.0f0, K_local)
+    end
+
+    # Reduce thread-local accumulators
+    fill!(envwork.partial_H, 0.0f0)
+    fill!(envwork.K_corr, 0.0f0)
+    for buf in envwork.H_per_thread
+        envwork.partial_H .+= buf
+    end
+    for buf in envwork.K_per_thread
+        envwork.K_corr .+= buf
+    end
+
+    # H̃_NLL = partial_H − K_corr
+    @inbounds for j in 1:N_NONδ, i in 1:N_NONδ
+        H[i, j] = envwork.partial_H[i, j] - envwork.K_corr[i, j]
+    end
+    # Symmetrize (small Float32 asymmetries from non-associative reductions)
+    @inbounds for j in 1:N_NONδ, i in (j + 1):N_NONδ
+        s = 0.5f0 * (H[i, j] + H[j, i])
+        H[i, j] = s
+        H[j, i] = s
+    end
+
+    return count(envwork.singular_block)
+end
+
+# Eigenvalue floor: if λ_min(H) < floor, shift H += (floor − λ_min) · I.
+# Returns the shift applied (0 if H was already above the floor).
+function definiteness_shift!(H::AbstractMatrix{Float32}, floor::Float32 = 1.0f-3)
+    N = size(H, 1)
+    # Use Float64 for the eigenvalue computation; the matrix is small (22×22).
+    Hd = Symmetric(Float64.(H))
+    λmin = Float32(eigmin(Hd))
+    if λmin < floor
+        shift = floor - λmin
+        @inbounds for i in 1:N
+            H[i, i] += shift
+        end
+        return shift
+    end
+    return 0.0f0
 end
 
 end # module Dense
