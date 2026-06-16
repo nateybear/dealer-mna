@@ -532,9 +532,8 @@ function outer_optimize(state::EstimationState, π₀, cmdargs)
         _cb_iter[] += 1
         if _cb_iter[] % 25 == 0
             JLD2.save_object(
-                _checkpoint_path, (minimizer = state.θ, value = opt_state.f_x)
+                _checkpoint_path, (; minimizer = state.θ)
             )
-            @info "  checkpoint saved at outer_iter=$(_cb_iter[]) NLL=$(round(opt_state.f_x; sigdigits=6))"
         end
         return false
     end
