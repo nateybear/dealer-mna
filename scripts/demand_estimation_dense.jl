@@ -29,6 +29,7 @@ import LineSearches: HagerZhang, InitialStatic, InitialHagerZhang
 import Optim.NLSolversBase: only_fgh!, only_fg!
 import Optim: AffineSimplexer
 import JuMP
+using KNITRO # will be a no-op on computers without knitro
 
 using ArgParse
 
@@ -249,7 +250,7 @@ function _eig_extremes(M::AbstractMatrix{Float32})
 end
 
 function log_hessian_diagnostics!(
-    state::EstimationState, n_singular::Int, shift::Float32, elapsed::Float64,
+    state::EstimationState, n_singular::Int, shift::Float32, elapsed::Float64
 )
     bhhh = state.cached_conv_bhhh
     H̃ = state.cached_conv_envelope_H
@@ -454,22 +455,26 @@ function select_optim_method(cmdargs, state, π₀, outer_fg!, outer_fgh!, outer
     args = cmdargs[methodname]
     if methodname == "nelder-mead"
         return NelderMead(
-            intial_simplex = AffineSimplexer(a = args["a"], b = args["b"]),
-        ), outer_zeroth
+            intial_simplex = AffineSimplexer(a = args["a"], b = args["b"])
+        ),
+        outer_zeroth
     elseif methodname == "newton"
         return Newton(
-            alphaguess = InitialStatic(scaled = args["scale"], alpha = args["alpha"]),
-        ), only_fgh!(outer_fgh!)
+            alphaguess = InitialStatic(scaled = args["scale"], alpha = args["alpha"])
+        ),
+        only_fgh!(outer_fgh!)
     elseif methodname == "newton-tro"
         return NewtonTrustRegion(
-            initial_delta = args["initial-delta"], eta = 0.01, rho_lower = 0.025,
-        ), only_fgh!(outer_fgh!)
+            initial_delta = args["initial-delta"], eta = 0.01, rho_lower = 0.025
+        ),
+        only_fgh!(outer_fgh!)
     else  # "bfgs" — seed BFGS's initial inverse Hessian with the envelope-corrected H̃ at π₀
         concentrated_θ!(state, π₀)
         return BFGS(
             initial_invH = _ -> inv(state.cached_conv_envelope_H),
             alphaguess = InitialStatic(scaled = args["scale"], alpha = args["alpha"]),
-        ), only_fg!(outer_fg!)
+        ),
+        only_fg!(outer_fg!)
     end
 end
 
@@ -527,7 +532,7 @@ function outer_optimize(state::EstimationState, π₀, cmdargs)
         _cb_iter[] += 1
         if _cb_iter[] % 25 == 0
             JLD2.save_object(
-                _checkpoint_path, (minimizer = state.θ, value = opt_state.f_x),
+                _checkpoint_path, (minimizer = state.θ, value = opt_state.f_x)
             )
             @info "  checkpoint saved at outer_iter=$(_cb_iter[]) NLL=$(round(opt_state.f_x; sigdigits=6))"
         end
@@ -547,7 +552,7 @@ function outer_optimize(state::EstimationState, π₀, cmdargs)
     )
 
     method, objective = select_optim_method(
-        cmdargs, state, π₀, outer_fg!, outer_fgh!, outer_zeroth,
+        cmdargs, state, π₀, outer_fg!, outer_fgh!, outer_zeroth
     )
     return optimize(objective, π₀, method, Optim.Options(; options..., iterations = 5000))
 end
@@ -576,22 +581,22 @@ function build_jump_callbacks(state::EstimationState)
         ll = state.cached_conv_ll[]
         if isnan(ll) || isapprox(Float64(ll), 0)
             fill!(g, zero(T))
-            return
+            return nothing
         end
         @inbounds for i in 1:length(g)
             g[i] = T(state.cached_conv_grad[i])
         end
-        return
+        return nothing
     end
     function nll_hess!(H::AbstractMatrix{T}, xs::Vararg{T, M}) where {T, M}
         π = Float32.(collect(xs))
         concentrated_θ!(state, π)
         ll = state.cached_conv_ll[]
-        (isnan(ll) || isapprox(Float64(ll), 0)) && return
+        (isnan(ll) || isapprox(Float64(ll), 0)) && return nothing
         @inbounds for i in 1:size(H, 1), j in 1:i
             H[i, j] = T(state.cached_conv_envelope_H[i, j])
         end
-        return
+        return nothing
     end
     return nll_value, nll_grad!, nll_hess!
 end
@@ -606,12 +611,10 @@ function apply_knitro_options!(m, args)
     JuMP.set_attribute(m, "hessopt", args["hessopt"])
     JuMP.set_attribute(m, "honorbnds", args["honorbnds"])
     args["bar-initpt"] >= 0 && JuMP.set_attribute(m, "bar_initpt", args["bar-initpt"])
-    return
+    return nothing
 end
 
 function optimize_knitro(state::EstimationState, π₀, cmdargs)
-    @eval Main using KNITRO
-
     args = cmdargs["knitro"]
     N = length(state.i_nonδ)
     lb = vcat(fill(-15.0, N - 2), -10.0, -5.0)
@@ -680,7 +683,8 @@ with_logging() do
              outer_optimize(state, π₀, cmdargs)
 
     final_nll = is_knitro ? result.value : result.minimum
-    converged_str = is_knitro ?
+    converged_str =
+        is_knitro ?
         "status=$(result.knitro_status)" :
         "converged=$(Optim.converged(result))"
     @info "\nEstimation done: NLL=$(round(Float64(final_nll); sigdigits=6)) $converged_str\n"
