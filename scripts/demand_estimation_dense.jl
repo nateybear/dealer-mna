@@ -21,7 +21,7 @@ import .Demand.Dense:
     DenseModel, DenseWork, EnvelopeHessWork,
     forward_pass!, eval_ll!, eval_ll_δgrad!,
     eval_combined!, woodbury_newton_step!,
-    eval_envelope_hessian!, definiteness_shift!, param_indices
+    eval_envelope_hessian!, definiteness_shift!, param_indices, build_nonδ_labels
 using LinearAlgebra
 using Optim
 import Random: seed!
@@ -47,6 +47,8 @@ function build_argparse_settings()
         "newton-tro"
         action = :command
         "bfgs"
+        action = :command
+        "lbfgs-full"
         action = :command
         "knitro"
         action = :command
@@ -84,6 +86,13 @@ function build_argparse_settings()
         default = 0.01
     end
     @add_arg_table settings["bfgs"] begin
+        "--scale"
+        action = :store_true
+        "--alpha"
+        arg_type = Float64
+        default = 0.1
+    end
+    @add_arg_table settings["lbfgs-full"] begin
         "--scale"
         action = :store_true
         "--alpha"
@@ -138,16 +147,6 @@ function bounds_violated(π)
     η_baseline = π[end - 1]
     return abs(η_dist) > 5 || abs(η_baseline) > 10 ||
            any(>(15), abs.(π[1:(end - 2)]))
-end
-
-function build_nonδ_labels()
-    D = string.(Demand.DEMOGRAPHIC_ATTRIBUTES)
-    P = string.(Demand.PRODUCT_ATTRIBUTES)
-    return vcat(
-        ["Π[$d,$p]" for p in P for d in D],
-        ["Πp[$d]" for d in D],
-        ["η_baseline", "η_dist"],
-    )
 end
 
 function format_step_log(labels, π, prev_π)
@@ -784,6 +783,77 @@ function optimize_knitro_full(state::EstimationState, cmdargs)
 end
 
 # -------------------------------------------------------------------------------------------------
+# Optim L-BFGS over full θ — analog of the KNITRO --full path.
+# Joint (δ, π) optimization: no concentrated_θ!, no inner Newton. eval_combined!
+# yields the full gradient in one pass per evaluation; LBFGS maintains its own
+# curvature memory across iterations. Locked to LBFGS because the parameter
+# space is O(65K) — Newton / TrustRegion are infeasible at this scale.
+# -------------------------------------------------------------------------------------------------
+
+function optimize_lbfgs_full(state::EstimationState, cmdargs)
+    args = cmdargs["lbfgs-full"]
+    N = length(state.θ)
+    _prev_π = copy(state.θ[state.i_nonδ])
+
+    function outer_full_fg!(F, G, θ)
+        π = view(θ, state.i_nonδ)
+        if bounds_violated(π)
+            isnothing(G) || (G .= 0)
+            return isnothing(F) ? nothing : 1.0f10
+        end
+        @info format_step_log(state.nonδ_labels, π, _prev_π)
+        _prev_π .= π
+
+        copyto!(state.θ, Float32.(θ))
+        ll = eval_combined!(
+            state.work, state.dm, state.θ;
+            grad = state.grad_buf, bhhh = state.bhhh_buf,
+        )
+        nll = -ll
+        if isnan(nll) || isapprox(Float64(ll), 0)
+            isnothing(G) || (G .= 0)
+            return isnothing(F) ? nothing : 1.0f10
+        end
+        state.last_ll[] = nll
+        isnothing(G) || (G .= .-state.grad_buf)
+        return isnothing(F) ? nothing : nll
+    end
+
+    _checkpoint_path =
+        splitext(snakemake.output[1])[1] * ".checkpoint" * cmdargs["prefix"] * ".jld2"
+    _cb_iter = Ref(0)
+    function checkpoint_cb(opt_state)
+        _cb_iter[] += 1
+        if _cb_iter[] % 25 == 0
+            JLD2.save_object(_checkpoint_path, (; minimizer = state.θ))
+        end
+        return false
+    end
+    options = (
+        store_trace = true,
+        extended_trace = true,
+        show_trace = true,
+        g_abstol = 1.0f-3,
+        x_abstol = NaN,
+        x_reltol = NaN,
+        f_abstol = NaN,
+        f_reltol = NaN,
+        allow_f_increases = true,
+        callback = checkpoint_cb,
+    )
+    method = LBFGS(
+        alphaguess = InitialStatic(scaled = args["scale"], alpha = args["alpha"]),
+    )
+
+    @info "Starting LBFGS outer optimization" mode = "full-θ" N_vars = N alpha =
+        args["alpha"] scaled = args["scale"]
+    return optimize(
+        only_fg!(outer_full_fg!), copy(state.θ), method,
+        Optim.Options(; options..., iterations = 5000),
+    )
+end
+
+# -------------------------------------------------------------------------------------------------
 # Driver
 # -------------------------------------------------------------------------------------------------
 
@@ -811,9 +881,16 @@ with_logging() do
     π₀ = Float32.(θ[state.i_nonδ])
 
     @info "Starting outer optimization"
-    is_knitro = cmdargs["%COMMAND%"] == "knitro"
-    result = is_knitro ? optimize_knitro(state, π₀, cmdargs) :
-             outer_optimize(state, π₀, cmdargs)
+    cmd = cmdargs["%COMMAND%"]
+    is_knitro = cmd == "knitro"
+    is_lbfgs_full = cmd == "lbfgs-full"
+    result = if is_knitro
+        optimize_knitro(state, π₀, cmdargs)
+    elseif is_lbfgs_full
+        optimize_lbfgs_full(state, cmdargs)
+    else
+        outer_optimize(state, π₀, cmdargs)
+    end
 
     final_nll = is_knitro ? result.value : result.minimum
     converged_str =
