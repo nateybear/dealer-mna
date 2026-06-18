@@ -120,6 +120,8 @@ function build_argparse_settings()
         "--honorbnds"
         arg_type = Int
         default = 1
+        "--full"
+        action = :store_true
     end
     return settings
 end
@@ -204,6 +206,10 @@ mutable struct EstimationState{M, DM, W, LS, EHW}
     cached_conv_bhhh::Matrix{Float32}
     cached_conv_envelope_H::Matrix{Float32}   # envelope-corrected H̃_NLL (Newton/BFGS use this)
     diag_logged::Base.RefValue{Bool}           # whether the iter-0 BHHH/H̃ diagnostic has been emitted
+    # KNITRO --full path: cache the most recently evaluated full θ so the value
+    # and gradient callbacks at the same point only trigger one eval_combined! pass.
+    last_full_θ::Vector{Float32}
+    last_full_ll::Base.RefValue{Float32}
     ls::LS
     nonδ_labels::Vector{String}
 end
@@ -233,6 +239,8 @@ function EstimationState(model, dm, work, θ::Vector{Float32})
         1.0f-4 * Matrix{Float32}(I, N_NONδ, N_NONδ),
         1.0f-4 * Matrix{Float32}(I, N_NONδ, N_NONδ),
         Ref(false),
+        fill(NaN32, N_θ),
+        Ref(NaN32),
         HagerZhang(),
         build_nonδ_labels(),
     )
@@ -600,6 +608,48 @@ function build_jump_callbacks(state::EstimationState)
     return nll_value, nll_grad!, nll_hess!
 end
 
+# Full-θ callbacks for KNITRO's --full mode. KNITRO drives the joint (δ, π)
+# optimization itself; each evaluation is one direct eval_combined! pass — no
+# concentrated_θ! / inner Newton. Value and gradient at the same θ share one pass
+# via the last_full_θ/last_full_ll cache.
+function build_full_jump_callbacks(state::EstimationState)
+    N_θ = length(state.θ)
+    function eval_full!(θ_in::AbstractVector{Float32})
+        if θ_in == state.last_full_θ
+            return state.last_full_ll[]
+        end
+        copyto!(state.θ, θ_in)
+        ll = eval_combined!(
+            state.work, state.dm, state.θ;
+            grad = state.grad_buf, bhhh = state.bhhh_buf,
+        )
+        state.last_full_ll[] = ll
+        copyto!(state.last_full_θ, θ_in)
+        return ll
+    end
+    function nll_value_full(xs::Vararg{T, M}) where {T, M}
+        θ_in = Float32.(collect(xs))
+        ll = eval_full!(θ_in)
+        if isnan(ll) || isapprox(Float64(ll), 0)
+            return T(1.0e10)
+        end
+        return T(-ll)
+    end
+    function nll_grad_full!(g::AbstractVector{T}, xs::Vararg{T, M}) where {T, M}
+        θ_in = Float32.(collect(xs))
+        ll = eval_full!(θ_in)
+        if isnan(ll) || isapprox(Float64(ll), 0)
+            fill!(g, zero(T))
+            return nothing
+        end
+        @inbounds for i in 1:N_θ
+            g[i] = T(-state.grad_buf[i])
+        end
+        return nothing
+    end
+    return nll_value_full, nll_grad_full!
+end
+
 function apply_knitro_options!(m, args)
     JuMP.set_attribute(m, "outlev", args["outlev"])
     JuMP.set_attribute(m, "maxit", args["maxit"])
@@ -615,6 +665,9 @@ end
 
 function optimize_knitro(state::EstimationState, π₀, cmdargs)
     args = cmdargs["knitro"]
+    if args["full"]
+        return optimize_knitro_full(state, cmdargs)
+    end
     N = length(state.i_nonδ)
     lb = vcat(fill(-15.0, N - 2), -10.0, -5.0)
     ub = vcat(fill(15.0, N - 2), 10.0, 5.0)
@@ -632,13 +685,59 @@ function optimize_knitro(state::EstimationState, π₀, cmdargs)
 
     apply_knitro_options!(m, args)
 
-    @info "Starting KNITRO outer optimization" N_vars = N hessian =
+    @info "Starting KNITRO outer optimization" mode = "concentrated" N_vars = N hessian =
         !args["no-hessian"] algorithm = args["algorithm"] hessopt = args["hessopt"]
     JuMP.optimize!(m)
 
     π_opt = Float32.(JuMP.value.(x))
     concentrated_θ!(state, π_opt)
     final_ll = state.cached_conv_ll[]
+    status = string(JuMP.termination_status(m))
+    @info "KNITRO done: status=$status NLL=$(round(Float64(final_ll); sigdigits=6))"
+
+    return (
+        minimizer = copy(state.θ),
+        value = isnan(final_ll) ? 1.0f10 : final_ll,
+        knitro_status = status,
+    )
+end
+
+# Joint (δ, π) optimization with KNITRO's built-in L-BFGS (hessopt=6).
+# eval_combined! produces the full gradient in one pass; the per-iteration cost
+# is one forward+backward pass and KNITRO maintains its own curvature memory.
+function optimize_knitro_full(state::EstimationState, cmdargs)
+    args = cmdargs["knitro"]
+    args["hessopt"] = 6   # force L-BFGS; user-provided --hessopt is ignored
+    N = length(state.θ)
+
+    lb = fill(-Inf, N)
+    ub = fill(Inf, N)
+    i_nonδ = state.i_nonδ
+    n_nonδ = length(i_nonδ)
+    @inbounds for k in 1:(n_nonδ - 2)
+        lb[i_nonδ[k]] = -15.0
+        ub[i_nonδ[k]] = 15.0
+    end
+    lb[i_nonδ[end - 1]] = -10.0
+    ub[i_nonδ[end - 1]] = 10.0
+    lb[i_nonδ[end]] = -5.0
+    ub[i_nonδ[end]] = 5.0
+
+    m = JuMP.Model(KNITRO.Optimizer)
+    JuMP.@variable(m, lb[i] <= x[i = 1:N] <= ub[i], start = Float64(state.θ[i]))
+
+    nll_value_full, nll_grad_full! = build_full_jump_callbacks(state)
+    JuMP.@operator(m, op_nll, N, nll_value_full, nll_grad_full!)
+    JuMP.@objective(m, Min, op_nll(x...))
+
+    apply_knitro_options!(m, args)
+
+    @info "Starting KNITRO outer optimization" mode = "full-θ" N_vars = N hessian =
+        false algorithm = args["algorithm"] hessopt = args["hessopt"]
+    JuMP.optimize!(m)
+
+    copyto!(state.θ, Float32.(JuMP.value.(x)))
+    final_ll = -eval_ll!(state.work, state.dm, state.θ)
     status = string(JuMP.termination_status(m))
     @info "KNITRO done: status=$status NLL=$(round(Float64(final_ll); sigdigits=6))"
 
