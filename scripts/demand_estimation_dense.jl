@@ -131,8 +131,8 @@ function build_argparse_settings()
         default = 1
         "--full"
         action = :store_true
-	"--multistart"
-	action = :store_true
+        "--multistart"
+        action = :store_true
     end
     return settings
 end
@@ -637,7 +637,7 @@ function build_full_knitro_callbacks(state::EstimationState)
     function eval_f(_kc, _cb, evalRequest, evalResult, _userParams)
         ll = ensure_evaluated!(evalRequest.x)
         evalResult.obj[1] = (isnan(ll) || isapprox(Float64(ll), 0)) ?
-            1.0e10 : Float64(-ll)
+                            1.0e10 : Float64(-ll)
         return 0
     end
     function eval_g!(_kc, _cb, evalRequest, evalResult, _userParams)
@@ -831,7 +831,6 @@ function optimize_lbfgs_full(state::EstimationState, cmdargs)
     end
     options = (
         store_trace = true,
-        extended_trace = true,
         show_trace = true,
         g_abstol = 1.0f-3,
         x_abstol = NaN,
@@ -842,11 +841,10 @@ function optimize_lbfgs_full(state::EstimationState, cmdargs)
         callback = checkpoint_cb,
     )
     method = LBFGS(
-        alphaguess = InitialStatic(scaled = args["scale"], alpha = args["alpha"]),
+        alphaguess = InitialStatic(scaled = args["scale"], alpha = args["alpha"])
     )
 
-    @info "Starting LBFGS outer optimization" mode = "full-θ" N_vars = N alpha =
-        args["alpha"] scaled = args["scale"]
+    @info "Starting LBFGS outer optimization" mode = "full-θ" N_vars = N alpha = args["alpha"] scaled = args["scale"]
     return optimize(
         only_fg!(outer_full_fg!), copy(state.θ), method,
         Optim.Options(; options..., iterations = 5000),
