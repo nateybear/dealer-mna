@@ -122,6 +122,8 @@ function build_argparse_settings()
         default = 1
         "--full"
         action = :store_true
+	"--multistart"
+	action = :store_true
     end
     return settings
 end
@@ -678,6 +680,8 @@ function apply_knitro_options_c!(kc, args)
     KNITRO.KN_set_int_param_by_name(kc, "algorithm", args["algorithm"])
     KNITRO.KN_set_int_param_by_name(kc, "hessopt", args["hessopt"])
     KNITRO.KN_set_int_param_by_name(kc, "honorbnds", args["honorbnds"])
+    KNITRO.KN_set_int_param_by_name(kc, "multistart", args["multistart"])
+    KNITRO.KN_set_int_param_by_name(kc, "numthreads", 12)
     args["bar-initpt"] >= 0 &&
         KNITRO.KN_set_int_param_by_name(kc, "bar_initpt", args["bar-initpt"])
     return nothing
@@ -730,10 +734,9 @@ function optimize_knitro_full(state::EstimationState, cmdargs)
     args = cmdargs["knitro"]
     args["hessopt"] = 6   # force L-BFGS; user-provided --hessopt is ignored
     N = length(state.θ)
-    KN_INF = KNITRO.KN_INFINITY
 
-    lb = fill(-KN_INF, N)
-    ub = fill(KN_INF, N)
+    lb = fill(-200.0, N)
+    ub = fill(5.0, N)
     i_nonδ = state.i_nonδ
     n_nonδ = length(i_nonδ)
     @inbounds for k in 1:(n_nonδ - 2)
