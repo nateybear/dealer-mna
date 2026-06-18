@@ -844,9 +844,11 @@ function optimize_lbfgs_full(state::EstimationState, cmdargs)
         alphaguess = InitialStatic(scaled = args["scale"], alpha = args["alpha"])
     )
 
+    @show state.θ
+
     @info "Starting LBFGS outer optimization" mode = "full-θ" N_vars = N alpha = args["alpha"] scaled = args["scale"]
     return optimize(
-        only_fg!(outer_full_fg!), copy(state.θ), method,
+        only_fg!(outer_full_fg!), state.θ, method,
         Optim.Options(; options..., iterations = 5000),
     )
 end
