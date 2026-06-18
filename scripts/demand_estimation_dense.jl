@@ -119,7 +119,7 @@ function build_argparse_settings()
         default = 1e-6
         "--opttol"
         arg_type = Float64
-        default = 1e-3
+        default = 1e-6
         "--xtol"
         arg_type = Float64
         default = 1e-8
@@ -553,7 +553,7 @@ function outer_optimize(state::EstimationState, π₀, cmdargs)
         store_trace = true,
         extended_trace = true,
         show_trace = true,
-        g_abstol = 1.0f-3,
+        g_abstol = 1.0f-6,
         x_abstol = NaN,
         x_reltol = NaN,
         f_abstol = NaN,
