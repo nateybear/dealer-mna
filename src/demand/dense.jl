@@ -91,6 +91,10 @@ struct DenseModel{T <: AbstractDemandModel}
     t_obs::Matrix{Int32}
     D_dense::Matrix{Float32}
     M_zs::Vector{Float32}
+    # 1 / total consumer-decisions = 1 / (Σ_z M_z · n_blocks). All eval_*! return
+    # the average likelihood (sum × inv_N) so the outer optimizer sees a O(1)-scale
+    # gradient instead of O(M_total) — much friendlier for LBFGS/Newton step sizing.
+    inv_N::Float32
 end
 
 function DenseModel(model::DemandModel{FixedCoefType}, zips::Vector{String})
@@ -201,9 +205,12 @@ function DenseModel(model::DemandModel{FixedCoefType}, zips::Vector{String})
         end
     end
 
+    inv_N = 1.0f0 / (sum(M_zs) * Float32(n_blocks))
+
     return DenseModel(
         model, N, Z, K, Dn, n_blocks, zips,
         block_param_idxs, X_blocks, dist_blocks, counts_blocks, t_obs, D_dense, M_zs,
+        inv_N,
     )
 end
 
@@ -380,8 +387,9 @@ end
 """
 eval_ll!(work, dm, params) → ll::Float32
 
-Runs forward pass and returns the log-likelihood. Cheaper than `eval_combined!` —
-no resid, no gradient, no BHHH. Used by the inner-Newton line search.
+Runs forward pass and returns the **average** log-likelihood (per consumer-decision):
+ll_sum × dm.inv_N. Cheaper than `eval_combined!` — no resid, no gradient, no BHHH.
+Used by the inner-Newton line search.
 """
 function eval_ll!(work::DenseWork, dm::DenseModel, params::AbstractVector{Float32})
     forward_pass!(work, dm, params)
@@ -389,14 +397,15 @@ function eval_ll!(work::DenseWork, dm::DenseModel, params::AbstractVector{Float3
     for bi in 1:(dm.n_blocks)
         ll_in += _inside_ll_block(work.U_blocks[bi], dm.counts_blocks[bi])
     end
-    return ll_in + _outside_ll(work, dm)
+    return (ll_in + _outside_ll(work, dm)) * dm.inv_N
 end
 
 """
 eval_ll_δgrad!(work, dm, params; δ_grad) → ll::Float32
 
-Runs forward pass, returns ll, and fills `δ_grad[1:N] = ∂ℓ/∂δ`. Cheaper than
-`eval_combined!` — skips Π and η gradient assembly and BHHH. Used by line-search dϕ.
+Runs forward pass, returns the **average** ll (× dm.inv_N), and fills
+`δ_grad[1:N] = ∂ℓ_avg/∂δ` (also × dm.inv_N). Cheaper than `eval_combined!` —
+skips Π and η gradient assembly and BHHH. Used by line-search dϕ.
 """
 function eval_ll_δgrad!(
     work::DenseWork, dm::DenseModel, params::AbstractVector{Float32};
@@ -438,7 +447,9 @@ function eval_ll_δgrad!(
             δ_grad[param_idxs[k]] = s
         end
     end
-    return ll_in + _outside_ll(work, dm)
+    ll = (ll_in + _outside_ll(work, dm)) * dm.inv_N
+    δ_grad .*= dm.inv_N
+    return ll
 end
 
 # -------------------------------------------------------------------------------------------------
@@ -449,8 +460,10 @@ end
 eval_combined!(work, dm, params; grad, bhhh) → ll::Float32
 
 Single pass: forward, ll, full gradient (∂ℓ/∂params), BHHH (∂ℓ/∂π outer products).
+**All return values are scaled by `dm.inv_N`** — average likelihood, average gradient,
+and average BHHH (so BHHH still ≈ -Hessian(ll_avg) by Fisher equality at the MLE).
 
-Layout:
+Layout (before scaling):
 
   - `grad[i_δ]`  = Σ_z (counts[k,z] - M_z·CCP[k,z])           # δ ascent gradient of ℓ
   - `grad[i_Πᵦ]` = (D · α[1:K,:]')[d,p]                        # column-major (d fastest)
@@ -576,7 +589,11 @@ function eval_combined!(
         bhhh[i, j] = bhhh[j, i]
     end
 
-    return ll
+    # Average scaling: ll, grad, and BHHH all by inv_N. BHHH ≈ -Hessian(ll_avg) since
+    # ll_avg = ll_sum × inv_N → Hessian(ll_avg) = Hessian(ll_sum) × inv_N ≈ -BHHH_sum × inv_N.
+    grad .*= dm.inv_N
+    bhhh .*= dm.inv_N
+    return ll * dm.inv_N
 end
 
 # -------------------------------------------------------------------------------------------------
@@ -614,13 +631,20 @@ woodbury_newton_step!(step, work, dm, g_δ)
 Writes Newton ascent direction over δ (length N) into `step`, using `work.U_blocks`
 (CCPs from latest forward pass) and the per-block market sizes.
 Threaded across time blocks.
+
+`g_δ` is the **average** δ-gradient (∂ℓ_avg/∂δ, the same scale eval_combined! fills
+into its `grad` output). The Newton step direction `−H⁻¹g` is invariant to ll-scaling
+(both H and g scale by the same constant), so we undo the averaging by multiplying
+g_t by 1/dm.inv_N internally — making the Woodbury formula's sum-scale H consistent
+with the rescaled gradient. The resulting step is the correct δ-space Newton direction.
 """
 function woodbury_newton_step!(
     step::AbstractVector{Float32}, work::DenseWork, dm::DenseModel, g_δ::AbstractVector{Float32}
 )
+    g_scale = 1.0f0 / dm.inv_N
     @threads :static for bi in 1:(dm.n_blocks)
         param_idxs = dm.block_param_idxs[bi]
-        g_t = Float32[g_δ[k] for k in param_idxs]
+        g_t = Float32[g_δ[k] * g_scale for k in param_idxs]
         d_t = _woodbury_block(work.U_blocks[bi], dm.M_zs, g_t)
         @inbounds for (k_local, p) in enumerate(param_idxs)
             step[p] = d_t[k_local]
@@ -926,9 +950,9 @@ function eval_envelope_hessian!(
         envwork.K_corr .+= buf
     end
 
-    # H̃_NLL = partial_H − K_corr
+    # H̃_NLL = partial_H − K_corr, scaled by inv_N (so H is the Hessian of NLL_avg).
     @inbounds for j in 1:N_NONδ, i in 1:N_NONδ
-        H[i, j] = envwork.partial_H[i, j] - envwork.K_corr[i, j]
+        H[i, j] = (envwork.partial_H[i, j] - envwork.K_corr[i, j]) * dm.inv_N
     end
     # Symmetrize (small Float32 asymmetries from non-associative reductions)
     @inbounds for j in 1:N_NONδ, i in (j + 1):N_NONδ

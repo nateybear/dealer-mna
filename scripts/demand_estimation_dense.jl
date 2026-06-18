@@ -345,7 +345,9 @@ function concentrated_θ!(state::EstimationState, π::AbstractVector{Float32})
             continue
         end
 
-        if gnorm ≤ 1.0f-2
+        # gnorm is on the avg-scale δ gradient (eval_combined! scales by inv_N).
+        # Original sum-scale tolerance was 1e-2 → preserve absolute convergence by scaling.
+        if gnorm ≤ 1.0f-2 * state.dm.inv_N
             @info "  inner #$id converged in $newton_iter newton iters (gnorm=$gnorm)"
             state.cached_conv_ll[] = ϕ0
             state.cached_conv_grad .= .-state.grad_buf[state.i_nonδ]
@@ -358,7 +360,8 @@ function concentrated_θ!(state::EstimationState, π::AbstractVector{Float32})
                     state.work, state.dm, state.envwork;
                     H = state.envelope_H_buf,
                 )
-                shift = definiteness_shift!(state.envelope_H_buf, 1.0f-3)
+                # Floor scales with inv_N since H is now avg-scale (eigenvalues × inv_N).
+                shift = definiteness_shift!(state.envelope_H_buf, 1.0f-3 * state.dm.inv_N)
                 state.cached_conv_envelope_H .= state.envelope_H_buf
                 if !state.diag_logged[]
                     log_hessian_diagnostics!(state, n_singular, shift, t_env)
@@ -442,9 +445,9 @@ function concentrated_θ!(state::EstimationState, π::AbstractVector{Float32})
         θ_tmp[state.i_δ] .+= alpha .* d
     end
 
-    # Unconverged exit penalty: restore δ if gnorm still huge
-    if gnorm > 1.0f4
-        @warn "  inner #$id: exiting with gnorm=$gnorm > 1e4, restoring start δ"
+    # Unconverged exit penalty: restore δ if gnorm still huge (avg-scale threshold).
+    if gnorm > 1.0f4 * state.dm.inv_N
+        @warn "  inner #$id: exiting with gnorm=$gnorm > 1e4·inv_N, restoring start δ"
         θ_tmp[state.i_δ] .= δ_at_inner_start
         # state.cached_conv_ll remains NaN — outer_f detects and returns penalty
     end
@@ -843,8 +846,6 @@ function optimize_lbfgs_full(state::EstimationState, cmdargs)
     method = LBFGS(
         alphaguess = InitialStatic(scaled = args["scale"], alpha = args["alpha"])
     )
-
-    @show state.θ
 
     @info "Starting LBFGS outer optimization" mode = "full-θ" N_vars = N alpha = args["alpha"] scaled = args["scale"]
     return optimize(
