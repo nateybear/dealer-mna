@@ -29,7 +29,8 @@ import ..@indexof
 
 export DenseModel, DenseWork, EnvelopeHessWork,
     forward_pass!, eval_ll!, eval_ll_δgrad!, eval_combined!,
-    woodbury_newton_step!, eval_envelope_hessian!, definiteness_shift!, param_indices
+    woodbury_newton_step!, eval_envelope_hessian!, definiteness_shift!, param_indices,
+    build_nonδ_labels
 
 # -------------------------------------------------------------------------------------------------
 # Parameter-vector index ranges — delegate to @indexof so ORDER changes propagate here.
@@ -42,6 +43,18 @@ function param_indices(model::AbstractDemandModel)
     i_Πp = @indexof demo_price_params nothing model
     i_η = @indexof dist_params nothing model
     return (; i_δ, i_Πᵦ, i_Πp, i_η)
+end
+
+# Names for the non-δ parameter block, in i_nonδ = i_Πᵦ[1]:i_η[end] order.
+# Matches the column-major reshape in forward_pass! (demographics fastest, products slowest).
+function build_nonδ_labels()
+    D = string.(DEMOGRAPHIC_ATTRIBUTES)
+    P = string.(PRODUCT_ATTRIBUTES)
+    return vcat(
+        ["Π[$d,$p]" for p in P for d in D],
+        ["Πp[$d]" for d in D],
+        ["η_baseline", "η_dist"],
+    )
 end
 
 # -------------------------------------------------------------------------------------------------
@@ -277,11 +290,16 @@ end
 
 """
 forward_pass!(work, dm, params)
+forward_pass!(work, dm, δ, Πᵦ, Πp, η)
 
 Computes per-block CCPs into `work.U_blocks` and exp distance utilities into `work.E_blocks`,
 along with `work.inside_sum[bi, z] = Σ_{k∈block bi} CCP[k, z]`.
 
-Parameters are read via `param_indices(dm.model)`.
+The 3-arg form slices `params` via `param_indices(dm.model)`. The 6-arg form takes
+`δ` (any length ≥ max(block_param_idxs) entry), `Πᵦ` (Dn × K), `Πp` (Dn), `η` (length 2)
+directly — used by the counterfactual layer to extend `δ` past `n_delta(dm.model)`
+without shuffling the non-δ block of `params`.
+
 Multi-threaded across time blocks (independent work per `bi`).
 """
 function forward_pass!(work::DenseWork, dm::DenseModel, params::AbstractVector{Float32})
@@ -290,6 +308,16 @@ function forward_pass!(work::DenseWork, dm::DenseModel, params::AbstractVector{F
     Πᵦ = reshape(view(params, idx.i_Πᵦ), dm.Dn, dm.K)
     Πp = view(params, idx.i_Πp)
     η = view(params, idx.i_η)
+    return forward_pass!(work, dm, δ, Πᵦ, Πp, η)
+end
+
+function forward_pass!(
+    work::DenseWork, dm::DenseModel,
+    δ::AbstractVector{Float32},
+    Πᵦ::AbstractMatrix{Float32},
+    Πp::AbstractVector{Float32},
+    η::AbstractVector{Float32},
+)
     η1, η2 = η[1], η[2]
 
     ΠtD = Matrix{Float32}(undef, dm.K + 1, dm.Z)
