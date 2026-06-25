@@ -12,6 +12,8 @@ using Distributed
     using LinearAlgebra
     using LogExpFunctions
 
+    BLAS.set_num_threads(1)
+
     Φ = cdf$(Normal())
 
     DEMOS = Empirics.DEFAULT_DEMOGRAPHICS
