@@ -64,7 +64,8 @@ using Distributed
         seed = 85704,
     )
 
-    # calculate the log likelihood, concentrating out rho tilde
+    # calculate the Q-function (weighted complete-data log-likelihood),
+    # concentrating out rho tilde via a p_compliant-weighted XGBoost smoother
     function loglikelihood(α, params)
         (; cars, dealer_demographics, dm) = params
         α_intercept, α_demos... = α
@@ -73,26 +74,20 @@ using Distributed
             p_base = Φ.(α_intercept .+ Matrix(dealer_demographics[!, DEMOS]) * α_demos),
         )
         cars = leftjoin(cars, base_probs, on = :dealer_uid)
-        compliers = subset(cars, :is_compliant)
-        ρ = @. FD.value((compliers.is_sold - compliers.p_base) / (1 - compliers.p_base))
+        ρ = @. FD.value((cars.is_sold - cars.p_base) / (1 - cars.p_base))
         XGBoost.setlabel!(dm, Float32.(ρ))
         ρ_hat = with_logger(NullLogger()) do
             booster = xgboost(dm; xgboost_params...)
             XGBoost.predict(booster, dm)
         end
-        compliers.ρ_tilde = clamp.(ρ_hat, 1e-12, 1 - 1e-12)
+        cars.ρ_tilde = clamp.(ρ_hat, 1e-12, 1 - 1e-12)
 
-        ll_compliers = let (; is_sold, p_base, ρ_tilde) = compliers
-            @. is_sold * log(p_base + (1 - p_base) * ρ_tilde) +
-                (1 - is_sold) * log((1 - p_base) * (1 - ρ_tilde))
+        return let (; is_sold, p_base, ρ_tilde, p_compliant) = cars
+            ll_c = @. is_sold * log(p_base + (1 - p_base) * ρ_tilde) +
+                       (1 - is_sold) * log((1 - p_base) * (1 - ρ_tilde))
+            ll_nc = @. is_sold * log(p_base) + (1 - is_sold) * log(1 - p_base)
+            @. p_compliant * ll_c + (1 - p_compliant) * ll_nc
         end
-
-        noncompliers = subset(cars, :is_compliant => ByRow(!))
-        ll_noncompliers = let (; is_sold, p_base) = noncompliers
-            @. is_sold * log(p_base) + (1 - is_sold) * log(1 - p_base)
-        end
-
-        return vcat(ll_compliers, ll_noncompliers)
     end
 
     α_0 = zeros(length(DEMOS) + 1)
@@ -101,8 +96,8 @@ using Distributed
     function custom_bhhh(params; max_iter = 20)
         (; model, model_year, extra) = params.cars[1, :]
         tag = "$model_year $model $extra"
-        compliers = subset(params.cars, :is_compliant)
-        dm = XGBoost.DMatrix(X_matrix(compliers))
+        dm = XGBoost.DMatrix(X_matrix(params.cars))
+        XGBoost.setinfo!(dm, "weight", Float32.(params.cars.p_compliant))
         params = (; params..., dm)
         F_i = Base.Fix2((-) ∘ loglikelihood, params)
         F = sum ∘ F_i
@@ -190,7 +185,7 @@ function (@main)(_)
 
     for i in 1:100
         @info "Starting round $i"
-        compliance.is_compliant = compliance.p_compliant .> 0.5
+        π = mean(compliance.p_compliant)
         M_step =
             let mapped = pmap(collect(gdf)) do cars
                     empty!(Memoize.memoize_cache(X_matrix))
@@ -205,11 +200,12 @@ function (@main)(_)
                         p_base = Φ.(α_intercept .+ Matrix(dealer_demographics[!, DEMOS]) * α_demos),
                     )
                     cars = leftjoin(cars, base_probs, on = :dealer_uid)
-                    compliers = subset(cars, :is_compliant)
-                    ρ = @. FD.value((compliers.is_sold - compliers.p_base) / (1 - compliers.p_base))
-                    X = X_matrix(compliers)
+                    ρ = @. FD.value((cars.is_sold - cars.p_base) / (1 - cars.p_base))
+                    dm = XGBoost.DMatrix(X_matrix(cars))
+                    XGBoost.setinfo!(dm, "label", Float32.(ρ))
+                    XGBoost.setinfo!(dm, "weight", Float32.(cars.p_compliant))
                     booster = with_logger(NullLogger()) do
-                        xgboost((X, ρ); xgboost_params...)
+                        xgboost(dm; xgboost_params...)
                     end
                     (; model, model_year, extra) = cars[1, :]
                     return (model, model_year, extra) =>
@@ -252,11 +248,12 @@ function (@main)(_)
             ll_noncomplier = let (; is_sold, p_base) = cars
                 sum(@. is_sold * log(p_base) + (1 - is_sold) * log(1 - p_base))
             end
-            return softmax([ll_complier, ll_noncomplier])[1]
+            return softmax([log(π) + ll_complier, log(1 - π) + ll_noncomplier])[1]
         end
 
         step_change = norm(E_step.p_compliant - compliance.p_compliant)
-        @info "Change: $(round(step_change, digits = 6))"
+        max_change = maximum(abs, E_step.p_compliant - compliance.p_compliant)
+        @info "Round $i" step_change max_change π mean_p_compliant=mean(E_step.p_compliant)
 
         if step_change < 1e-4
             @info "Wooohoo! We converged at step $i"
