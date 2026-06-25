@@ -52,9 +52,7 @@ using Distributed
         eta = 0.15,
         tree_method = "hist",
         subsample = 0.8,
-        colsample_bytree = 0.8,
         min_child_weight = 15,
-        lambda = 10.0,
         max_bin = 32,
         seed = 85704,
     )
