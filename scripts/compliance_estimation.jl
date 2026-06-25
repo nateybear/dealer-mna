@@ -123,7 +123,7 @@ using Distributed
                 @info "[$tag] Gradient convergence achieved, exiting"
                 return α
             end
-            if i % 1 == 0
+            if i % 10 == 0
                 @info "[$tag] Progress $i" F(α) norm(g)
             end
 
