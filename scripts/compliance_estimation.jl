@@ -174,6 +174,7 @@ function (@main)(_)
         compliance.is_compliant = compliance.p_compliant .> 0.5
         M_step =
             let mapped = pmap(collect(gdf)) do cars
+                    empty!(Memoize.memoize_cache(X_matrix))
                     cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
                     coefs = custom_bhhh(
                         (; cars, dealer_demographics),
