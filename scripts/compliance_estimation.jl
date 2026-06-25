@@ -40,7 +40,7 @@ using Distributed
     @memoize function X_matrix(compliers)
         X = mapreduce(vcat, eachrow(compliers)) do c
             quarter = (Dates.year(c.t), Dates.quarterofyear(c.t))
-            row_idx = state_lookup(demand_model)[(quarter, c.dealer_uid)]
+            row_idx = state_lookup()[(quarter, c.dealer_uid)]
             return reshape(state_matrix[row_idx, :], 1, :)
         end
         return FD.value.(X)
