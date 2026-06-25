@@ -127,7 +127,17 @@ using Distributed
                 @info "[$tag] Progress $i" F(α) norm(g)
             end
 
-            newton_step = H(α) \ g
+            # if it's singular, just use gradient direction
+            newton_step = try
+                H(α) \ g
+            catch e
+                if e isa SingularException
+                    @warn "[$tag] singular exception"
+                    g
+                else
+                    rethrow(e)
+                end
+            end
 
             # line search
             ϕ(a) = F(α - a * newton_step)
