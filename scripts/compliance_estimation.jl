@@ -146,10 +146,10 @@ using Distributed
 end
 
 function (@main)(_)
-    Dealers.load_from_disk!(snakemake.input["dealer_init"])
-    fords = read_arrow(snakemake.input["fords"])
+    Dealers.load_from_disk!("data/dealers_init_filtered.jld2")
+    fords = read_arrow("data/arrow/fords.arrow")
     dealer_demographics = semijoin(
-        read_arrow(snakemake.input["dealer_demographics"]), fords, on = :uid => :dealer_uid
+        read_arrow("data/dealer_demographics.arrow"), fords, on = :uid => :dealer_uid
     )
     prepare_dealers!(dealer_demographics)
 
@@ -157,9 +157,9 @@ function (@main)(_)
     select!(panel, :dealer_uid, :t, :model, :model_year, :extra, :is_sold)
     subset!(panel, :t => ByRow(≥(Date(2017))))
 
-    demand_model = Demand.DemandModel(; JLD2.load_object(snakemake.input["model_frames"])...)
+    demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
 
-    state_matrix = JLD2.load_object(snakemake.input["state_matrix"])
+    state_matrix = JLD2.load_object("data/residual_demand.jld2")
 
     compliance = selectunique(panel, [:dealer_uid, :t])
     compliance.p_compliant = rand(nrow(compliance))
