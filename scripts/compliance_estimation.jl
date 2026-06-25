@@ -49,6 +49,8 @@ using Distributed
     xgboost_params = (
         max_depth = 3,
         num_round = 10,
+        early_stopping_rounds = 3,
+        lambda = 10.0,
         eta = 0.15,
         tree_method = "hist",
         subsample = 0.8,
