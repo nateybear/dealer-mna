@@ -18,6 +18,10 @@ using Distributed
 
     include("plot_assortment_probs.jl")
 
+    demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
+
+    state_matrix = JLD2.load_object("data/residual_demand.jld2")
+
     # calculates the index of the closest dealers, and standardizes demographics
     function prepare_dealers!(dealer_demographics)
         M = Matrix(dealer_demographics[!, DEMOS])
@@ -28,15 +32,15 @@ using Distributed
     end
 
     # tf_t_j has a consistent ordering, so enumerate the indexes for fast lookup
-    @memoize function state_lookup(model)
-        intermed = Supply.tf_to_j_lookup(model)
+    @memoize function state_lookup()
+        intermed = Supply.tf_to_j_lookup(demand_model)
         return Dict(k => i for (i, k) in enumerate(keys(intermed)))
     end
 
-    @memoize function X_matrix(compliers, model, state_matrix)
+    @memoize function X_matrix(compliers)
         X = mapreduce(vcat, eachrow(compliers)) do c
             quarter = (Dates.year(c.t), Dates.quarterofyear(c.t))
-            row_idx = state_lookup(model)[(quarter, c.dealer_uid)]
+            row_idx = state_lookup(demand_model)[(quarter, c.dealer_uid)]
             return reshape(state_matrix[row_idx, :], 1, :)
         end
         return FD.value.(X)
@@ -57,7 +61,7 @@ using Distributed
 
     # calculate the log likelihood, concentrating out rho tilde
     function loglikelihood(α, params)
-        (; cars, dealer_demographics, state_matrix, demand_model) = params
+        (; cars, dealer_demographics) = params
         α_intercept, α_demos... = α
         base_probs = DataFrame(
             dealer_uid = dealer_demographics.uid,
@@ -66,7 +70,7 @@ using Distributed
         cars = leftjoin(cars, base_probs, on = :dealer_uid)
         compliers = subset(cars, :is_compliant)
         ρ = @. FD.value((compliers.is_sold - compliers.p_base) / (1 - compliers.p_base))
-        X = X_matrix(compliers, demand_model, state_matrix)
+        X = X_matrix(compliers)
         ρ_hat = with_logger(NullLogger()) do
             XGBoost.predict(xgboost((X, ρ); xgboost_params...), X)
         end
@@ -157,10 +161,6 @@ function (@main)(_)
     select!(panel, :dealer_uid, :t, :model, :model_year, :extra, :is_sold)
     subset!(panel, :t => ByRow(≥(Date(2017))))
 
-    demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
-
-    state_matrix = JLD2.load_object("data/residual_demand.jld2")
-
     compliance = selectunique(panel, [:dealer_uid, :t])
     compliance.p_compliant = rand(nrow(compliance))
 
@@ -176,7 +176,7 @@ function (@main)(_)
             let mapped = pmap(collect(gdf)) do cars
                     cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
                     coefs = custom_bhhh(
-                        (; cars, dealer_demographics, demand_model, state_matrix),
+                        (; cars, dealer_demographics),
                         max_iter = 20,
                     )
                     α_intercept, α_demos... = coefs
@@ -187,7 +187,7 @@ function (@main)(_)
                     cars = leftjoin(cars, base_probs, on = :dealer_uid)
                     compliers = subset(cars, :is_compliant)
                     ρ = @. FD.value((compliers.is_sold - compliers.p_base) / (1 - compliers.p_base))
-                    X = X_matrix(compliers, demand_model, state_matrix)
+                    X = X_matrix(compliers)
                     booster = with_logger(NullLogger()) do
                         xgboost((X, ρ); xgboost_params...)
                     end
@@ -214,7 +214,7 @@ function (@main)(_)
                 α_intercept, α_demo... = M_step[(model, model_year, extra)][1]
                 Φ(α_intercept + dot(α_demo, demos[DEMOS]))
             end
-            X = X_matrix(hcat(cars[[1], :], DataFrame(demos)), demand_model, state_matrix)
+            X = X_matrix(hcat(cars[[1], :], DataFrame(demos)))
             cars.ρ_tilde = map(eachrow(cars)) do (; model, model_year, extra)
                 booster = XGBoost.Booster(X)
                 XGBoost.deserialize!(booster, M_step[(model, model_year, extra)][2])
