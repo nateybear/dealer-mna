@@ -226,19 +226,21 @@ function (@main)(_)
                 )
             end
 
+        @info "Starting E step"
+
         E_step = copy(compliance)
-        E_step.p_compliant = pmap(eachrow(E_step)) do r
+        E_step.p_compliant = pmap(eachrow(E_step); batch_size = 100) do r
             cars = subset(panel, :dealer_uid => ByRow(==(r.dealer_uid)), :t => ByRow(==(r.t)))
             demos = pluck(dealer_demographics, :uid => ByRow(==(r.dealer_uid)))
             cars.p_base = map(eachrow(cars)) do (; model, model_year, extra)
                 α_intercept, α_demo... = M_step[(model, model_year, extra)][1]
                 Φ(α_intercept + dot(α_demo, demos[DEMOS]))
             end
-            X = X_matrix(hcat(cars[[1], :], DataFrame(demos)))
+            dm = XGBoost.DMatrix(X_matrix(hcat(cars[[1], :], DataFrame(demos))))
+            booster = XGBoost.Booster(dm)
             cars.ρ_tilde = map(eachrow(cars)) do (; model, model_year, extra)
-                booster = XGBoost.Booster(X)
                 XGBoost.deserialize!(booster, M_step[(model, model_year, extra)][2])
-                clamp(only(XGBoost.predict(booster, X)), 1e-12, 1 - 1e-12)
+                clamp(only(XGBoost.predict(booster, dm)), 1e-12, 1 - 1e-12)
             end
             ll_complier = let (; is_sold, p_base, ρ_tilde) = cars
                 sum(
