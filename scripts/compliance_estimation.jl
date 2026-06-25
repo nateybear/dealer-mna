@@ -84,7 +84,7 @@ using Distributed
 
         return let (; is_sold, p_base, ρ_tilde, p_compliant) = cars
             ll_c = @. is_sold * log(p_base + (1 - p_base) * ρ_tilde) +
-                       (1 - is_sold) * log((1 - p_base) * (1 - ρ_tilde))
+                (1 - is_sold) * log((1 - p_base) * (1 - ρ_tilde))
             ll_nc = @. is_sold * log(p_base) + (1 - is_sold) * log(1 - p_base)
             @. p_compliant * ll_c + (1 - p_compliant) * ll_nc
         end
@@ -145,7 +145,7 @@ using Distributed
                     catch e
                         if e isa XGBoost.XGBoostError
                             @warn "[$tag] XGBoost error at $(a_init)"
-                            a_init /= 2
+                            a_init /= 1.2
                         else
                             rethrow(e)
                         end
@@ -253,7 +253,7 @@ function (@main)(_)
 
         step_change = norm(E_step.p_compliant - compliance.p_compliant)
         max_change = maximum(abs, E_step.p_compliant - compliance.p_compliant)
-        @info "Round $i" step_change max_change π mean_p_compliant=mean(E_step.p_compliant)
+        @info "Round $i" step_change max_change π mean_p_compliant = mean(E_step.p_compliant)
 
         if step_change < 1e-4
             @info "Wooohoo! We converged at step $i"
