@@ -58,7 +58,7 @@ using Distributed
         lambda = 10.0,
         eta = 0.15,
         tree_method = "hist",
-        subsample = 0.5,
+        subsample = 0.8,
         min_child_weight = 15,
         max_bin = 32,
         seed = 85704,
