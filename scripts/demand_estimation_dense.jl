@@ -16,9 +16,8 @@
 # pre-screen, dϕ0 ≥ 0 fallback) are mirrored.
 
 using DealerMnA
-import .Demand: DemandModel, FixedCoefType, initial_parameters
-import .Demand.Dense:
-    DenseModel, DenseWork, EnvelopeHessWork,
+import .Demand:
+    DemandModel, DemandWork, initial_parameters,
     forward_pass!, eval_ll!, eval_ll_δgrad!,
     eval_combined!, woodbury_newton_step!,
     eval_envelope_hessian!, definiteness_shift!, param_indices, build_nonδ_labels
@@ -181,10 +180,9 @@ end
 # Shared by the inner Newton, the Optim outer wrappers, and the KNITRO branch.
 # -------------------------------------------------------------------------------------------------
 
-mutable struct EstimationState{M, DM, W, LS, EHW}
-    model::M
-    dm::DM
-    work::W
+mutable struct EstimationState{LS}
+    model::DemandModel
+    work::DemandWork
     θ::Vector{Float32}
     i_δ::Vector{Int}
     i_nonδ::Vector{Int}
@@ -193,8 +191,7 @@ mutable struct EstimationState{M, DM, W, LS, EHW}
     bhhh_buf::Matrix{Float32}
     step_buf::Vector{Float32}
     δ_grad_buf::Vector{Float32}
-    # Envelope-Hessian workspace and per-call buffer.
-    envwork::EHW
+    # Envelope-Hessian output buffer (workspace lives inside `work`).
     envelope_H_buf::Matrix{Float32}
     # Caches: cached_π / cached_θ_opt are the (π → δ*) map at the latest evaluated point.
     # cached_conv_* hold the convergence-point statistics for the outer optimizer.
@@ -215,21 +212,19 @@ mutable struct EstimationState{M, DM, W, LS, EHW}
     nonδ_labels::Vector{String}
 end
 
-function EstimationState(model, dm, work, θ::Vector{Float32})
+function EstimationState(model::DemandModel, work::DemandWork, θ::Vector{Float32})
     idx = param_indices(model)
     i_δ = collect(idx.i_δ)
     i_nonδ = collect(idx.i_Πᵦ[1]:idx.i_η[end])
     N_θ = length(θ)
     N_NONδ = length(i_nonδ)
-    envwork = EnvelopeHessWork(dm)
     return EstimationState(
-        model, dm, work, copy(θ),
+        model, work, copy(θ),
         i_δ, i_nonδ,
         zeros(Float32, N_θ),
         zeros(Float32, N_NONδ, N_NONδ),
         zeros(Float32, length(i_δ)),
         zeros(Float32, length(i_δ)),
-        envwork,
         zeros(Float32, N_NONδ, N_NONδ),
         fill(NaN32, N_NONδ),
         copy(θ),
@@ -300,7 +295,7 @@ function concentrated_θ!(state::EstimationState, π::AbstractVector{Float32})
 
     # Warm start guard
     if !isnan(state.last_ll[]) && state.last_ll[] > 0
-        ϕ_warm = -eval_ll!(state.work, state.dm, θ_tmp)
+        ϕ_warm = -eval_ll!(state.work, state.model, θ_tmp)
         if ϕ_warm > 1.0f3 * state.last_ll[]
             @info "  inner #$id: warm start NLL=$(round(ϕ_warm; sigdigits=4)) >> prev $(round(state.last_ll[]; sigdigits=4)), resetting δ"
             θ_tmp[state.i_δ] .= state.θ[state.i_δ]
@@ -325,7 +320,7 @@ function concentrated_θ!(state::EstimationState, π::AbstractVector{Float32})
 
         t_combined = @elapsed begin
             ll = eval_combined!(
-                state.work, state.dm, θ_tmp;
+                state.work, state.model, θ_tmp;
                 grad = state.grad_buf, bhhh = state.bhhh_buf,
             )
         end
@@ -337,7 +332,7 @@ function concentrated_θ!(state::EstimationState, π::AbstractVector{Float32})
         if isapprox(ϕ0, 0)
             @warn "  inner #$id iter $newton_iter: NLL≈0, trying +500 δ shift"
             θ_tmp[state.i_δ] .+= 500.0f0
-            ll = eval_ll!(state.work, state.dm, θ_tmp)
+            ll = eval_ll!(state.work, state.model, θ_tmp)
             if isapprox(-ll, 0)
                 @warn "  inner #$id: δ shift didn't help, breaking"
                 break
@@ -347,7 +342,7 @@ function concentrated_θ!(state::EstimationState, π::AbstractVector{Float32})
 
         # gnorm is on the avg-scale δ gradient (eval_combined! scales by inv_N).
         # Original sum-scale tolerance was 1e-2 → preserve absolute convergence by scaling.
-        if gnorm ≤ 1.0f-2 * state.dm.inv_N
+        if gnorm ≤ 1.0f-2 * state.model.inv_N
             @info "  inner #$id converged in $newton_iter newton iters (gnorm=$gnorm)"
             state.cached_conv_ll[] = ϕ0
             state.cached_conv_grad .= .-state.grad_buf[state.i_nonδ]
@@ -357,11 +352,11 @@ function concentrated_θ!(state::EstimationState, π::AbstractVector{Float32})
             # if the computation throws.
             try
                 t_env = @elapsed n_singular = eval_envelope_hessian!(
-                    state.work, state.dm, state.envwork;
+                    state.work, state.model;
                     H = state.envelope_H_buf,
                 )
                 # Floor scales with inv_N since H is now avg-scale (eigenvalues × inv_N).
-                shift = definiteness_shift!(state.envelope_H_buf, 1.0f-3 * state.dm.inv_N)
+                shift = definiteness_shift!(state.envelope_H_buf, 1.0f-3 * state.model.inv_N)
                 state.cached_conv_envelope_H .= state.envelope_H_buf
                 if !state.diag_logged[]
                     log_hessian_diagnostics!(state, n_singular, shift, t_env)
@@ -377,7 +372,7 @@ function concentrated_θ!(state::EstimationState, π::AbstractVector{Float32})
         # Woodbury Newton step over δ. woodbury_newton_step! uses ∂ℓ/∂δ (ascent gradient) →
         # ascent direction for ℓ = descent direction for NLL.
         δ_grad_ascent = view(state.grad_buf, state.i_δ)
-        woodbury_newton_step!(state.step_buf, state.work, state.dm, δ_grad_ascent)
+        woodbury_newton_step!(state.step_buf, state.work, state.model, δ_grad_ascent)
         d = state.step_buf
 
         # dϕ0 = ∇NLL · d. Must be < 0 for HagerZhang. Fall back to -g/gnorm otherwise.
@@ -406,17 +401,17 @@ function concentrated_θ!(state::EstimationState, π::AbstractVector{Float32})
 
         function ϕ(α)
             θ_trial[state.i_δ] .= δ_cur .+ Float32(α) .* d
-            return -eval_ll!(state.work, state.dm, θ_trial)
+            return -eval_ll!(state.work, state.model, θ_trial)
         end
         function dϕ(α)
             θ_trial[state.i_δ] .= δ_cur .+ Float32(α) .* d
-            eval_ll_δgrad!(state.work, state.dm, θ_trial; δ_grad = state.δ_grad_buf)
+            eval_ll_δgrad!(state.work, state.model, θ_trial; δ_grad = state.δ_grad_buf)
             return -Float32(dot(state.δ_grad_buf, d))
         end
         # Fuse ϕ and dϕ — one forward pass gives both ll and δ-gradient.
         function ϕdϕ(α)
             θ_trial[state.i_δ] .= δ_cur .+ Float32(α) .* d
-            ll = eval_ll_δgrad!(state.work, state.dm, θ_trial; δ_grad = state.δ_grad_buf)
+            ll = eval_ll_δgrad!(state.work, state.model, θ_trial; δ_grad = state.δ_grad_buf)
             return (-ll, -Float32(dot(state.δ_grad_buf, d)))
         end
 
@@ -446,7 +441,7 @@ function concentrated_θ!(state::EstimationState, π::AbstractVector{Float32})
     end
 
     # Unconverged exit penalty: restore δ if gnorm still huge (avg-scale threshold).
-    if gnorm > 1.0f4 * state.dm.inv_N
+    if gnorm > 1.0f4 * state.model.inv_N
         @warn "  inner #$id: exiting with gnorm=$gnorm > 1e4·inv_N, restoring start δ"
         θ_tmp[state.i_δ] .= δ_at_inner_start
         # state.cached_conv_ll remains NaN — outer_f detects and returns penalty
@@ -630,7 +625,7 @@ function build_full_knitro_callbacks(state::EstimationState)
         end
         copyto!(state.θ, θ_scratch)
         ll = eval_combined!(
-            state.work, state.dm, state.θ;
+            state.work, state.model, state.θ;
             grad = state.grad_buf, bhhh = state.bhhh_buf,
         )
         state.last_full_ll[] = ll
@@ -774,7 +769,7 @@ function optimize_knitro_full(state::EstimationState, cmdargs)
     end
 
     copyto!(state.θ, Float32.(x_opt))
-    final_ll = -eval_ll!(state.work, state.dm, state.θ)
+    final_ll = -eval_ll!(state.work, state.model, state.θ)
     status = "KN_status=$nStatus"
     @info "KNITRO done: status=$status NLL=$(round(Float64(final_ll); sigdigits=6))"
 
@@ -809,7 +804,7 @@ function optimize_lbfgs_full(state::EstimationState, cmdargs)
 
         copyto!(state.θ, Float32.(θ))
         ll = eval_combined!(
-            state.work, state.dm, state.θ;
+            state.work, state.model, state.θ;
             grad = state.grad_buf, bhhh = state.bhhh_buf,
         )
         nll = -ll
@@ -835,7 +830,7 @@ function optimize_lbfgs_full(state::EstimationState, cmdargs)
     options = (
         store_trace = true,
         show_trace = true,
-        g_abstol = 1.0f-3,
+        g_abstol = 1.0f-5,
         x_abstol = NaN,
         x_reltol = NaN,
         f_abstol = NaN,
@@ -866,19 +861,15 @@ LinearAlgebra.BLAS.set_num_threads(1)
 seed!(78704)
 snakemake!(stdin)
 const SETTINGS = build_argparse_settings()
-model = DemandModel{FixedCoefType}(; JLD2.load_object(snakemake.input["model"])...)
+model = DemandModel(; JLD2.load_object(snakemake.input["model"])...)
 
 with_logging() do
     cmdargs = parse_args(SETTINGS)
-    zips = Registrations.zips().zip_code
-
-    @info "Building DenseModel" Z_zips = length(zips) N = length(param_indices(model).i_δ)
-    dm = DenseModel(model, zips)
-    work = DenseWork(dm)
-    @info "DenseModel built" n_blocks = dm.n_blocks
+    @info "Allocating DemandWork" Z = model.Z N = model.N n_blocks = model.n_blocks
+    work = DemandWork(model)
 
     θ = build_initial_θ(model, cmdargs)
-    state = EstimationState(model, dm, work, θ)
+    state = EstimationState(model, work, θ)
     π₀ = Float32.(θ[state.i_nonδ])
 
     @info "Starting outer optimization"

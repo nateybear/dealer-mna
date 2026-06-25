@@ -1,43 +1,26 @@
 # Dense per-block evaluation path for the discrete-choice CCP model.
 #
-# Same math and parameter ordering as estimation.jl (the SparseArrayKit-backed path).
-# The key structural observation: the (t, j, f) sparsity pattern in product_info is
-# the same across all zips — δ is shared and the only zip-varying quantities are
-# demographics D[z] (4-vec) and distance dist[z, :] (F-vec). So for each time block
-# we can stack all zips into a dense N_t × Z matrix and softmax per column with BLAS.
-#
-# Memory at full Z=10K, N≈100K: ~16 GB total
-#   DenseModel static: dist_blocks 4 GB, counts (sparse) <100 MB, X/D/M small
-#   DenseWork per-eval: U_blocks 4 GB, E_blocks 4 GB, resid_blocks 4 GB, G_π/α small
-# For laptops or memory-constrained nodes, batch the zip list and accumulate.
+# The (t, j, f) layout is fully baked into DemandModel: δ is shared across zips, and the
+# only zip-varying quantities are demographics D[z] (4-vec) and distance dist[z, :] (F-vec).
+# For each time block, all zips are stacked into a dense N_bi × Z matrix and softmax is
+# computed per column with BLAS.
 
-module Dense
-
-using LinearAlgebra
-using SparseArrays
-using Base.Threads: @threads
-
-import ..DemandModel, ..FixedCoefType, ..AbstractDemandModel
-import ..PRODUCT_ATTRIBUTES, ..DEMOGRAPHIC_ATTRIBUTES
-import ..n_delta, ..n_demographics, ..n_product_attributes
-import ..n_demo_product_params, ..n_demo_price_params, ..n_dist_params
-import ..n_random_coefs, ..total_n_params
-import ..δ_indices, ..δ_t_blocks, ..collected_zips
-import ..ORDER
-import SparseArrayKit
-import ..@indexof
-
-export DenseModel, DenseWork, EnvelopeHessWork,
+export DemandWork, Counterfactual,
     forward_pass!, eval_ll!, eval_ll_δgrad!, eval_combined!,
-    woodbury_newton_step!, eval_envelope_hessian!, definiteness_shift!, param_indices,
-    build_nonδ_labels
+    woodbury_newton_step!, eval_envelope_hessian!, definiteness_shift!,
+    param_indices, build_nonδ_labels,
+    AbstractTweak, PriceMultiply, PriceChange, ModelAdd, ModelDelete,
+    apply!, undo!, refresh!,
+    share_matrix, expected_demand, foc_residual, dealer_block_locals
+
+using FixedEffectModels
+import ..pluck
 
 # -------------------------------------------------------------------------------------------------
-# Parameter-vector index ranges — delegate to @indexof so ORDER changes propagate here.
+# Parameter indexing — delegates to @indexof so ORDER changes propagate automatically.
 # -------------------------------------------------------------------------------------------------
 
-function param_indices(model::AbstractDemandModel)
-    # @indexof ignores its second argument (it's only used by @pull); pass nothing.
+function param_indices(model::DemandModel)
     i_δ = @indexof delta nothing model
     i_Πᵦ = @indexof demo_product_params nothing model
     i_Πp = @indexof demo_price_params nothing model
@@ -45,8 +28,7 @@ function param_indices(model::AbstractDemandModel)
     return (; i_δ, i_Πᵦ, i_Πp, i_η)
 end
 
-# Names for the non-δ parameter block, in i_nonδ = i_Πᵦ[1]:i_η[end] order.
-# Matches the column-major reshape in forward_pass! (demographics fastest, products slowest).
+# Labels for the non-δ parameter block (length N_NONδ = K*Dn + Dn + 2 = 22 at K=4, Dn=4).
 function build_nonδ_labels()
     D = string.(DEMOGRAPHIC_ATTRIBUTES)
     P = string.(PRODUCT_ATTRIBUTES)
@@ -58,197 +40,61 @@ function build_nonδ_labels()
 end
 
 # -------------------------------------------------------------------------------------------------
-# DenseModel: read-only precomputed indexing for the per-block dense layout.
+# DemandWork: per-evaluation buffers (preallocated once, reused). Combines the former
+# DenseWork (forward-pass buffers) and EnvelopeHessWork (envelope-Hessian accumulators).
 # -------------------------------------------------------------------------------------------------
 
-"""
-DenseModel(model, zips)
-
-Precomputes per-block dense data for evaluation across all `zips` simultaneously.
-
-Field shapes (N = n_delta, Z = length(zips), K = n_product_attributes, Dn = n_demographics):
-
-  - `block_param_idxs[bi]::Vector{Int32}` (length N_bi): block-local row → param index in δ
-  - `X_blocks[bi]::Matrix{Float32}` ((K+1) × N_bi): product attributes + price, gathered per block
-  - `dist_blocks[bi]::Matrix{Float32}` (N_bi × Z): standardized distance dist[z, k_to_f[k]]
-  - `counts_blocks[bi]::SparseMatrixCSC{Int32,Int32}` (N_bi × Z): purchase counts
-  - `t_obs::Matrix{Int32}` (n_blocks × Z): total inside-good purchases per (block, zip)
-  - `D_dense::Matrix{Float32}` (Dn × Z): standardized demographics per zip
-  - `M_zs::Vector{Float32}` (Z): market sizes
-"""
-struct DenseModel{T <: AbstractDemandModel}
-    model::T
-    N::Int
-    Z::Int
-    K::Int
-    Dn::Int
-    n_blocks::Int
-    zips::Vector{String}
-    block_param_idxs::Vector{Vector{Int32}}
-    X_blocks::Vector{Matrix{Float32}}
-    dist_blocks::Vector{Matrix{Float32}}
-    counts_blocks::Vector{SparseMatrixCSC{Int32, Int32}}
-    t_obs::Matrix{Int32}
-    D_dense::Matrix{Float32}
-    M_zs::Vector{Float32}
-    # 1 / total consumer-decisions = 1 / (Σ_z M_z · n_blocks). All eval_*! return
-    # the average likelihood (sum × inv_N) so the outer optimizer sees a O(1)-scale
-    # gradient instead of O(M_total) — much friendlier for LBFGS/Newton step sizing.
-    inv_N::Float32
-end
-
-function DenseModel(model::DemandModel{FixedCoefType}, zips::Vector{String})
-    Z = length(zips)
-    N = n_delta(model)
-    K = n_product_attributes(model)
-    Dn = n_demographics(model)
-
-    all_idxs = δ_indices(model)                  # Vector{CartesianIndex{3}}, length N
-    @assert length(all_idxs) == N
-
-    blocks_dict = δ_t_blocks(model)
-    block_keys = sort(collect(keys(blocks_dict)))
-    n_blocks = length(block_keys)
-    block_param_idxs = [Int32.(blocks_dict[k]) for k in block_keys]
-
-    # X_full: (K+1) × N — product attributes (Bool→Float32) + standardized price
-    X_full = Matrix{Float32}(undef, K + 1, N)
-    @inbounds for k in 1:N
-        info = model.product_info[all_idxs[k]]
-        for (p_i, attr) in enumerate(PRODUCT_ATTRIBUTES)
-            X_full[p_i, k] = Float32(getfield(info, attr))
-        end
-        X_full[K + 1, k] = info.p
-    end
-    X_blocks = [X_full[:, block_param_idxs[bi]] for bi in 1:n_blocks]
-
-    # k → dealer column in model.distances
-    dealer_uids = names(model.distances, 2)
-    dealer_to_col = Dict(u => Int32(i) for (i, u) in enumerate(dealer_uids))
-    tjf_keys = collect(keys(model.product_lookup.tjf))
-    @assert length(tjf_keys) == N
-    k_to_f = Int32[dealer_to_col[k_tup[3]] for k_tup in tjf_keys]
-
-    # D_dense (Dn × Z) — column order matches `zips`
-    D_dense = Matrix{Float32}(undef, Dn, Z)
-    @inbounds for (zi, z) in enumerate(zips)
-        ai = model.agent_data[z]
-        for (di, attr) in enumerate(DEMOGRAPHIC_ATTRIBUTES)
-            D_dense[di, zi] = Float32(getfield(ai, attr))
-        end
-    end
-
-    # dist_zf (Z × F): one row per zip in our ordering, dense access
-    F = size(model.distances, 2)
-    dist_zf = Matrix{Float32}(undef, Z, F)
-    @inbounds for (zi, z) in enumerate(zips)
-        row = model.distances[z, :]
-        for f in 1:F
-            dist_zf[zi, f] = Float32(row[f])
-        end
-    end
-
-    # dist_blocks[bi] (N_bi × Z): gather dist_zf[z, k_to_f[k]] in k-major form
-    dist_blocks = Vector{Matrix{Float32}}(undef, n_blocks)
-    for bi in 1:n_blocks
-        param_idxs = block_param_idxs[bi]
-        N_bi = length(param_idxs)
-        M = Matrix{Float32}(undef, N_bi, Z)
-        @inbounds for k in 1:N_bi
-            f_col = k_to_f[param_idxs[k]]
-            for z in 1:Z
-                M[k, z] = dist_zf[z, f_col]
-            end
-        end
-        dist_blocks[bi] = M
-    end
-
-    M_zs = Float32[model.agent_data[z].M for z in zips]
-
-    # counts: from model.counts (z, t, j, f) → per-block SparseMatrixCSC of N_bi × Z
-    tjf_to_block_k = Dict{CartesianIndex{3}, Tuple{Int32, Int32}}()
-    for bi in 1:n_blocks
-        for (k_local, p) in enumerate(block_param_idxs[bi])
-            tjf_to_block_k[all_idxs[p]] = (Int32(bi), Int32(k_local))
-        end
-    end
-    target_z_col = Dict(z => Int32(i) for (i, z) in enumerate(zips))
-    z_dim_to_str = collected_zips(model)
-
-    I_pb = [Int32[] for _ in 1:n_blocks]
-    J_pb = [Int32[] for _ in 1:n_blocks]
-    V_pb = [Int32[] for _ in 1:n_blocks]
-    for idx4 in SparseArrayKit.nonzero_keys(model.counts)
-        zi, ti, ji, fi = idx4.I
-        z_str = z_dim_to_str[zi]
-        col = get(target_z_col, z_str, Int32(0))
-        col == 0 && continue
-        bk = get(tjf_to_block_k, CartesianIndex(ti, ji, fi), nothing)
-        isnothing(bk) && continue
-        bi, k_local = bk
-        push!(I_pb[bi], k_local)
-        push!(J_pb[bi], col)
-        push!(V_pb[bi], Int32(model.counts[idx4]))
-    end
-    counts_blocks = SparseMatrixCSC{Int32, Int32}[
-        sparse(I_pb[bi], J_pb[bi], V_pb[bi], length(block_param_idxs[bi]), Z) for bi in 1:n_blocks
-    ]
-
-    # t_obs[bi, z] = column sums of counts_blocks[bi]
-    t_obs = zeros(Int32, n_blocks, Z)
-    @inbounds for bi in 1:n_blocks
-        cb = counts_blocks[bi]
-        for col in 1:Z
-            for nz in cb.colptr[col]:(cb.colptr[col + 1] - 1)
-                t_obs[bi, col] += cb.nzval[nz]
-            end
-        end
-    end
-
-    inv_N = 1.0f0 / (sum(M_zs) * Float32(n_blocks))
-
-    return DenseModel(
-        model, N, Z, K, Dn, n_blocks, zips,
-        block_param_idxs, X_blocks, dist_blocks, counts_blocks, t_obs, D_dense, M_zs,
-        inv_N,
-    )
-end
-
-# -------------------------------------------------------------------------------------------------
-# DenseWork: mutable per-evaluation buffers. Preallocate once, reuse across calls.
-# -------------------------------------------------------------------------------------------------
-
-struct DenseWork
+struct DemandWork
+    # Forward-pass buffers
     U_blocks::Vector{Matrix{Float32}}    # CCPs (or utility pre-softmax) per block, N_bi × Z
     E_blocks::Vector{Matrix{Float32}}    # exp(η₁ + η₂·dist) per block, N_bi × Z
     resid_blocks::Vector{Matrix{Float32}} # counts - M_z·CCP per block, N_bi × Z
     inside_sum::Matrix{Float32}          # Σ_{k∈bi} CCP[k,z], n_blocks × Z
     α::Matrix{Float32}                    # Σ_bi X_bi · resid_bi, (K+1) × Z
     G_π::Matrix{Float32}                  # per-zip score wrt π, N_NONδ × Z
-    score_η1::Vector{Float32}            # per-zip η₁ score (last two rows of G_π)
-    score_η2::Vector{Float32}
+    score_η1::Vector{Float32}            # per-zip η₁ score
+    score_η2::Vector{Float32}            # per-zip η₂ score
+    # Envelope-Hessian accumulators (filled by eval_envelope_hessian!)
+    partial_H::Matrix{Float32}
+    K_corr::Matrix{Float32}
+    H_per_thread::Vector{Matrix{Float32}}
+    K_per_thread::Vector{Matrix{Float32}}
+    singular_block::Vector{Bool}
 end
 
-function DenseWork(dm::DenseModel)
-    U_blocks = [zeros(Float32, length(dm.block_param_idxs[bi]), dm.Z) for bi in 1:(dm.n_blocks)]
-    E_blocks = [zeros(Float32, length(dm.block_param_idxs[bi]), dm.Z) for bi in 1:(dm.n_blocks)]
-    resid_blocks = [zeros(Float32, length(dm.block_param_idxs[bi]), dm.Z) for bi in 1:(dm.n_blocks)]
-    inside_sum = zeros(Float32, dm.n_blocks, dm.Z)
-    N_NONδ = (dm.K + 1) * dm.Dn + 2  # Πᵦ (Dn × K) + Πp (Dn) + η (2)
-    α = zeros(Float32, dm.K + 1, dm.Z)
-    G_π = zeros(Float32, N_NONδ, dm.Z)
-    score_η1 = zeros(Float32, dm.Z)
-    score_η2 = zeros(Float32, dm.Z)
-    return DenseWork(U_blocks, E_blocks, resid_blocks, inside_sum, α, G_π, score_η1, score_η2)
+function DemandWork(model::DemandModel)
+    n_blocks = model.n_blocks
+    Z = model.Z
+    Dn = model.Dn
+    Kp1 = model.K + 1
+    N_NONδ = Kp1 * Dn + 2  # Πᵦ (Dn × K) + Πp (Dn) + η (2). Note: Kp1*Dn = K*Dn+Dn covers Πᵦ+Πp.
+    nt = Threads.nthreads()
+    return DemandWork(
+        [zeros(Float32, length(model.block_param_idxs[bi]), Z) for bi in 1:n_blocks],
+        [zeros(Float32, length(model.block_param_idxs[bi]), Z) for bi in 1:n_blocks],
+        [zeros(Float32, length(model.block_param_idxs[bi]), Z) for bi in 1:n_blocks],
+        zeros(Float32, n_blocks, Z),
+        zeros(Float32, Kp1, Z),
+        zeros(Float32, N_NONδ, Z),
+        zeros(Float32, Z),
+        zeros(Float32, Z),
+        zeros(Float32, N_NONδ, N_NONδ),
+        zeros(Float32, N_NONδ, N_NONδ),
+        [zeros(Float32, N_NONδ, N_NONδ) for _ in 1:nt],
+        [zeros(Float32, N_NONδ, N_NONδ) for _ in 1:nt],
+        falses(n_blocks),
+    )
 end
 
 # -------------------------------------------------------------------------------------------------
 # Forward pass: utility → CCP per block.
 # -------------------------------------------------------------------------------------------------
 
-# Per-column softmax over a block's rows, with outside-good utility = 0 (stabilized).
+# Per-column softmax over a block's rows with outside-good utility = 0 (stabilized).
 # Writes inside_sum[z] = Σ_k CCP[k,z].
-@inline function softmax_block!(U::AbstractMatrix{Float32}, inside_sum_row::AbstractVector{Float32})
+@inline function softmax_block!(
+    U::AbstractMatrix{Float32}, inside_sum_row::AbstractVector{Float32}
+)
     N_t, Z = size(U)
     @inbounds for z in 1:Z
         u_max = 0.0f0
@@ -273,17 +119,12 @@ end
     end
 end
 
-"""
-Build Π'·D matrix (K+1 × Z) where Π = [Πᵦ | Πp].
-
-Top K rows are Πᵦ' · D; last row is Πp' · D. Used as the "shared per-zip coefficient" vector
-that multiplies each block's X to give the demographic utility contribution.
-"""
+# Build Π'·D matrix (K+1 × Z) where Π = [Πᵦ | Πp]. Top K rows = Πᵦ'·D; last row = Πp'·D.
 function compute_ΠtD!(
     ΠtD::Matrix{Float32}, Πᵦ::AbstractMatrix{Float32}, Πp::AbstractVector{Float32},
     D::Matrix{Float32},
 )
-    _, K = size(Πᵦ)  # Πᵦ is Dn × K → we want Πᵦ' · D which is K × Z
+    _, K = size(Πᵦ)
     mul!(view(ΠtD, 1:K, :), Πᵦ', D)
     Z = size(D, 2)
     @inbounds for z in 1:Z
@@ -296,67 +137,60 @@ function compute_ΠtD!(
 end
 
 """
-forward_pass!(work, dm, params)
-forward_pass!(work, dm, δ, Πᵦ, Πp, η)
+forward_pass!(work, model, params)
+forward_pass!(work, model, δ, Πᵦ, Πp, η)
 
 Computes per-block CCPs into `work.U_blocks` and exp distance utilities into `work.E_blocks`,
 along with `work.inside_sum[bi, z] = Σ_{k∈block bi} CCP[k, z]`.
 
-The 3-arg form slices `params` via `param_indices(dm.model)`. The 6-arg form takes
-`δ` (any length ≥ max(block_param_idxs) entry), `Πᵦ` (Dn × K), `Πp` (Dn), `η` (length 2)
-directly — used by the counterfactual layer to extend `δ` past `n_delta(dm.model)`
-without shuffling the non-δ block of `params`.
+The 6-arg form is used by the counterfactual layer to extend `δ` past `model.N` (after
+ModelAdd) without shuffling the non-δ block of `params`.
 
-Multi-threaded across time blocks (independent work per `bi`).
+Multi-threaded across time blocks.
 """
-function forward_pass!(work::DenseWork, dm::DenseModel, params::AbstractVector{Float32})
-    idx = param_indices(dm.model)
+function forward_pass!(work::DemandWork, model::DemandModel, params::AbstractVector{Float32})
+    idx = param_indices(model)
     δ = view(params, idx.i_δ)
-    Πᵦ = reshape(view(params, idx.i_Πᵦ), dm.Dn, dm.K)
+    Πᵦ = reshape(view(params, idx.i_Πᵦ), model.Dn, model.K)
     Πp = view(params, idx.i_Πp)
     η = view(params, idx.i_η)
-    return forward_pass!(work, dm, δ, Πᵦ, Πp, η)
+    return forward_pass!(work, model, δ, Πᵦ, Πp, η)
 end
 
 function forward_pass!(
-    work::DenseWork, dm::DenseModel,
+    work::DemandWork, model::DemandModel,
     δ::AbstractVector{Float32},
     Πᵦ::AbstractMatrix{Float32},
     Πp::AbstractVector{Float32},
-    η::AbstractVector{Float32},
+    η::AbstractVector{Float32};
+    blocks = 1:(model.n_blocks),
 )
     η1, η2 = η[1], η[2]
+    ΠtD = Matrix{Float32}(undef, model.K + 1, model.Z)
+    compute_ΠtD!(ΠtD, Πᵦ, Πp, model.D_dense)
 
-    ΠtD = Matrix{Float32}(undef, dm.K + 1, dm.Z)
-    compute_ΠtD!(ΠtD, Πᵦ, Πp, dm.D_dense)
-
-    @threads :static for bi in 1:(dm.n_blocks)
+    @threads :static for bi in blocks
         U_bi = work.U_blocks[bi]
         E_bi = work.E_blocks[bi]
-        X_bi = dm.X_blocks[bi]
-        dist_bi = dm.dist_blocks[bi]
-        param_idxs = dm.block_param_idxs[bi]
+        X_bi = model.X_blocks[bi]
+        dist_bi = model.dist_blocks[bi]
+        param_idxs = model.block_param_idxs[bi]
         N_bi = size(U_bi, 1)
 
-        # U = X_bi' * ΠtD   →   N_bi × Z (one BLAS GEMM)
         mul!(U_bi, X_bi', ΠtD)
-
-        # Add δ and subtract exp distance disutility; store E for later use
-        @inbounds for z in 1:(dm.Z)
+        @inbounds for z in 1:(model.Z)
             for k in 1:N_bi
                 e = @fastmath exp(η1 + η2 * dist_bi[k, z])
                 E_bi[k, z] = e
                 U_bi[k, z] += δ[param_idxs[k]] - e
             end
         end
-
         softmax_block!(U_bi, view(work.inside_sum, bi, :))
     end
     return nothing
 end
 
-# Inside-good ll for one block given counts (sparse) and CCPs (after softmax in U).
-# Computes Σ_{(k,z) ∈ nnz(counts)} counts[k,z] * log(max(CCP[k,z], ε)).
+# Inside-good ll for one block: Σ_{(k,z) ∈ nnz(counts)} counts[k,z] * log(max(CCP[k,z], ε)).
 function _inside_ll_block(U::Matrix{Float32}, counts::SparseMatrixCSC{Int32, Int32})
     s = 0.0f0
     @inbounds for col in 1:size(counts, 2)
@@ -370,11 +204,11 @@ function _inside_ll_block(U::Matrix{Float32}, counts::SparseMatrixCSC{Int32, Int
 end
 
 # Outside-good ll: Σ_{bi, z} (M_z - t_obs[bi,z]) · log(max(1 - inside_sum[bi,z], ε))
-function _outside_ll(work::DenseWork, dm::DenseModel)
+function _outside_ll(work::DemandWork, model::DemandModel)
     ll = 0.0f0
-    @inbounds for z in 1:(dm.Z)
-        for bi in 1:(dm.n_blocks)
-            n_out = dm.M_zs[z] - Float32(dm.t_obs[bi, z])
+    @inbounds for z in 1:(model.Z)
+        for bi in 1:(model.n_blocks)
+            n_out = model.M_zs[z] - Float32(model.t_obs[bi, z])
             if n_out > 0.0f0
                 p_out = max(1.0f0 - work.inside_sum[bi, z], 1.0f-10)
                 ll += n_out * log(p_out)
@@ -385,51 +219,46 @@ function _outside_ll(work::DenseWork, dm::DenseModel)
 end
 
 """
-eval_ll!(work, dm, params) → ll::Float32
+eval_ll!(work, model, params) → ll::Float32
 
-Runs forward pass and returns the **average** log-likelihood (per consumer-decision):
-ll_sum × dm.inv_N. Cheaper than `eval_combined!` — no resid, no gradient, no BHHH.
-Used by the inner-Newton line search.
+Average log-likelihood per consumer-decision (sum × model.inv_N). Cheapest evaluator —
+no resid, no gradient, no BHHH. Used by the inner-Newton line search.
 """
-function eval_ll!(work::DenseWork, dm::DenseModel, params::AbstractVector{Float32})
-    forward_pass!(work, dm, params)
+function eval_ll!(work::DemandWork, model::DemandModel, params::AbstractVector{Float32})
+    forward_pass!(work, model, params)
     ll_in = 0.0f0
-    for bi in 1:(dm.n_blocks)
-        ll_in += _inside_ll_block(work.U_blocks[bi], dm.counts_blocks[bi])
+    for bi in 1:(model.n_blocks)
+        ll_in += _inside_ll_block(work.U_blocks[bi], model.counts_blocks[bi])
     end
-    return (ll_in + _outside_ll(work, dm)) * dm.inv_N
+    return (ll_in + _outside_ll(work, model)) * model.inv_N
 end
 
 """
-eval_ll_δgrad!(work, dm, params; δ_grad) → ll::Float32
+eval_ll_δgrad!(work, model, params; δ_grad) → ll::Float32
 
-Runs forward pass, returns the **average** ll (× dm.inv_N), and fills
-`δ_grad[1:N] = ∂ℓ_avg/∂δ` (also × dm.inv_N). Cheaper than `eval_combined!` —
-skips Π and η gradient assembly and BHHH. Used by line-search dϕ.
+Forward + average ll + δ-gradient (scaled by model.inv_N). Skips Π/η gradient and BHHH.
 """
 function eval_ll_δgrad!(
-    work::DenseWork, dm::DenseModel, params::AbstractVector{Float32};
+    work::DemandWork, model::DemandModel, params::AbstractVector{Float32};
     δ_grad::AbstractVector{Float32},
 )
-    forward_pass!(work, dm, params)
+    forward_pass!(work, model, params)
     fill!(δ_grad, 0.0f0)
     ll_in = 0.0f0
-    @inbounds for bi in 1:(dm.n_blocks)
+    @inbounds for bi in 1:(model.n_blocks)
         U_bi = work.U_blocks[bi]
         resid_bi = work.resid_blocks[bi]
-        counts_bi = dm.counts_blocks[bi]
-        param_idxs = dm.block_param_idxs[bi]
+        counts_bi = model.counts_blocks[bi]
+        param_idxs = model.block_param_idxs[bi]
         N_bi = size(U_bi, 1)
-        # resid_bi = -M_z · CCP
-        for z in 1:(dm.Z)
-            mz = dm.M_zs[z]
+        for z in 1:(model.Z)
+            mz = model.M_zs[z]
             for k in 1:N_bi
                 resid_bi[k, z] = -mz * U_bi[k, z]
             end
         end
-        # add counts and accumulate inside ll
         ll_block = 0.0f0
-        for col in 1:(dm.Z)
+        for col in 1:(model.Z)
             for nz in counts_bi.colptr[col]:(counts_bi.colptr[col + 1] - 1)
                 row = counts_bi.rowval[nz]
                 val = Float32(counts_bi.nzval[nz])
@@ -438,17 +267,16 @@ function eval_ll_δgrad!(
             end
         end
         ll_in += ll_block
-        # δ_grad: row sums
         for k in 1:N_bi
             s = 0.0f0
-            for z in 1:(dm.Z)
+            for z in 1:(model.Z)
                 s += resid_bi[k, z]
             end
             δ_grad[param_idxs[k]] = s
         end
     end
-    ll = (ll_in + _outside_ll(work, dm)) * dm.inv_N
-    δ_grad .*= dm.inv_N
+    ll = (ll_in + _outside_ll(work, model)) * model.inv_N
+    δ_grad .*= model.inv_N
     return ll
 end
 
@@ -457,56 +285,43 @@ end
 # -------------------------------------------------------------------------------------------------
 
 """
-eval_combined!(work, dm, params; grad, bhhh) → ll::Float32
+eval_combined!(work, model, params; grad, bhhh) → ll::Float32
 
 Single pass: forward, ll, full gradient (∂ℓ/∂params), BHHH (∂ℓ/∂π outer products).
-**All return values are scaled by `dm.inv_N`** — average likelihood, average gradient,
-and average BHHH (so BHHH still ≈ -Hessian(ll_avg) by Fisher equality at the MLE).
-
-Layout (before scaling):
-
-  - `grad[i_δ]`  = Σ_z (counts[k,z] - M_z·CCP[k,z])           # δ ascent gradient of ℓ
-  - `grad[i_Πᵦ]` = (D · α[1:K,:]')[d,p]                        # column-major (d fastest)
-  - `grad[i_Πp]` = D · α[K+1,:]'                                # Dn-vector
-  - `grad[i_η]`  = -(sum E·resid, sum dist·E·resid)             # 2-vector
-  - `bhhh`       = G_π · G_π'                                   # N_NONδ × N_NONδ, symmetric
-
+All return values are scaled by `model.inv_N` (avg likelihood, avg gradient, avg BHHH).
 `work.U_blocks` still holds CCPs on exit (needed by Woodbury Newton step).
 """
 function eval_combined!(
-    work::DenseWork, dm::DenseModel, params::AbstractVector{Float32};
+    work::DemandWork, model::DemandModel, params::AbstractVector{Float32};
     grad::AbstractVector{Float32}, bhhh::AbstractMatrix{Float32},
 )
-    forward_pass!(work, dm, params)
+    forward_pass!(work, model, params)
 
-    idx = param_indices(dm.model)
+    idx = param_indices(model)
     fill!(grad, 0.0f0)
     fill!(work.α, 0.0f0)
     fill!(work.score_η1, 0.0f0)
     fill!(work.score_η2, 0.0f0)
 
     ll_inside = 0.0f0
-    # Per-block: build resid, fill δ grad, accumulate α (Π contributions) and per-zip η scores
-    for bi in 1:(dm.n_blocks)
+    for bi in 1:(model.n_blocks)
         U_bi = work.U_blocks[bi]
         E_bi = work.E_blocks[bi]
         resid_bi = work.resid_blocks[bi]
-        X_bi = dm.X_blocks[bi]
-        dist_bi = dm.dist_blocks[bi]
-        counts_bi = dm.counts_blocks[bi]
-        param_idxs = dm.block_param_idxs[bi]
+        X_bi = model.X_blocks[bi]
+        dist_bi = model.dist_blocks[bi]
+        counts_bi = model.counts_blocks[bi]
+        param_idxs = model.block_param_idxs[bi]
         N_bi = size(U_bi, 1)
 
-        # resid = -M_z · CCP
-        @inbounds for z in 1:(dm.Z)
-            mz = dm.M_zs[z]
+        @inbounds for z in 1:(model.Z)
+            mz = model.M_zs[z]
             for k in 1:N_bi
                 resid_bi[k, z] = -mz * U_bi[k, z]
             end
         end
-        # add counts and inside ll
         ll_block = 0.0f0
-        @inbounds for col in 1:(dm.Z)
+        @inbounds for col in 1:(model.Z)
             for nz in counts_bi.colptr[col]:(counts_bi.colptr[col + 1] - 1)
                 row = counts_bi.rowval[nz]
                 val = Float32(counts_bi.nzval[nz])
@@ -516,20 +331,17 @@ function eval_combined!(
         end
         ll_inside += ll_block
 
-        # δ grad: row sums of resid_bi
         @inbounds for k in 1:N_bi
             s = 0.0f0
-            for z in 1:(dm.Z)
+            for z in 1:(model.Z)
                 s += resid_bi[k, z]
             end
             grad[param_idxs[k]] = s
         end
 
-        # α += X_bi · resid_bi   ((K+1) × N_bi · N_bi × Z → (K+1) × Z)
         BLAS.gemm!('N', 'N', 1.0f0, X_bi, resid_bi, 1.0f0, work.α)
 
-        # η: per-zip column sums (s1, s2) and global sums
-        @inbounds for z in 1:(dm.Z)
+        @inbounds for z in 1:(model.Z)
             s1 = 0.0f0
             s2 = 0.0f0
             for k in 1:N_bi
@@ -542,67 +354,58 @@ function eval_combined!(
         end
     end
 
-    ll = ll_inside + _outside_ll(work, dm)
+    ll = ll_inside + _outside_ll(work, model)
 
-    # Π gradient: D · α' is (Dn × (K+1)), giving ∂ℓ/∂Π[d,p] in (d,p) order
-    Π_grad = Matrix{Float32}(undef, dm.Dn, dm.K + 1)
-    mul!(Π_grad, dm.D_dense, work.α')
+    Π_grad = Matrix{Float32}(undef, model.Dn, model.K + 1)
+    mul!(Π_grad, model.D_dense, work.α')
 
-    # Πᵦ layout: column-major over (d, p) with d varying fastest (matches @indexof in models.jl)
     i_Πᵦ_start = first(idx.i_Πᵦ)
-    @inbounds for p in 1:(dm.K), d in 1:(dm.Dn)
-        grad[i_Πᵦ_start + (p - 1) * dm.Dn + (d - 1)] = Π_grad[d, p]
+    @inbounds for p in 1:(model.K), d in 1:(model.Dn)
+        grad[i_Πᵦ_start + (p - 1) * model.Dn + (d - 1)] = Π_grad[d, p]
     end
     i_Πp_start = first(idx.i_Πp)
-    @inbounds for d in 1:(dm.Dn)
-        grad[i_Πp_start + (d - 1)] = Π_grad[d, dm.K + 1]
+    @inbounds for d in 1:(model.Dn)
+        grad[i_Πp_start + (d - 1)] = Π_grad[d, model.K + 1]
     end
 
-    # η gradient (global sums of per-zip scores)
     i_η_start = first(idx.i_η)
     grad[i_η_start] = sum(work.score_η1)
     grad[i_η_start + 1] = sum(work.score_η2)
 
-    # Per-zip score G_π (N_NONδ × Z) for BHHH
     N_NONδ = size(work.G_π, 1)
-    @inbounds for p in 1:(dm.K), d in 1:(dm.Dn)
-        row = (p - 1) * dm.Dn + d
-        for z in 1:(dm.Z)
-            work.G_π[row, z] = dm.D_dense[d, z] * work.α[p, z]
+    @inbounds for p in 1:(model.K), d in 1:(model.Dn)
+        row = (p - 1) * model.Dn + d
+        for z in 1:(model.Z)
+            work.G_π[row, z] = model.D_dense[d, z] * work.α[p, z]
         end
     end
-    @inbounds for d in 1:(dm.Dn)
-        row = dm.K * dm.Dn + d
-        for z in 1:(dm.Z)
-            work.G_π[row, z] = dm.D_dense[d, z] * work.α[dm.K + 1, z]
+    @inbounds for d in 1:(model.Dn)
+        row = model.K * model.Dn + d
+        for z in 1:(model.Z)
+            work.G_π[row, z] = model.D_dense[d, z] * work.α[model.K + 1, z]
         end
     end
-    @inbounds for z in 1:(dm.Z)
+    @inbounds for z in 1:(model.Z)
         work.G_π[N_NONδ - 1, z] = work.score_η1[z]
         work.G_π[N_NONδ, z] = work.score_η2[z]
     end
 
-    # BHHH = G_π · G_π'  (single SYRK, then symmetrize)
     fill!(bhhh, 0.0f0)
     BLAS.syrk!('U', 'N', 1.0f0, work.G_π, 0.0f0, bhhh)
     @inbounds for j in 1:N_NONδ, i in (j + 1):N_NONδ
         bhhh[i, j] = bhhh[j, i]
     end
 
-    # Average scaling: ll, grad, and BHHH all by inv_N. BHHH ≈ -Hessian(ll_avg) since
-    # ll_avg = ll_sum × inv_N → Hessian(ll_avg) = Hessian(ll_sum) × inv_N ≈ -BHHH_sum × inv_N.
-    grad .*= dm.inv_N
-    bhhh .*= dm.inv_N
-    return ll * dm.inv_N
+    grad .*= model.inv_N
+    bhhh .*= model.inv_N
+    return ll * model.inv_N
 end
 
 # -------------------------------------------------------------------------------------------------
-# Woodbury Newton step over δ. Same math as scripts/demand_estimation.jl, operating on
-# work.U_blocks (CCPs from the latest combined/forward call) and a δ-gradient vector.
+# Woodbury Newton step over δ. Block-diagonal Hessian (one block per time period).
 # -------------------------------------------------------------------------------------------------
 
-# Returns (-H_t)^{-1} g_t — Newton ascent direction for ℓ over δ_t.
-# Falls back to g_t on Float32 SingularException in the inner Cholesky (degenerate CCPs).
+# Returns (-H_t)^{-1} g_t — Newton ascent direction. Falls back to g_t on singular middle matrix.
 function _woodbury_block(
     U::Matrix{Float32}, M_z::Vector{Float32}, g_t::Vector{Float32}
 )::Vector{Float32}
@@ -626,26 +429,22 @@ function _woodbury_block(
 end
 
 """
-woodbury_newton_step!(step, work, dm, g_δ)
+woodbury_newton_step!(step, work, model, g_δ)
 
-Writes Newton ascent direction over δ (length N) into `step`, using `work.U_blocks`
-(CCPs from latest forward pass) and the per-block market sizes.
-Threaded across time blocks.
-
-`g_δ` is the **average** δ-gradient (∂ℓ_avg/∂δ, the same scale eval_combined! fills
-into its `grad` output). The Newton step direction `−H⁻¹g` is invariant to ll-scaling
-(both H and g scale by the same constant), so we undo the averaging by multiplying
-g_t by 1/dm.inv_N internally — making the Woodbury formula's sum-scale H consistent
-with the rescaled gradient. The resulting step is the correct δ-space Newton direction.
+Writes Newton ascent direction over δ (length ≥ N) into `step`, using `work.U_blocks`
+(CCPs from latest forward pass) and per-block market sizes. `g_δ` is the *average*
+δ-gradient (∂ℓ_avg/∂δ); the Newton direction is invariant to ll scaling, so we rescale
+internally to undo the averaging.
 """
 function woodbury_newton_step!(
-    step::AbstractVector{Float32}, work::DenseWork, dm::DenseModel, g_δ::AbstractVector{Float32}
+    step::AbstractVector{Float32}, work::DemandWork, model::DemandModel,
+    g_δ::AbstractVector{Float32},
 )
-    g_scale = 1.0f0 / dm.inv_N
-    @threads :static for bi in 1:(dm.n_blocks)
-        param_idxs = dm.block_param_idxs[bi]
+    g_scale = 1.0f0 / model.inv_N
+    @threads :static for bi in 1:(model.n_blocks)
+        param_idxs = model.block_param_idxs[bi]
         g_t = Float32[g_δ[k] * g_scale for k in param_idxs]
-        d_t = _woodbury_block(work.U_blocks[bi], dm.M_zs, g_t)
+        d_t = _woodbury_block(work.U_blocks[bi], model.M_zs, g_t)
         @inbounds for (k_local, p) in enumerate(param_idxs)
             step[p] = d_t[k_local]
         end
@@ -653,62 +452,26 @@ function woodbury_newton_step!(
     return step
 end
 
-# -------------------------------------------------------------------------------------------------
-# Envelope-corrected concentrated Hessian
-#
-# Computes H̃_NLL = ∂²NLL/∂π² − C̃ · (∂²NLL/∂δ²)⁻¹ · C̃ᵀ, the actual Hessian of the
-# concentrated NLL viewed as a function of π (BHHH ≈ ∂²NLL/∂π² alone overestimates
-# this by orders of magnitude because the envelope correction is dominant).
-#
-# Uses the same Woodbury structure as the inner Newton: the middle Z×Z system is
-# factorized once per time block and solved against all 22 π-derivative columns.
-#
-# Must be called *after* a successful `eval_combined!` so that work.U_blocks (P),
-# work.E_blocks (E), and work.resid_blocks are populated.
-# -------------------------------------------------------------------------------------------------
-
-struct EnvelopeHessWork
-    partial_H::Matrix{Float32}
-    K_corr::Matrix{Float32}
-    H_per_thread::Vector{Matrix{Float32}}
-    K_per_thread::Vector{Matrix{Float32}}
-    singular_block::Vector{Bool}
-end
-
-function EnvelopeHessWork(dm::DenseModel)
-    N_NONδ = (dm.K + 1) * dm.Dn + 2
-    nt = Threads.nthreads()
-    return EnvelopeHessWork(
-        zeros(Float32, N_NONδ, N_NONδ),
-        zeros(Float32, N_NONδ, N_NONδ),
-        [zeros(Float32, N_NONδ, N_NONδ) for _ in 1:nt],
-        [zeros(Float32, N_NONδ, N_NONδ) for _ in 1:nt],
-        falses(dm.n_blocks),
-    )
-end
-
-# Multi-RHS Woodbury solve. Solves W = (-H_t)⁻¹ · G where G is N_bi × n_rhs.
-# Factorizes the Z × Z middle matrix once via Cholesky.
-# Returns `true` if singular (W is filled with G as a fallback).
+# Multi-RHS Woodbury solve: W = (-H_t)⁻¹ · G; G is N_bi × n_rhs. Returns `true` on singular.
 function _woodbury_solve_multi!(
-    W::Matrix{Float32}, U::Matrix{Float32}, M_z::Vector{Float32}, G::Matrix{Float32},
+    W::Matrix{Float32}, U::Matrix{Float32}, M_z::Vector{Float32}, G::Matrix{Float32}
 )
     Z = length(M_z)
     N_bi = size(U, 1)
     @assert size(G, 1) == N_bi
     @assert size(W) == size(G)
-    d = U * M_z                                  # N_bi
-    inv_d = 1.0f0 ./ max.(d, 1.0f-12)            # N_bi
-    sqrt_inv_d = sqrt.(inv_d)                    # N_bi
-    A = sqrt_inv_d .* U                          # N_bi × Z
+    d = U * M_z
+    inv_d = 1.0f0 ./ max.(d, 1.0f-12)
+    sqrt_inv_d = sqrt.(inv_d)
+    A = sqrt_inv_d .* U
     middle = zeros(Float32, Z, Z)
     middle[diagind(middle)] .= 1.0f0 ./ M_z
     BLAS.syrk!('U', 'T', -1.0f0, A, 1.0f0, middle)
     try
         F = cholesky!(Symmetric(middle, :U))
-        SG = sqrt_inv_d .* G                     # N_bi × n_rhs (broadcast)
-        rhs = A' * SG                            # Z × n_rhs
-        w = F \ rhs                              # Z × n_rhs
+        SG = sqrt_inv_d .* G
+        rhs = A' * SG
+        w = F \ rhs
         W .= inv_d .* G .+ sqrt_inv_d .* (A * w)
         return false
     catch e
@@ -718,58 +481,51 @@ function _woodbury_solve_multi!(
     end
 end
 
-"""
-eval_envelope_hessian!(work, dm, envwork; H) → singular_blocks_count
+# -------------------------------------------------------------------------------------------------
+# Envelope-corrected concentrated Hessian
+#   H̃_NLL = ∂²NLL/∂π² − C̃ · (∂²NLL/∂δ²)⁻¹ · C̃ᵀ
+# Must run *after* a successful eval_combined! so U/E/resid buffers reflect current π.
+# -------------------------------------------------------------------------------------------------
 
-Computes H̃_NLL into `H` (22 × 22). Assumes `eval_combined!` has just run so the
-forward-pass buffers (U, E, resid) reflect the current params. Returns the number
-of time blocks that hit a singular Woodbury solve (fell back to identity).
+"""
+eval_envelope_hessian!(work, model; H) → singular_blocks_count
+
+Computes H̃_NLL into `H` (N_NONδ × N_NONδ). Returns count of time blocks that hit a singular
+Woodbury solve (W=G fallback — degrades gracefully toward BHHH-like).
 """
 function eval_envelope_hessian!(
-    work::DenseWork, dm::DenseModel, envwork::EnvelopeHessWork;
-    H::AbstractMatrix{Float32},
+    work::DemandWork, model::DemandModel; H::AbstractMatrix{Float32}
 )
-    N_NONδ = (dm.K + 1) * dm.Dn + 2
+    N_NONδ = (model.K + 1) * model.Dn + 2
     @assert size(H, 1) == size(H, 2) == N_NONδ
-    Kx = dm.K
-    Dn = dm.Dn
-    Z = dm.Z
+    Kx = model.K
+    Dn = model.Dn
+    Z = model.Z
     row_η1 = N_NONδ - 1
     row_η2 = N_NONδ
 
-    for buf in envwork.H_per_thread
+    for buf in work.H_per_thread
         fill!(buf, 0.0f0)
     end
-    for buf in envwork.K_per_thread
+    for buf in work.K_per_thread
         fill!(buf, 0.0f0)
     end
-    fill!(envwork.singular_block, false)
+    fill!(work.singular_block, false)
 
-    @threads :static for bi in 1:(dm.n_blocks)
+    @threads :static for bi in 1:(model.n_blocks)
         tid = Threads.threadid()
-        H_local = envwork.H_per_thread[tid]
-        K_local = envwork.K_per_thread[tid]
+        H_local = work.H_per_thread[tid % Threads.nthreads() + 1]
+        K_local = work.K_per_thread[tid % Threads.nthreads() + 1]
 
         U_bi = work.U_blocks[bi]
         E_bi = work.E_blocks[bi]
         resid_bi = work.resid_blocks[bi]
-        X_bi = dm.X_blocks[bi]
-        dist_bi = dm.dist_blocks[bi]
+        X_bi = model.X_blocks[bi]
+        dist_bi = model.dist_blocks[bi]
         N_bi = size(U_bi, 1)
         Kp1 = Kx + 1
 
-        # --- Per-block precomputations (Z-indexed reductions) ---
-
-        # xbar[k, z] = Σ_j P_j[z] · X_bi[k, j] = (X_bi · U_bi)[k, z]   (Kp1 × Z)
         xbar = X_bi * U_bi
-
-        # XEbar[k, z]  = Σ_j P_j[z] · X_bi[k, j] · E_bi[j, z]      (Kp1 × Z)
-        # XdEbar[k, z] = Σ_j P_j[z] · X_bi[k, j] · dist[j, z] · E_bi[j, z]
-        # Ebar[z]      = Σ_j P_j[z] · E_bi[j, z]
-        # dEbar[z]     = Σ_j P_j[z] · dist[j, z] · E_bi[j, z]
-        # EEbar[z]     = Σ_j P_j[z] · E_bi[j, z]²
-        # dEEbar[z]    = Σ_j P_j[z] · dist[j, z] · E_bi[j, z]²
-        # dEdEbar[z]   = Σ_j P_j[z] · dist[j, z]² · E_bi[j, z]²
         XEbar = zeros(Float32, Kp1, Z)
         XdEbar = zeros(Float32, Kp1, Z)
         Ebar = zeros(Float32, Z)
@@ -777,18 +533,13 @@ function eval_envelope_hessian!(
         EEbar = zeros(Float32, Z)
         dEEbar = zeros(Float32, Z)
         dEdEbar = zeros(Float32, Z)
-        # Also the per-block CCP-weighted (Kp1 × Kp1) covariance contribution M_pp'[z],
-        # accumulated only into the Πᵦ/Πp Hessian block as we walk z.
 
-        # --- Walk zips: build the Πᵦ/Πp partial-Hessian block + sum up bars ---
         PX = Matrix{Float32}(undef, Kp1, N_bi)
         Mzx = Matrix{Float32}(undef, Kp1, Kp1)
         Vz = Matrix{Float32}(undef, Kp1, Kp1)
 
         @inbounds for z in 1:Z
-            Mz = dm.M_zs[z]
-
-            # PX[k, j] = U_bi[j, z] · X_bi[k, j]
+            Mz = model.M_zs[z]
             for j in 1:N_bi
                 Pjz = U_bi[j, z]
                 Ejz = E_bi[j, z]
@@ -796,41 +547,32 @@ function eval_envelope_hessian!(
                 for k in 1:Kp1
                     PX[k, j] = Pjz * X_bi[k, j]
                 end
-                # Accumulate η-related bars
                 Ebar[z] += Pjz * Ejz
                 dEbar[z] += Pjz * Djz * Ejz
                 EEbar[z] += Pjz * Ejz * Ejz
                 dEEbar[z] += Pjz * Djz * Ejz * Ejz
                 dEdEbar[z] += Pjz * Djz * Djz * Ejz * Ejz
-                # XEbar / XdEbar
                 for k in 1:Kp1
                     XEbar[k, z] += Pjz * X_bi[k, j] * Ejz
                     XdEbar[k, z] += Pjz * X_bi[k, j] * Djz * Ejz
                 end
             end
 
-            # Mzx = PX · X_biᵀ   (Kp1 × Kp1)
             BLAS.gemm!('N', 'T', 1.0f0, PX, X_bi, 0.0f0, Mzx)
-
-            # V_z[k1, k2] = Mzx[k1, k2] − xbar[k1, z] · xbar[k2, z]
             for k2 in 1:Kp1, k1 in 1:Kp1
                 Vz[k1, k2] = Mzx[k1, k2] - xbar[k1, z] * xbar[k2, z]
             end
-
-            # H_Πβ/Πp block: H[(k1-1)Dn+d1, (k2-1)Dn+d2] += M_z · V_z[k1,k2] · D_z[d1] · D_z[d2]
             for k2 in 1:Kp1, k1 in 1:Kp1
                 coef = Mz * Vz[k1, k2]
                 col_off = (k2 - 1) * Dn
                 row_off = (k1 - 1) * Dn
                 for d2 in 1:Dn
-                    dd = coef * dm.D_dense[d2, z]
+                    dd = coef * model.D_dense[d2, z]
                     for d1 in 1:Dn
-                        H_local[row_off + d1, col_off + d2] += dd * dm.D_dense[d1, z]
+                        H_local[row_off + d1, col_off + d2] += dd * model.D_dense[d1, z]
                     end
                 end
             end
-
-            # η×η partial-Hessian contributions
             H_local[row_η1, row_η1] += Mz * (EEbar[z] - Ebar[z]^2)
             mix = Mz * (dEEbar[z] - Ebar[z] * dEbar[z])
             H_local[row_η1, row_η2] += mix
@@ -838,16 +580,13 @@ function eval_envelope_hessian!(
             H_local[row_η2, row_η2] += Mz * (dEdEbar[z] - dEbar[z]^2)
         end
 
-        # --- η × (Πᵦ/Πp) cross block of partial Hessian ---
-        # H[(k-1)Dn + d, η₁] -= Σ_z M_z · D_z[d] · (XEbar[k,z] − xbar[k,z]·Ebar[z])
-        # H[(k-1)Dn + d, η₂] -= Σ_z M_z · D_z[d] · (XdEbar[k,z] − xbar[k,z]·dEbar[z])
         diff_E = XEbar .- xbar .* reshape(Ebar, 1, Z)
         diff_dE = XdEbar .- xbar .* reshape(dEbar, 1, Z)
-        Mz_row = reshape(dm.M_zs, 1, Z)
-        M_diff_E = diff_E .* Mz_row                # Kp1 × Z
+        Mz_row = reshape(model.M_zs, 1, Z)
+        M_diff_E = diff_E .* Mz_row
         M_diff_dE = diff_dE .* Mz_row
-        D_diff_E = dm.D_dense * M_diff_E'          # Dn × Kp1
-        D_diff_dE = dm.D_dense * M_diff_dE'
+        D_diff_E = model.D_dense * M_diff_E'
+        D_diff_dE = model.D_dense * M_diff_dE'
         @inbounds for k in 1:Kp1, d in 1:Dn
             row_idx = (k - 1) * Dn + d
             H_local[row_idx, row_η1] -= D_diff_E[d, k]
@@ -856,8 +595,9 @@ function eval_envelope_hessian!(
             H_local[row_η2, row_idx] -= D_diff_dE[d, k]
         end
 
-        # --- Second-order η contributions (resid · ∂²u/∂η_k∂η_l, NLL sign-flipped) ---
-        s_rE = 0.0f0; s_rdE = 0.0f0; s_rddE = 0.0f0
+        s_rE = 0.0f0
+        s_rdE = 0.0f0
+        s_rddE = 0.0f0
         @inbounds for z in 1:Z, j in 1:N_bi
             r = resid_bi[j, z]
             e = E_bi[j, z]
@@ -871,31 +611,12 @@ function eval_envelope_hessian!(
         H_local[row_η2, row_η1] += s_rdE
         H_local[row_η2, row_η2] += s_rddE
 
-        # --- Build C̃_bi: cross-partial ∂²NLL/∂π_l ∂δ_{bi,j}   (N_NONδ × N_bi) ---
-        # For Πᵦ/Πp[d, k]: C̃[(k-1)Dn+d, j] = D_z[d]-weighted sum over z of
-        #    M_z · P_j[z] · (X_bi[k, j] − xbar[k, z])
-        # For η₁: C̃[η₁, j] = Σ_z M_z · P_j[z] · (Ebar[z] − E_bi[j, z])
-        # For η₂: C̃[η₂, j] = Σ_z M_z · P_j[z] · (dEbar[z] − dist[j,z] · E_bi[j,z])
         Ctilde = zeros(Float32, N_NONδ, N_bi)
-
-        # Πᵦ/Πp part. Vectorize over (k, d):
-        #   C̃[(k-1)Dn+d, j] = X_bi[k,j] · S1[d, j] − S2[d, k, j]
-        # where
-        #   S1[d, j] = Σ_z M_z · D_z[d] · P_j[z]               (Dn × N_bi)
-        #   S2[d, k, j] = Σ_z M_z · D_z[d] · P_j[z] · xbar[k, z]  (Dn × Kp1 × N_bi)
-        # Compute S1 = D · diag(M_z) · U_biᵀ   (cheap)
-        MzU = dm.M_zs .* U_bi'                     # Z × N_bi  (M_z · P_j[z])
-        S1 = dm.D_dense * MzU                       # Dn × N_bi
-
-        # For S2 we need a 3-index sum. Equivalently, define
-        #   T[d, k, z] = M_z · D_z[d] · xbar[k, z]   (Dn × Kp1 × Z)
-        # Then S2[d, k, j] = Σ_z T[d, k, z] · U_bi[j, z]
-        # Compute via a Kp1-loop:
+        MzU = model.M_zs .* U_bi'
+        S1 = model.D_dense * MzU
         @inbounds for k in 1:Kp1
-            # T_k[d, z] = M_z · D_z[d] · xbar[k, z] = D_z[d] · (M_z · xbar[k, z])
-            Mxk = dm.M_zs .* view(xbar, k, :)       # Z
-            T_k = dm.D_dense .* reshape(Mxk, 1, Z)  # Dn × Z
-            # S2_k[d, j] = T_k · U_biᵀ  (Dn × N_bi)
+            Mxk = model.M_zs .* view(xbar, k, :)
+            T_k = model.D_dense .* reshape(Mxk, 1, Z)
             S2_k = T_k * U_bi'
             for d in 1:Dn, j in 1:N_bi
                 row_idx = (k - 1) * Dn + d
@@ -903,19 +624,15 @@ function eval_envelope_hessian!(
             end
         end
 
-        # η rows
-        # η₁: Σ_z M_z · P_j[z] · Ebar[z]   −   Σ_z M_z · P_j[z] · E_bi[j, z]
-        # First term: U_bi · (M_z .* Ebar)   length N_bi (U_bi is N_bi × Z; sum over z)
-        MzEbar = dm.M_zs .* Ebar                    # Z
-        MzdEbar = dm.M_zs .* dEbar
-        term1_η1 = U_bi * MzEbar                    # N_bi
+        MzEbar = model.M_zs .* Ebar
+        MzdEbar = model.M_zs .* dEbar
+        term1_η1 = U_bi * MzEbar
         term1_η2 = U_bi * MzdEbar
-        # Second term: Σ_z M_z · P_j[z] · E_bi[j, z]   per j, computed in-line.
         @inbounds for j in 1:N_bi
             s_e = 0.0f0
             s_de = 0.0f0
             for z in 1:Z
-                Mz = dm.M_zs[z]
+                Mz = model.M_zs[z]
                 Pjz = U_bi[j, z]
                 Ejz = E_bi[j, z]
                 Djz = dist_bi[j, z]
@@ -926,49 +643,36 @@ function eval_envelope_hessian!(
             Ctilde[row_η2, j] = term1_η2[j] - s_de
         end
 
-        # --- Apply Woodbury: W = (−H_δδ_bi)⁻¹ · C̃ᵀ   (N_bi × N_NONδ) ---
-        # _woodbury_solve_multi! treats G = C̃ᵀ.
-        Gt = Matrix(Ctilde')                        # N_bi × N_NONδ
+        Gt = Matrix(Ctilde')
         W = Matrix{Float32}(undef, N_bi, N_NONδ)
-        singular = _woodbury_solve_multi!(W, U_bi, dm.M_zs, Gt)
-        envwork.singular_block[bi] = singular
-
-        # K_block += C̃ · W   (22 × 22).  Note Wᵀ is N_NONδ × N_bi, but we have W as
-        # N_bi × N_NONδ, so C̃ · W is (N_NONδ × N_bi) · (N_bi × N_NONδ) = N_NONδ × N_NONδ. ✓
-        # If singular, the fallback W=G means K += C̃ · C̃ᵀ which is still PSD (just
-        # not the correct envelope correction) — degrades gracefully toward BHHH-like.
+        singular = _woodbury_solve_multi!(W, U_bi, model.M_zs, Gt)
+        work.singular_block[bi] = singular
         BLAS.gemm!('N', 'N', 1.0f0, Ctilde, W, 1.0f0, K_local)
     end
 
-    # Reduce thread-local accumulators
-    fill!(envwork.partial_H, 0.0f0)
-    fill!(envwork.K_corr, 0.0f0)
-    for buf in envwork.H_per_thread
-        envwork.partial_H .+= buf
+    fill!(work.partial_H, 0.0f0)
+    fill!(work.K_corr, 0.0f0)
+    for buf in work.H_per_thread
+        work.partial_H .+= buf
     end
-    for buf in envwork.K_per_thread
-        envwork.K_corr .+= buf
+    for buf in work.K_per_thread
+        work.K_corr .+= buf
     end
 
-    # H̃_NLL = partial_H − K_corr, scaled by inv_N (so H is the Hessian of NLL_avg).
     @inbounds for j in 1:N_NONδ, i in 1:N_NONδ
-        H[i, j] = (envwork.partial_H[i, j] - envwork.K_corr[i, j]) * dm.inv_N
+        H[i, j] = (work.partial_H[i, j] - work.K_corr[i, j]) * model.inv_N
     end
-    # Symmetrize (small Float32 asymmetries from non-associative reductions)
     @inbounds for j in 1:N_NONδ, i in (j + 1):N_NONδ
         s = 0.5f0 * (H[i, j] + H[j, i])
         H[i, j] = s
         H[j, i] = s
     end
-
-    return count(envwork.singular_block)
+    return count(work.singular_block)
 end
 
-# Eigenvalue floor: if λ_min(H) < floor, shift H += (floor − λ_min) · I.
-# Returns the shift applied (0 if H was already above the floor).
+# Eigenvalue floor for the envelope-corrected Hessian.
 function definiteness_shift!(H::AbstractMatrix{Float32}, floor::Float32 = 1.0f-3)
     N = size(H, 1)
-    # Use Float64 for the eigenvalue computation; the matrix is small (22×22).
     Hd = Symmetric(Float64.(H))
     λmin = Float32(eigmin(Hd))
     if λmin < floor
@@ -981,4 +685,833 @@ function definiteness_shift!(H::AbstractMatrix{Float32}, floor::Float32 = 1.0f-3
     return 0.0f0
 end
 
-end # module Dense
+# -------------------------------------------------------------------------------------------------
+# Tweak system: PriceMultiply / ModelAdd / ModelDelete
+# -------------------------------------------------------------------------------------------------
+
+abstract type AbstractTweak end
+
+@kwdef struct PriceMultiply <: AbstractTweak
+    dealer_uid::Union{UUID, Nothing} = nothing
+    vehicle::Union{VehicleKey, Nothing} = nothing
+    quarter::Union{QuarterKey, Nothing} = nothing
+    by::Float32
+end
+
+@kwdef struct PriceChange <: AbstractTweak
+    dealer_uid::Union{UUID, Nothing} = nothing
+    vehicle::Union{VehicleKey, Nothing} = nothing
+    quarter::Union{QuarterKey, Nothing} = nothing
+    price::Float32
+end
+
+@kwdef struct ModelAdd <: AbstractTweak
+    vehicle::VehicleKey
+    quarter::QuarterKey
+    dealer_uid::UUID
+    price::Union{Float32, Nothing} = nothing
+end
+
+struct ModelDelete <: AbstractTweak
+    vehicle::VehicleKey
+    quarter::QuarterKey
+    dealer_uid::UUID
+end
+
+# Helper: look up flat δ indices matching a tweak's filters. Filters out products that
+# have been deleted (not in tjf_to_block_k). Returns `missing` if no match.
+function resolve_indices(model::DemandModel, tweak::AbstractTweak)
+    # Fast path: all three filters set ⇒ at most one product. Direct tjf lookup avoids
+    # intersecting three potentially-large index vectors (hot path inside residual_demand).
+    if !isnothing(tweak.dealer_uid) && !isnothing(tweak.vehicle) && !isnothing(tweak.quarter)
+        tjf_key = (tweak.quarter, tweak.vehicle, tweak.dealer_uid)
+        idx = get(model.product_lookup.tjf, tjf_key, Int32(0))
+        idx == Int32(0) && return missing
+        haskey(model.tjf_to_block_k, idx) || return missing
+        return [model.tjf_to_block_k[idx]], Int32[idx]
+    end
+    indices = Vector{Int32}[]
+    if !isnothing(tweak.dealer_uid)
+        push!(indices, get(model.product_lookup.f, tweak.dealer_uid, Int32[]))
+    end
+    if !isnothing(tweak.vehicle)
+        push!(indices, get(model.product_lookup.j, tweak.vehicle, Int32[]))
+    end
+    if !isnothing(tweak.quarter)
+        push!(indices, get(model.product_lookup.t, tweak.quarter, Int32[]))
+    end
+    isempty(indices) && return missing
+    δ_idxs_all = reduce(intersect, indices)
+    δ_idxs = Int32[i for i in δ_idxs_all if haskey(model.tjf_to_block_k, i)]
+    isempty(δ_idxs) && return missing
+    dense_indices = [model.tjf_to_block_k[i] for i in δ_idxs]
+    return dense_indices, δ_idxs
+end
+
+function _block_index_for_quarter(model::DemandModel, quarter::QuarterKey)
+    bi = findfirst(==(quarter), model.block_keys)
+    isnothing(bi) && error("Quarter $quarter not present in model time blocks")
+    return Int(bi)
+end
+
+# Sparse-row primitives for counts_blocks[bi] (N_bi × Z).
+function _extract_sparse_row(M::SparseMatrixCSC{Tv, Ti}, k::Integer) where {Tv, Ti}
+    pairs = Tuple{Ti, Tv}[]
+    @inbounds for col in 1:size(M, 2)
+        for nz in M.colptr[col]:(M.colptr[col + 1] - 1)
+            M.rowval[nz] == Ti(k) && push!(pairs, (Ti(col), M.nzval[nz]))
+        end
+    end
+    return pairs
+end
+
+function _drop_sparse_row(M::SparseMatrixCSC{Tv, Ti}, k::Integer) where {Tv, Ti}
+    I, J, V = findnz(M)
+    mask = I .!= Ti(k)
+    I_new = I[mask]
+    @inbounds for i in eachindex(I_new)
+        I_new[i] > Ti(k) && (I_new[i] -= one(Ti))
+    end
+    return sparse(I_new, J[mask], V[mask], size(M, 1) - 1, size(M, 2))
+end
+
+function _insert_sparse_row(
+    M::SparseMatrixCSC{Tv, Ti}, k::Integer, row_pairs::Vector{Tuple{Ti, Tv}}
+) where {Tv, Ti}
+    I, J, V = findnz(M)
+    @inbounds for i in eachindex(I)
+        I[i] >= Ti(k) && (I[i] += one(Ti))
+    end
+    for (col, val) in row_pairs
+        push!(I, Ti(k))
+        push!(J, col)
+        push!(V, val)
+    end
+    return sparse(I, J, V, size(M, 1) + 1, size(M, 2))
+end
+
+function _append_empty_sparse_row(M::SparseMatrixCSC{Tv, Ti}) where {Tv, Ti}
+    return SparseMatrixCSC{Tv, Ti}(
+        size(M, 1) + 1, size(M, 2), copy(M.colptr), copy(M.rowval), copy(M.nzval)
+    )
+end
+
+function _pop_last_sparse_row(M::SparseMatrixCSC{Tv, Ti}) where {Tv, Ti}
+    last_row = Ti(size(M, 1))
+    @inbounds for r in M.rowval
+        r == last_row && error("_pop_last_sparse_row: last row has nonzero entries")
+    end
+    return SparseMatrixCSC{Tv, Ti}(
+        size(M, 1) - 1, size(M, 2), copy(M.colptr), copy(M.rowval), copy(M.nzval)
+    )
+end
+
+function _resize_block_buffers!(
+    work::DemandWork, model::DemandModel, bi::Integer, N_bi_new::Integer
+)
+    work.U_blocks[bi] = zeros(Float32, N_bi_new, model.Z)
+    work.E_blocks[bi] = zeros(Float32, N_bi_new, model.Z)
+    work.resid_blocks[bi] = zeros(Float32, N_bi_new, model.Z)
+    return nothing
+end
+
+# Majority-vote body class for a (make, model, model_year) using existing product_info entries.
+function _body_flags_for_vehicle(model::DemandModel, vehicle::VehicleKey)
+    j_base = vehicle[1:3]
+    counts = (coupe = 0, suv = 0, pickup = 0, sedan = 0)
+    found = false
+    @inbounds for (key, idx) in pairs(model.product_lookup.tjf)
+        (_, j_k, _) = key
+        j_k[1:3] == j_base || continue
+        haskey(model.tjf_to_block_k, idx) || continue
+        info = model.product_info[idx]
+        counts = (
+            coupe = counts.coupe + Int(info.is_coupe),
+            suv = counts.suv + Int(info.is_suv),
+            pickup = counts.pickup + Int(info.is_pickup),
+            sedan = counts.sedan + Int(info.is_sedan),
+        )
+        found = true
+    end
+    total = counts.coupe + counts.suv + counts.pickup + counts.sedan
+    if !found || total == 0
+        @warn "No body-class data for $(j_base); defaulting to sedan"
+        return (false, false, false, true)
+    end
+    maxc = max(counts.coupe, counts.suv, counts.pickup, counts.sedan)
+    is_coupe = counts.coupe == maxc
+    is_suv = !is_coupe && counts.suv == maxc
+    is_pickup = !is_coupe && !is_suv && counts.pickup == maxc
+    is_sedan = !is_coupe && !is_suv && !is_pickup
+    return (is_coupe, is_suv, is_pickup, is_sedan)
+end
+
+# ---- apply!(::PriceMultiply, ...) ----
+
+"""
+apply!(tweak::PriceMultiply, model, δ; β_price) → undo handle (or `missing` if no match)
+
+Multiplies the standardized price in `model.X_blocks[bi][end, k]` by `tweak.by` for every
+(t, j, f) matching the tweak's filters, and shifts `δ[δ_idx]` by `β_price · old_price · (by − 1)`.
+"""
+function apply!(
+    tweak::PriceMultiply, model::DemandModel, δ::AbstractVector{Float32}; β_price::Float32
+)
+    resolved = resolve_indices(model, tweak)
+    ismissing(resolved) && return missing
+    dense_indices, δ_idxs = resolved
+    K = model.K
+    by = tweak.by
+    n = length(dense_indices)
+    δ_offsets = Vector{Float32}(undef, n)
+    old_prices = Vector{Float32}(undef, n)
+    @inbounds for (i, (bi, k_local)) in enumerate(dense_indices)
+        old_p = model.X_blocks[bi][K + 1, k_local]
+        old_prices[i] = old_p
+        model.X_blocks[bi][K + 1, k_local] = old_p * by
+        offset = β_price * old_p * (by - 1.0f0)
+        δ_offsets[i] = offset
+        δ[δ_idxs[i]] += offset
+    end
+    return (;
+        kind = :price_multiply,
+        dense_indices = collect(dense_indices),
+        δ_indices = collect(δ_idxs),
+        δ_offsets,
+        old_prices,
+        by,
+    )
+end
+
+# ---- apply!(::PriceChange, ...) ----
+
+"""
+apply!(tweak::PriceChange, model, δ; β_price) → undo handle (or `missing` if no match)
+
+Wholesale-sets the standardized price in `model.X_blocks[bi][end, k]` to `tweak.price` for
+every (t, j, f) matching the tweak's filters, and shifts `δ[δ_idx]` by
+`β_price · (tweak.price − old_price)`.
+"""
+function apply!(
+    tweak::PriceChange, model::DemandModel, δ::AbstractVector{Float32}; β_price::Float32
+)
+    resolved = resolve_indices(model, tweak)
+    ismissing(resolved) && return missing
+    dense_indices, δ_idxs = resolved
+    K = model.K
+    new_p = tweak.price
+    n = length(dense_indices)
+    δ_offsets = Vector{Float32}(undef, n)
+    old_prices = Vector{Float32}(undef, n)
+    @inbounds for (i, (bi, k_local)) in enumerate(dense_indices)
+        old_p = model.X_blocks[bi][K + 1, k_local]
+        old_prices[i] = old_p
+        model.X_blocks[bi][K + 1, k_local] = new_p
+        offset = β_price * (new_p - old_p)
+        δ_offsets[i] = offset
+        δ[δ_idxs[i]] += offset
+    end
+    return (;
+        kind = :price_change,
+        dense_indices = collect(dense_indices),
+        δ_indices = collect(δ_idxs),
+        δ_offsets,
+        old_prices,
+        new_price = new_p,
+    )
+end
+
+# ---- apply!(::ModelDelete, ...) ----
+
+"""
+apply!(tweak::ModelDelete, model, work, δ) → undo handle (or `missing` if not found)
+
+Removes the (t, j, f) product from its time block, drops its X column / dist row /
+counts row, decrements t_obs by the dropped counts, and removes its entry from
+block_param_idxs, tjf_to_block_k, and product_lookup.{t, j, f, make}. The δ entry is
+left orphaned in `δ` (use the 6-arg forward_pass!).
+"""
+function apply!(
+    tweak::ModelDelete, model::DemandModel, work::DemandWork, δ::AbstractVector{Float32}
+)
+    tjf_key = (tweak.quarter, tweak.vehicle, tweak.dealer_uid)
+    δ_idx_raw = get(model.product_lookup.tjf, tjf_key, Int32(0))
+    if δ_idx_raw == 0 || !haskey(model.tjf_to_block_k, δ_idx_raw)
+        @warn "ModelDelete: (t, j, f) $tjf_key not found; no-op"
+        return missing
+    end
+    δ_idx = Int(δ_idx_raw)
+    bi_t, k_local_t = model.tjf_to_block_k[δ_idx_raw]
+    bi = Int(bi_t)
+    k_local = Int(k_local_t)
+    Z = model.Z
+    N_bi = length(model.block_param_idxs[bi])
+
+    X_col = model.X_blocks[bi][:, k_local] |> copy
+    dist_col = model.dist_blocks[bi][k_local, :] |> copy
+    counts_col_pairs = _extract_sparse_row(model.counts_blocks[bi], k_local)
+    δ_value = δ[δ_idx]
+
+    keep_cols = [c for c in 1:N_bi if c != k_local]
+    model.X_blocks[bi] = model.X_blocks[bi][:, keep_cols]
+    model.dist_blocks[bi] = model.dist_blocks[bi][keep_cols, :]
+    @inbounds for (col_t, val_t) in counts_col_pairs
+        model.t_obs[bi, Int(col_t)] -= Int32(val_t)
+    end
+    model.counts_blocks[bi] = _drop_sparse_row(model.counts_blocks[bi], k_local)
+    deleteat!(model.block_param_idxs[bi], k_local)
+    delete!(model.tjf_to_block_k, δ_idx_raw)
+    for (key, (b_t, k_t)) in pairs(model.tjf_to_block_k)
+        if Int(b_t) == bi && Int(k_t) > k_local
+            model.tjf_to_block_k[key] = (b_t, k_t - Int32(1))
+        end
+    end
+
+    # Remove δ_idx from product_lookup.{t, j, f, make} (record positions for undo)
+    t_pos = findfirst(==(δ_idx_raw), model.product_lookup.t[tweak.quarter])
+    j_pos = findfirst(==(δ_idx_raw), model.product_lookup.j[tweak.vehicle])
+    f_pos = findfirst(==(δ_idx_raw), model.product_lookup.f[tweak.dealer_uid])
+    make_key = first(tweak.vehicle)
+    make_pos = findfirst(==(δ_idx_raw), model.product_lookup.make[make_key])
+    deleteat!(model.product_lookup.t[tweak.quarter], t_pos)
+    deleteat!(model.product_lookup.j[tweak.vehicle], j_pos)
+    deleteat!(model.product_lookup.f[tweak.dealer_uid], f_pos)
+    deleteat!(model.product_lookup.make[make_key], make_pos)
+
+    _resize_block_buffers!(work, model, bi, N_bi - 1)
+    return (;
+        kind = :model_delete,
+        bi,
+        k_local,
+        δ_idx = Int32(δ_idx),
+        δ_value,
+        X_col,
+        dist_col,
+        counts_col_pairs,
+        tjf_key,
+        t_pos, j_pos, f_pos, make_pos,
+    )
+end
+
+# ---- apply!(::ModelAdd, ...) ----
+
+"""
+apply!(tweak::ModelAdd, model, work, δ; regout, first_stage, J_t_lookup, hausman_fn) → undo handle
+
+Predicts Hausman instrument via `hausman_fn`, predicts price via `first_stage`, predicts δ via
+`regout`. Appends a new column to X_blocks[bi], a new row to dist_blocks[bi], an empty row to
+counts_blocks[bi]; pushes the predicted δ onto `δ`; registers in block_param_idxs[bi],
+tjf_to_block_k, and product_lookup.{t, j, f, make, tjf}. Returns `missing` on prediction failure.
+"""
+function apply!(
+    tweak::ModelAdd, model::DemandModel, work::DemandWork, δ::Vector{Float32};
+    regout, first_stage, J_t_lookup::AbstractDict{Tuple{Int64, Int64}, <:Integer},
+    hausman_fn::Function,
+)
+    tjf_key = (tweak.quarter, tweak.vehicle, tweak.dealer_uid)
+    existing = get(model.product_lookup.tjf, tjf_key, Int32(0))
+    if existing != 0 && haskey(model.tjf_to_block_k, existing)
+        @warn "ModelAdd: (t, j, f) $tjf_key already present; no-op"
+        return missing
+    end
+    if !(tweak.dealer_uid in names(model.distances, 2))
+        @warn "ModelAdd: dealer $(tweak.dealer_uid) not in distance matrix; no-op"
+        return missing
+    end
+
+    if !haskey(J_t_lookup, tweak.quarter)
+        @warn "ModelAdd: J_t_lookup missing quarter $(tweak.quarter); no-op"
+        return missing
+    end
+    J_t = Int(J_t_lookup[tweak.quarter])
+    year_val, quarter_val = tweak.quarter
+    make_str, model_str, model_year, trim_rank = tweak.vehicle
+    vehicleid = string(model_str, "_", model_year, "_", trim_rank)
+
+    p_hat::Float32 = if isnothing(tweak.price)
+        j_for_hausman = (make_str, model_str, model_year)
+        k_for_hausman = Float64(trim_rank)
+        p_hausman_raw = hausman_fn(tweak.quarter, j_for_hausman, k_for_hausman, tweak.dealer_uid)
+        if isnan(p_hausman_raw)
+            @warn "ModelAdd: hausman_fn returned NaN for $tjf_key; no-op"
+            return missing
+        end
+        fs_row = DataFrame(;
+            price_hausman = [Float64(p_hausman_raw)],
+            J = [J_t],
+            vehicleid = [vehicleid],
+            dealer_uid = [tweak.dealer_uid],
+            year = [year_val],
+            quarter = [quarter_val],
+        )
+        p_hat_raw = predict(first_stage, fs_row)
+        if ismissing(p_hat_raw) || ismissing(first(p_hat_raw))
+            @warn "ModelAdd: first_stage predict returned missing for $tjf_key; no-op"
+            return missing
+        end
+        Float32(first(p_hat_raw))
+    else
+        tweak.price
+    end
+
+    # regout's structural regressor is price; price_hausman is the IV. FixedEffectModels.predict
+    # may read all formula RHS columns, so include both even when price was given directly.
+    row_df = DataFrame(;
+        price = [Float64(p_hat)],
+        price_hausman = [Float64(p_hat)],
+        J = [J_t],
+        vehicleid = [vehicleid],
+        dealer_uid = [tweak.dealer_uid],
+        year = [year_val],
+        quarter = [quarter_val],
+    )
+    δ_hat_raw = predict(regout, row_df)
+    if ismissing(δ_hat_raw) || ismissing(first(δ_hat_raw))
+        @warn "ModelAdd: regout predict returned missing for $tjf_key; no-op"
+        return missing
+    end
+    δ_hat = Float32(first(δ_hat_raw))
+
+    bi = _block_index_for_quarter(model, tweak.quarter)
+    K = model.K
+    Z = model.Z
+    N_bi = length(model.block_param_idxs[bi])
+    is_coupe, is_suv, is_pickup, is_sedan = _body_flags_for_vehicle(model, tweak.vehicle)
+
+    new_X_col = Vector{Float32}(undef, K + 1)
+    body_flags = (is_coupe, is_suv, is_pickup, is_sedan)
+    @inbounds for (p_i, attr) in enumerate(PRODUCT_ATTRIBUTES)
+        new_X_col[p_i] = Float32(
+            if attr === :is_coupe
+                body_flags[1]
+            elseif attr === :is_suv
+                body_flags[2]
+            elseif attr === :is_pickup
+                body_flags[3]
+            else
+                body_flags[4]
+            end,
+        )
+    end
+    new_X_col[K + 1] = p_hat
+
+    new_dist_row = Vector{Float32}(undef, Z)
+    @inbounds for (zi, z) in enumerate(model.zips)
+        new_dist_row[zi] = Float32(model.distances[z, tweak.dealer_uid])
+    end
+
+    model.X_blocks[bi] = hcat(model.X_blocks[bi], new_X_col)
+    model.dist_blocks[bi] = vcat(model.dist_blocks[bi], reshape(new_dist_row, 1, Z))
+    model.counts_blocks[bi] = _append_empty_sparse_row(model.counts_blocks[bi])
+
+    push!(δ, δ_hat)
+    new_δ_idx = Int32(length(δ))
+    push!(model.block_param_idxs[bi], new_δ_idx)
+    k_new_local = Int32(N_bi + 1)
+    model.tjf_to_block_k[new_δ_idx] = (Int32(bi), k_new_local)
+
+    # Register in product_lookup
+    push!(get!(model.product_lookup.t, tweak.quarter, Int32[]), new_δ_idx)
+    push!(get!(model.product_lookup.j, tweak.vehicle, Int32[]), new_δ_idx)
+    push!(get!(model.product_lookup.f, tweak.dealer_uid, Int32[]), new_δ_idx)
+    push!(get!(model.product_lookup.make, make_str, Int32[]), new_δ_idx)
+    tjf_was_present = existing != 0
+    prev_tjf_value = existing
+    model.product_lookup.tjf[tjf_key] = new_δ_idx
+
+    _resize_block_buffers!(work, model, bi, N_bi + 1)
+    return (;
+        kind = :model_add,
+        bi,
+        k_local = Int(k_new_local),
+        δ_idx = new_δ_idx,
+        tjf_key,
+        tjf_was_present,
+        prev_tjf_value,
+    )
+end
+
+# ---- undo! ----
+
+"""
+undo!(handle, model, δ)
+undo!(handle, model, work, δ)
+
+Reverses an `apply!` call. The 3-arg form supports `:price_multiply`; the 4-arg form supports
+`:model_delete` and `:model_add`.
+"""
+function undo!(handle::NamedTuple, model::DemandModel, δ::AbstractVector{Float32})
+    handle.kind in (:price_multiply, :price_change) ||
+        error(
+            "undo!(handle, model, δ): only supports :price_multiply / :price_change; got $(handle.kind)"
+        )
+    K = model.K
+    @inbounds for (i, (bi, k_local)) in enumerate(handle.dense_indices)
+        model.X_blocks[bi][K + 1, k_local] = handle.old_prices[i]
+        δ[handle.δ_indices[i]] -= handle.δ_offsets[i]
+    end
+    return nothing
+end
+
+function undo!(
+    handle::NamedTuple, model::DemandModel, work::DemandWork, δ::Vector{Float32}
+)
+    if handle.kind == :model_delete
+        bi = handle.bi
+        k_local = handle.k_local
+        N_bi_now = length(model.block_param_idxs[bi])
+        Xb = model.X_blocks[bi]
+        before = view(Xb, :, 1:(k_local - 1))
+        after = view(Xb, :, k_local:N_bi_now)
+        model.X_blocks[bi] = hcat(before, reshape(handle.X_col, :, 1), after)
+        Db = model.dist_blocks[bi]
+        before_r = view(Db, 1:(k_local - 1), :)
+        after_r = view(Db, k_local:N_bi_now, :)
+        model.dist_blocks[bi] = vcat(before_r, reshape(handle.dist_col, 1, :), after_r)
+        model.counts_blocks[bi] = _insert_sparse_row(
+            model.counts_blocks[bi], k_local, handle.counts_col_pairs
+        )
+        @inbounds for (col_t, val_t) in handle.counts_col_pairs
+            model.t_obs[bi, Int(col_t)] += Int32(val_t)
+        end
+        for (key, (b_t, k_t)) in pairs(model.tjf_to_block_k)
+            if Int(b_t) == bi && Int(k_t) >= k_local
+                model.tjf_to_block_k[key] = (b_t, k_t + Int32(1))
+            end
+        end
+        insert!(model.block_param_idxs[bi], k_local, handle.δ_idx)
+        model.tjf_to_block_k[handle.δ_idx] = (Int32(bi), Int32(k_local))
+        δ[handle.δ_idx] = handle.δ_value
+        # Restore product_lookup entries
+        tquarter, tvehicle, tdealer = handle.tjf_key
+        make_key = first(tvehicle)
+        insert!(model.product_lookup.t[tquarter], handle.t_pos, handle.δ_idx)
+        insert!(model.product_lookup.j[tvehicle], handle.j_pos, handle.δ_idx)
+        insert!(model.product_lookup.f[tdealer], handle.f_pos, handle.δ_idx)
+        insert!(model.product_lookup.make[make_key], handle.make_pos, handle.δ_idx)
+        _resize_block_buffers!(work, model, bi, N_bi_now + 1)
+        return nothing
+    elseif handle.kind == :model_add
+        bi = handle.bi
+        k_local = handle.k_local
+        N_bi_now = length(model.block_param_idxs[bi])
+        k_local == N_bi_now ||
+            error("undo!(:model_add): block_param_idxs unexpectedly modified")
+        model.X_blocks[bi] = model.X_blocks[bi][:, 1:(N_bi_now - 1)]
+        model.dist_blocks[bi] = model.dist_blocks[bi][1:(N_bi_now - 1), :]
+        model.counts_blocks[bi] = _pop_last_sparse_row(model.counts_blocks[bi])
+        pop!(model.block_param_idxs[bi])
+        delete!(model.tjf_to_block_k, handle.δ_idx)
+        Int(handle.δ_idx) == length(δ) ||
+            error("undo!(:model_add): δ has been modified since apply")
+        pop!(δ)
+        # Reverse product_lookup pushes
+        tquarter, tvehicle, tdealer = handle.tjf_key
+        make_key = first(tvehicle)
+        pop!(model.product_lookup.t[tquarter])
+        pop!(model.product_lookup.j[tvehicle])
+        pop!(model.product_lookup.f[tdealer])
+        pop!(model.product_lookup.make[make_key])
+        if handle.tjf_was_present
+            model.product_lookup.tjf[handle.tjf_key] = handle.prev_tjf_value
+        else
+            delete!(model.product_lookup.tjf, handle.tjf_key)
+        end
+        _resize_block_buffers!(work, model, bi, N_bi_now - 1)
+        return nothing
+    else
+        error("undo!: unknown handle kind $(handle.kind)")
+    end
+end
+
+# -------------------------------------------------------------------------------------------------
+# Counterfactual outputs: expected_demand, share_matrix, foc_residual
+# -------------------------------------------------------------------------------------------------
+
+function dealer_block_locals(model::DemandModel, dealer_uid::UUID, t::QuarterKey)
+    bi = _block_index_for_quarter(model, t)
+    dealer_idxs = get(model.product_lookup.f, dealer_uid, Int32[])
+    quarter_idxs = get(model.product_lookup.t, t, Int32[])
+    matching = Int32[
+        i for i in intersect(dealer_idxs, quarter_idxs) if haskey(model.tjf_to_block_k, i)
+    ]
+    isempty(matching) && return bi, Int[], Int32[]
+    pairs_ = [(model.tjf_to_block_k[idx], idx) for idx in matching]
+    sort!(pairs_; by = p -> Int(p[1][2]))
+    k_locals = Int[Int(p[1][2]) for p in pairs_]
+    δ_idxs = Int32[p[2] for p in pairs_]
+    return bi, k_locals, δ_idxs
+end
+
+"""
+share_matrix(model, work, params, dealer_uid, t) → Matrix{Float32}
+
+`N_d × N_d` Jacobian of expected demand w.r.t. standardized prices for `dealer_uid` in quarter `t`.
+
+  J[i, j] = ∂E[demand_i] / ∂price'_j
+          = Σ_z M_z · α_z · P_i(z) · (1_{i=j} - P_j(z))
+          where α_z = Σ_d Πp[d] · D_z[d].
+"""
+function share_matrix(
+    model::DemandModel, work::DemandWork, params::AbstractVector{Float32},
+    dealer_uid::UUID, t::QuarterKey; mean_α,
+)
+    bi, k_locals, _ = dealer_block_locals(model, dealer_uid, t)
+    N_d = length(k_locals)
+    N_d == 0 && return Matrix{Float32}(undef, 0, 0)
+
+    idx = param_indices(model)
+    Πp = view(params, idx.i_Πp)
+    Z = model.Z
+    α = Vector{Float32}(undef, Z)
+    @inbounds for z in 1:Z
+        s = 0.0f0
+        for d in 1:(model.Dn)
+            s += Πp[d] * model.D_dense[d, z]
+        end
+        α[z] = s + mean_α
+    end
+
+    P = work.U_blocks[bi]
+    P_d = P[k_locals, :]
+    w = model.M_zs .* α
+    PdW = P_d .* reshape(w, 1, Z)
+    J = -PdW * P_d'
+    @inbounds for i in 1:N_d
+        s_diag = 0.0f0
+        for z in 1:Z
+            s_diag += w[z] * P_d[i, z]
+        end
+        J[i, i] += s_diag
+    end
+    return J
+end
+
+"""
+expected_demand(model, work, dealer_uid, t) → Vector{Float32}
+
+q_d[i] = Σ_z M_z · P_d[i, z], same indexing as `share_matrix`.
+"""
+function expected_demand(
+    model::DemandModel, work::DemandWork, dealer_uid::UUID, t::QuarterKey
+)
+    bi, k_locals, _ = dealer_block_locals(model, dealer_uid, t)
+    N_d = length(k_locals)
+    N_d == 0 && return Float32[]
+    P = work.U_blocks[bi]
+    q = zeros(Float32, N_d)
+    Z = model.Z
+    @inbounds for i in 1:N_d
+        ki = k_locals[i]
+        s = 0.0f0
+        for z in 1:Z
+            s += model.M_zs[z] * P[ki, z]
+        end
+        q[i] = s
+    end
+    return q
+end
+
+"""
+foc_residual(model, work, params, dealer_uid, t, prices, costs) → Vector{Float32}
+
+Bertrand-Nash FOC residual: `q_d + Jᵀ · (prices - costs)`. Zero at equilibrium. The caller is
+responsible for applying any price tweaks and re-running `forward_pass!` first.
+"""
+function foc_residual(
+    model::DemandModel, work::DemandWork, params::AbstractVector{Float32},
+    dealer_uid::UUID, t::QuarterKey,
+    prices::AbstractVector{Float32}, costs::AbstractVector{Float32},
+)
+    q = expected_demand(model, work, dealer_uid, t)
+    length(prices) == length(q) ||
+        error("foc_residual: prices length $(length(prices)) ≠ N_d $(length(q))")
+    length(costs) == length(q) ||
+        error("foc_residual: costs length $(length(costs)) ≠ N_d $(length(q))")
+    J = share_matrix(model, work, params, dealer_uid, t)
+    return q .+ J' * (prices .- costs)
+end
+
+# -------------------------------------------------------------------------------------------------
+# Counterfactual: high-level wrapper bundling model + work + unpacked params + δ-decomposition
+# outputs. apply!/undo! auto-refresh CCPs so callers never forget forward_pass!.
+# -------------------------------------------------------------------------------------------------
+
+mutable struct Counterfactual{TRegout, TFirstStage, THausman}
+    model::DemandModel
+    work::DemandWork
+    δ::Vector{Float32}
+    Πᵦ::Matrix{Float32}                         # Dn × K
+    Πp::Vector{Float32}
+    η::Vector{Float32}
+    β_price::Float32
+    regout::TRegout                                  # FixedEffectModels regression (loaded from JLD2)
+    first_stage::TFirstStage
+    J_t_lookup::Dict{QuarterKey, Int}
+    hausman_fn::THausman
+    dirty_blocks::BitVector                          # per-block stale flag; refresh! forward-passes only set bits
+end
+
+# Default Hausman lookup: looks up existing entries in model.product_info by (t, j, k, f).
+# Returns NaN for new (t, j, f) triples the loader never saw — caller must pass a richer
+# closure (e.g. one that calls `hausman_price` over a `mean_prices` GroupedDataFrame).
+function default_hausman_fn(model::DemandModel)
+    return function (t, j_minus_trim, k, f)
+        j = (j_minus_trim[1], j_minus_trim[2], j_minus_trim[3], Float32(k))
+        idx = get(model.product_lookup.tjf, (t, j, f), Int32(0))
+        idx == 0 && return NaN
+        return Float64(model.product_info[idx].p_hausman)
+    end
+end
+
+"""
+Counterfactual(model, params; decomp_path = "data/delta_decomposition_regout.jld2", hausman_fn = nothing)
+
+Builds a counterfactual context around `model` at `params`, loading `regout` / `first_stage` /
+`J_t_lookup` / `β_price` from the δ-decomposition JLD2 file. `apply!(cf, tweak)` and
+`undo!(cf, handle)` then take no extra kwargs and auto-refresh the CCPs.
+"""
+function Counterfactual(
+    model::DemandModel, params;
+    decomp_path::AbstractString = "data/delta_decomposition_regout.jld2",
+    hausman_fn::Union{Nothing, Function} = nothing,
+)
+    work = DemandWork(model)
+    i = param_indices(model)
+    δ = Vector{Float32}(params[i.i_δ])
+    Πᵦ = reshape(Vector{Float32}(params[i.i_Πᵦ]), model.Dn, model.K)
+    Πp = Vector{Float32}(params[i.i_Πp])
+    η = Vector{Float32}(params[i.i_η])
+
+    decomp = JLD2.load_object(decomp_path)
+    regout = decomp.regout
+    first_stage = decomp.first_stage
+    df = decomp.df
+    β_idx = findfirst(==("price"), coefnames(regout))
+    isnothing(β_idx) && error("Counterfactual: no 'price' coefficient in regout")
+    β_price = Float32(coef(regout)[β_idx])
+    J_t_lookup = Dict{QuarterKey, Int}(
+        (Int64(row.year), Int64(row.quarter)) => Int(row.J)
+        for row in eachrow(unique(select(df, :year, :quarter, :J)))
+    )
+    hausman_fn_ = isnothing(hausman_fn) ? default_hausman_fn(model) : hausman_fn
+
+    cf = Counterfactual(
+        model, work, δ, Πᵦ, Πp, η,
+        β_price, regout, first_stage, J_t_lookup, hausman_fn_,
+        trues(model.n_blocks),
+    )
+    refresh!(cf)
+    return cf
+end
+
+"""
+refresh!(cf) — run forward_pass! over only the blocks marked dirty and clear them.
+Called lazily by the read-only accessors (expected_demand / share_matrix / foc_residual).
+"""
+function refresh!(cf::Counterfactual)
+    any(cf.dirty_blocks) || return cf
+    blocks = findall(cf.dirty_blocks)
+    forward_pass!(cf.work, cf.model, cf.δ, cf.Πᵦ, cf.Πp, cf.η; blocks)
+    fill!(cf.dirty_blocks, false)
+    return cf
+end
+
+# Mark every block touched by a handle dirty.
+function _mark_dirty!(cf::Counterfactual, h::NamedTuple)
+    if h.kind in (:price_multiply, :price_change)
+        @inbounds for (bi, _) in h.dense_indices
+            cf.dirty_blocks[bi] = true
+        end
+    elseif h.kind === :model_add || h.kind === :model_delete
+        cf.dirty_blocks[h.bi] = true
+    else
+        fill!(cf.dirty_blocks, true)
+    end
+    return nothing
+end
+
+# High-level apply!/undo! — dispatch on tweak type, read kwargs from cf, mark dirty.
+
+function apply!(cf::Counterfactual, tweak::PriceMultiply)
+    h = apply!(tweak, cf.model, cf.δ; β_price = cf.β_price)
+    ismissing(h) || _mark_dirty!(cf, h)
+    return h
+end
+
+function apply!(cf::Counterfactual, tweak::PriceChange)
+    h = apply!(tweak, cf.model, cf.δ; β_price = cf.β_price)
+    ismissing(h) || _mark_dirty!(cf, h)
+    return h
+end
+
+function apply!(cf::Counterfactual, tweak::ModelDelete)
+    h = apply!(tweak, cf.model, cf.work, cf.δ)
+    ismissing(h) || _mark_dirty!(cf, h)
+    return h
+end
+
+function apply!(cf::Counterfactual, tweak::ModelAdd)
+    h = apply!(
+        tweak, cf.model, cf.work, cf.δ;
+        regout = cf.regout, first_stage = cf.first_stage,
+        J_t_lookup = cf.J_t_lookup, hausman_fn = cf.hausman_fn,
+    )
+    ismissing(h) || _mark_dirty!(cf, h)
+    return h
+end
+
+function undo!(cf::Counterfactual, handle::NamedTuple)
+    if handle.kind in (:price_multiply, :price_change)
+        undo!(handle, cf.model, cf.δ)
+    else
+        undo!(handle, cf.model, cf.work, cf.δ)
+    end
+    _mark_dirty!(cf, handle)
+    return cf
+end
+
+# High-level read-only accessors — lazily refresh dirty blocks before reading.
+
+function expected_demand(cf::Counterfactual, dealer_uid::UUID, t::QuarterKey)
+    refresh!(cf)
+    return expected_demand(cf.model, cf.work, dealer_uid, t)
+end
+
+function share_matrix(cf::Counterfactual, dealer_uid::UUID, t::QuarterKey)
+    refresh!(cf)
+    params = _full_params(cf)
+    return share_matrix(cf.model, cf.work, params, dealer_uid, t, mean_α = cf.β_price)
+end
+
+function foc_residual(
+    cf::Counterfactual, dealer_uid::UUID, t::QuarterKey,
+    prices::AbstractVector{Float32}, costs::AbstractVector{Float32},
+)
+    refresh!(cf)
+    params = _full_params(cf)
+    return foc_residual(cf.model, cf.work, params, dealer_uid, t, prices, costs)
+end
+
+# Rebuild a flat params vector from cf's unpacked pieces. Used by share_matrix / foc_residual
+# which still take a `params` view in the low-level API (they only read i_Πp).
+function _full_params(cf::Counterfactual)
+    i = param_indices(cf.model)
+    n_total = i.i_η[end]
+    out = Vector{Float32}(undef, n_total)
+    # δ may have grown past model.N (ModelAdd); the i.i_δ range only covers 1:N, which is fine
+    # — share_matrix / foc_residual only read i_Πp anyway.
+    @inbounds for k in 1:length(i.i_δ)
+        out[i.i_δ[k]] = cf.δ[k]
+    end
+    Πᵦ_flat = vec(cf.Πᵦ)
+    @inbounds for k in eachindex(i.i_Πᵦ)
+        out[i.i_Πᵦ[k]] = Πᵦ_flat[k]
+    end
+    @inbounds for k in eachindex(i.i_Πp)
+        out[i.i_Πp[k]] = cf.Πp[k]
+    end
+    out[i.i_η[1]] = cf.η[1]
+    out[i.i_η[2]] = cf.η[2]
+    return out
+end

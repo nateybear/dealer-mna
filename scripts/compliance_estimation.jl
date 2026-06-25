@@ -20,13 +20,6 @@ using Distributed
 
     # calculates the index of the closest dealers, and standardizes demographics
     function prepare_dealers!(dealer_demographics)
-        leftjoin!(dealer_demographics, select(Dealers.State.df, :uid, :geometry), on = :uid)
-        sort!(dealer_demographics, :uid)
-        D =
-            Iterators.product(dealer_demographics.geometry, dealer_demographics.geometry) .|>
-            splat(Geometry.distance) .|>
-            Geometry.miles
-        dealer_demographics.closest_others = map(d -> Tuple(sortperm(d)[2:4]), eachrow(D))
         M = Matrix(dealer_demographics[!, DEMOS])
         M .-= mean(M, dims = 1)
         M *= sqrt(inv(cov(M)))
@@ -34,28 +27,17 @@ using Distributed
         return nothing
     end
 
-    @memoize function X_matrix(compliers, dealer_demographics, compliance)
+    # tf_t_j has a consistent ordering, so enumerate the indexes for fast lookup
+    @memoize function state_lookup(model)
+        intermed = Supply.tf_to_j_lookup(model)
+        return Dict(k => i for (i, k) in enumerate(keys(intermed)))
+    end
+
+    @memoize function X_matrix(compliers, model, state_matrix)
         X = mapreduce(vcat, eachrow(compliers)) do c
-            others_D = Matrix(dealer_demographics[collect(c.closest_others), DEMOS])
-            my_D = Vector(pluck(dealer_demographics, :uid => ByRow(==(c.dealer_uid)))[DEMOS])
-            others_comply = map(c.closest_others) do i
-                try
-                    pluck(
-                        compliance,
-                        :dealer_uid => ByRow(==(dealer_demographics.uid[i])),
-                        :t => ByRow(==(c.t)),
-                    ).is_compliant
-                catch
-                    false
-                end
-            end
-            return vcat(
-                Dates.year(c.t),
-                Dates.month(c.t),
-                my_D,
-                collect(others_comply),
-                reshape(others_D, :),
-            )'
+            quarter = (Dates.year(c.t), Dates.quarterofyear(c.t))
+            row_idx = state_lookup(model)[(quarter, c.dealer_uid)]
+            return reshape(state_matrix[row_idx, :], 1, :)
         end
         return FD.value.(X)
     end
@@ -75,17 +57,16 @@ using Distributed
 
     # calculate the log likelihood, concentrating out rho tilde
     function loglikelihood(α, params)
-        (; cars, dealer_demographics, compliance) = params
+        (; cars, dealer_demographics, state_matrix, demand_model) = params
         α_intercept, α_demos... = α
         base_probs = DataFrame(
             dealer_uid = dealer_demographics.uid,
             p_base = Φ.(α_intercept .+ Matrix(dealer_demographics[!, DEMOS]) * α_demos),
-            closest_others = dealer_demographics.closest_others,
         )
         cars = leftjoin(cars, base_probs, on = :dealer_uid)
         compliers = subset(cars, :is_compliant)
         ρ = @. FD.value((compliers.is_sold - compliers.p_base) / (1 - compliers.p_base))
-        X = X_matrix(compliers, dealer_demographics, compliance)
+        X = X_matrix(compliers, demand_model, state_matrix)
         ρ_hat = with_logger(NullLogger()) do
             XGBoost.predict(xgboost((X, ρ); xgboost_params...), X)
         end
@@ -107,10 +88,10 @@ using Distributed
     α_0 = zeros(length(DEMOS) + 1)
     ls = BackTracking()
 
-    function custom_bhhh(cars, dealer_demographics, compliance; max_iter = 20)
-        (; model, model_year, extra) = cars[1, :]
+    function custom_bhhh(params; max_iter = 20)
+        (; model, model_year, extra) = params.cars[1, :]
         tag = "$model_year $model $extra"
-        F_i = Base.Fix2((-) ∘ loglikelihood, (; cars, dealer_demographics, compliance))
+        F_i = Base.Fix2((-) ∘ loglikelihood, params)
         F = sum ∘ F_i
         G_i = let gcache = FD.JacobianConfig(F_i, α_0)
             @$ FD.jacobian(F_i, _, gcache)
@@ -121,7 +102,7 @@ using Distributed
                 g' * g
             end
         α = copy(α_0)
-        α[1] = quantile(Normal(), mean(cars.is_sold))
+        α[1] = quantile(Normal(), mean(params.cars.is_sold))
         a_init = 1.0
         for i in 1:max_iter
             g = G(α)
@@ -174,6 +155,11 @@ function (@main)(_)
 
     panel = make_panel(fords, dealer_demographics)
     select!(panel, :dealer_uid, :t, :model, :model_year, :extra, :is_sold)
+    subset!(panel, :t => ByRow(≥(Date(2017))))
+
+    demand_model = Demand.DemandModel(; JLD2.load_object(snakemake.input["model_frames"])...)
+
+    state_matrix = JLD2.load_object(snakemake.input["state_matrix"])
 
     compliance = selectunique(panel, [:dealer_uid, :t])
     compliance.p_compliant = rand(nrow(compliance))
@@ -189,17 +175,19 @@ function (@main)(_)
         M_step =
             let mapped = pmap(collect(gdf)) do cars
                     cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
-                    coefs = custom_bhhh(cars, dealer_demographics, compliance, max_iter = 20)
+                    coefs = custom_bhhh(
+                        (; cars, dealer_demographics, demand_model, state_matrix),
+                        max_iter = 20,
+                    )
                     α_intercept, α_demos... = coefs
                     base_probs = DataFrame(
                         dealer_uid = dealer_demographics.uid,
                         p_base = Φ.(α_intercept .+ Matrix(dealer_demographics[!, DEMOS]) * α_demos),
-                        closest_others = dealer_demographics.closest_others,
                     )
                     cars = leftjoin(cars, base_probs, on = :dealer_uid)
                     compliers = subset(cars, :is_compliant)
                     ρ = @. FD.value((compliers.is_sold - compliers.p_base) / (1 - compliers.p_base))
-                    X = X_matrix(compliers, dealer_demographics, compliance)
+                    X = X_matrix(compliers, demand_model, state_matrix)
                     booster = with_logger(NullLogger()) do
                         xgboost((X, ρ); xgboost_params...)
                     end
@@ -226,7 +214,7 @@ function (@main)(_)
                 α_intercept, α_demo... = M_step[(model, model_year, extra)][1]
                 Φ(α_intercept + dot(α_demo, demos[DEMOS]))
             end
-            X = X_matrix(hcat(cars[[1], :], DataFrame(demos)), dealer_demographics, compliance)
+            X = X_matrix(hcat(cars[[1], :], DataFrame(demos)), demand_model, state_matrix)
             cars.ρ_tilde = map(eachrow(cars)) do (; model, model_year, extra)
                 booster = XGBoost.Booster(X)
                 XGBoost.deserialize!(booster, M_step[(model, model_year, extra)][2])
@@ -251,7 +239,7 @@ function (@main)(_)
         if step_change < 1e-4
             @info "Wooohoo! We converged at step $i"
             Arrow.write("data/compliance.arrow", E_step)
-            JLD2.write_object("data/compliance_fits.jld2", M_step)
+            JLD2.save_object("data/compliance_fits.jld2", M_step)
             break
         end
         compliance.p_compliant .= E_step.p_compliant

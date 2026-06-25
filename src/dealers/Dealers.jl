@@ -131,8 +131,10 @@ function freeze_dealers!()
     return nothing
 end
 
-function compute_franchise_network!()
-    all_franchises = collect(reduce(union, State.df.franchises))
+function compute_franchise_network!(franchises = nothing)
+    if isnothing(franchises)
+        franchises = collect(reduce(union, State.df.franchises))
+    end
     State.franchise_network = Dict(
         begin
             dealer_idx = findall(∋(franchise), State.df.franchises) ∩ findall(State.df.active)
@@ -148,7 +150,7 @@ function compute_franchise_network!()
                 SVector{N}(network.idx), SVector{N}(network.geometry)
             )
         end
-        for franchise in all_franchises
+        for franchise in franchises
     )
     return nothing
 end
