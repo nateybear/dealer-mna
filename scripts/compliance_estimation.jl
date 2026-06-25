@@ -40,12 +40,15 @@ using Distributed
     end
 
     @memoize function X_matrix(compliers)
-        X = mapreduce(vcat, eachrow(compliers)) do c
+        nrows = nrow(compliers)
+        ncols = size(state_matrix, 2)
+        X = Matrix{Float32}(undef, nrows, ncols)
+        lookup = state_lookup()
+        for (i, c) in enumerate(eachrow(compliers))
             quarter = (Dates.year(c.t), Dates.quarterofyear(c.t))
-            row_idx = state_lookup()[(quarter, c.dealer_uid)]
-            return reshape(state_matrix[row_idx, :], 1, :)
+            X[i, :] .= @view state_matrix[lookup[(quarter, c.dealer_uid)], :]
         end
-        return FD.value.(X)
+        return X
     end
 
     xgboost_params = (
@@ -63,7 +66,7 @@ using Distributed
 
     # calculate the log likelihood, concentrating out rho tilde
     function loglikelihood(α, params)
-        (; cars, dealer_demographics) = params
+        (; cars, dealer_demographics, dm) = params
         α_intercept, α_demos... = α
         base_probs = DataFrame(
             dealer_uid = dealer_demographics.uid,
@@ -72,9 +75,10 @@ using Distributed
         cars = leftjoin(cars, base_probs, on = :dealer_uid)
         compliers = subset(cars, :is_compliant)
         ρ = @. FD.value((compliers.is_sold - compliers.p_base) / (1 - compliers.p_base))
-        X = X_matrix(compliers)
+        XGBoost.setlabel!(dm, Float32.(ρ))
         ρ_hat = with_logger(NullLogger()) do
-            XGBoost.predict(xgboost((X, ρ); xgboost_params...), X)
+            booster = xgboost(dm; xgboost_params...)
+            XGBoost.predict(booster, dm)
         end
         compliers.ρ_tilde = clamp.(ρ_hat, 1e-12, 1 - 1e-12)
 
@@ -97,6 +101,9 @@ using Distributed
     function custom_bhhh(params; max_iter = 20)
         (; model, model_year, extra) = params.cars[1, :]
         tag = "$model_year $model $extra"
+        compliers = subset(params.cars, :is_compliant)
+        dm = XGBoost.DMatrix(X_matrix(compliers))
+        params = (; params..., dm)
         F_i = Base.Fix2((-) ∘ loglikelihood, params)
         F = sum ∘ F_i
         G_i = let gcache = FD.JacobianConfig(F_i, α_0)
