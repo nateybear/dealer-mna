@@ -93,7 +93,7 @@ using Distributed
     α_0 = zeros(length(DEMOS) + 1)
     ls = BackTracking()
 
-    function custom_bhhh(params; max_iter = 20)
+    function custom_bhhh(params; max_iter = 50)
         (; model, model_year, extra) = params.cars[1, :]
         tag = "$model_year $model $extra"
         dm = XGBoost.DMatrix(X_matrix(params.cars))
