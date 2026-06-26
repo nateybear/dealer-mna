@@ -99,8 +99,9 @@ using Distributed
 
     # Train a Booster for XGB_NUM_ROUND iterations using a custom per-row
     # gradient/Hessian. compute_g_h(ŷ::Vector) -> (grad::Vector, hess::Vector)
-    # where ŷ is the raw (margin) prediction at each row of dm.
-    function fit_xgb_custom(dm::XGBoost.DMatrix, compute_g_h)
+    # where ŷ is the raw (margin) prediction at each row of dm. Closure-first
+    # signature so callers can use `do`-block syntax.
+    function fit_xgb_custom(compute_g_h, dm::XGBoost.DMatrix)
         b = with_logger(NullLogger()) do
             XGBoost.Booster(dm; XGB_BOOSTER_PARAMS...)
         end
