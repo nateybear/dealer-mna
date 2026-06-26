@@ -88,6 +88,7 @@ using Distributed
                 xgboost(train_dms[k]; xgboost_params...)
             end
             ρ_hat[test_idx[k]] = XGBoost.predict(booster_k, test_dms[k])
+            finalize(booster_k)
         end
         compliers.ρ_tilde = clamp.(ρ_hat, 1e-12, 1 - 1e-12)
 
@@ -117,6 +118,7 @@ using Distributed
         test_idx = [findall(==(k), folds) for k in 1:K]
         train_dms = [XGBoost.DMatrix(X[train_idx[k], :]) for k in 1:K]
         test_dms = [XGBoost.DMatrix(X[test_idx[k], :]) for k in 1:K]
+        cleanup() = (foreach(finalize, train_dms); foreach(finalize, test_dms))
         params = (; params..., train_dms, test_dms, train_idx, test_idx)
         F_i = Base.Fix2((-) ∘ loglikelihood, params)
         F = sum ∘ F_i
@@ -135,6 +137,7 @@ using Distributed
             g = G(α)
             if norm(g) < 1e-3
                 @info "[$tag] Gradient convergence achieved, exiting"
+                cleanup()
                 return α
             end
             if i % 10 == 0
@@ -176,11 +179,13 @@ using Distributed
             a_opt, _ = linesearch()
             if norm(a_opt * newton_step) < 1e-6
                 @warn "[$tag] Not moving any more; exiting"
+                cleanup()
                 return α
             end
             α -= a_opt * newton_step
         end
         @warn "[$tag] Uncoverged after $max_iter steps"
+        cleanup()
         return α
     end
 
@@ -271,7 +276,10 @@ function (@main)(_)
                         # copy: XGBoost.serialize returns a Vector{UInt8} backed
                         # by C-owned memory tied to booster_k's lifetime; copy
                         # before the booster goes out of scope.
-                        copy(XGBoost.serialize(booster_k))
+                        bytes = copy(XGBoost.serialize(booster_k))
+                        finalize(booster_k)
+                        finalize(dm_k)
+                        bytes
                     end
                     (; model, model_year, extra) = cars[1, :]
                     return (model, model_year, extra) =>
@@ -305,6 +313,8 @@ function (@main)(_)
                 XGBoost.deserialize!(booster, M_step[(model, model_year, extra)][2][k])
                 clamp(only(XGBoost.predict(booster, dm)), 1e-12, 1 - 1e-12)
             end
+            finalize(booster)
+            finalize(dm)
             ll_complier = let (; is_sold, p_base, ρ_tilde) = cars
                 sum(
                     @. is_sold * log(p_base + (1 - p_base) * ρ_tilde) +
