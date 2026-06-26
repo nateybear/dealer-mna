@@ -60,7 +60,7 @@ using Distributed
         # XGBoost's "reg:squarederror" default is 0.5 in raw space (σ(0.5) ≈ 0.62),
         # which biases predictions up and makes ρ̃ "look positive" even on random
         # partitions, defeating CEM.
-        base_score = 0.0,
+        base_score = -50.0,
         max_depth = 3,
         num_round = 4,
         lambda = 10.0,
@@ -138,15 +138,18 @@ using Distributed
         @info "  ll_complier - ll_noncomplier per (d,t)" mean = mean(ll_gap) q = quantile(
             ll_gap, qs
         ) n_positive = sum(>(0), ll_gap) total = length(ll_gap)
-        @info "  γ = p_compliant" mean = mean(p_compliant) q = quantile(p_compliant, qs) frac_above_0_9 =
-            mean(>(0.9), p_compliant) frac_below_0_1 = mean(<(0.1), p_compliant)
+        @info "  γ = p_compliant" mean = mean(p_compliant) q = quantile(p_compliant, qs) frac_above_0_9 = mean(
+            >(0.9), p_compliant
+        ) frac_below_0_1 = mean(<(0.1), p_compliant)
         @info "  ρ̃ (mean per d,t)" mean = mean(ρ̃_means) q = quantile(ρ̃_means, qs)
         @info "  p_base (mean per d,t)" mean = mean(p_base_means) q = quantile(p_base_means, qs)
         @info "  cars per (d,t)" mean = mean(n_cars_vec) q = quantile(n_cars_vec, qs)
-        @info "  within-(d,t) variance" obs = mean(obs_vars) nc_pred = mean(nc_var_pred) frac_obs_above_nc =
-            mean(obs_vars .> nc_var_pred)
-        @info "  observed sale rate vs p_base" obs = mean(obs_means) p_base = mean(p_base_means) lift_mean =
-            mean(sale_lift) lift_q = quantile(sale_lift, qs)
+        @info "  within-(d,t) variance" obs = mean(obs_vars) nc_pred = mean(nc_var_pred) frac_obs_above_nc = mean(
+            obs_vars .> nc_var_pred
+        )
+        @info "  observed sale rate vs p_base" obs = mean(obs_means) p_base = mean(p_base_means) lift_mean = mean(
+            sale_lift
+        ) lift_q = quantile(sale_lift, qs)
         return nothing
     end
 end
@@ -335,7 +338,9 @@ function (@main)(_)
         n_flipped = sum((next_p_compliant .> 0.5) .!= compliance.is_compliant)
         step_change = norm(E_step.p_compliant - compliance.p_compliant)
         max_change = maximum(abs, E_step.p_compliant - compliance.p_compliant)
-        @info "Round $i" n_flipped step_change max_change π mean_p_compliant = mean(E_step.p_compliant)
+        @info "Round $i" n_flipped step_change max_change π mean_p_compliant = mean(
+            E_step.p_compliant
+        )
 
         if n_flipped == 0
             @info "Partition stable, CEM converged at step $i"
