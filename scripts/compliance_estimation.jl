@@ -316,18 +316,20 @@ function (@main)(_)
         @info "  p_base (mean per d,t)" mean = mean(p_base_means) q = quantile(p_base_means, qs)
         @info "  cars per (d,t)" mean = mean(n_cars_vec) q = quantile(n_cars_vec, qs)
 
+        γ = 0.8
+        next_p_compliant = γ .* compliance.p_compliant .+ (1 - γ) .* E_step.p_compliant
+        n_flipped = sum((next_p_compliant .> 0.5) .!= compliance.is_compliant)
         step_change = norm(E_step.p_compliant - compliance.p_compliant)
         max_change = maximum(abs, E_step.p_compliant - compliance.p_compliant)
-        @info "Round $i" step_change max_change π mean_p_compliant = mean(E_step.p_compliant)
+        @info "Round $i" n_flipped step_change max_change π mean_p_compliant = mean(E_step.p_compliant)
 
-        if step_change < 1e-4
-            @info "Wooohoo! We converged at step $i"
+        if n_flipped == 0
+            @info "Partition stable, CEM converged at step $i"
             Arrow.write("data/compliance.arrow", E_step)
             JLD2.save_object("data/compliance_fits.jld2", M_step)
             break
         end
-        γ = 0.8
-        compliance.p_compliant .= γ .* compliance.p_compliant .+ (1 - γ) .* E_step.p_compliant
+        compliance.p_compliant .= next_p_compliant
     end
     @error "Boohoo, no convergence after 100 steps"
     return nothing
