@@ -64,10 +64,10 @@ using Distributed
         # ρ̃²(1-ρ̃)·(1-p)/q ≈ 0.03 per row at ρ̃ = 0.12, ~10x smaller than p_base's.
         # With high min_child_weight and lambda, regularization swamps the gain,
         # the booster adds no useful trees, and ρ̃ stays pinned at σ(base_score).
-        num_round = 10,
-        eta = 0.3,
-        lambda = 1.0,
-        min_child_weight = 1,
+        num_round = 6,
+        eta = 0.15,
+        lambda = 5.0,
+        min_child_weight = 5,
         tree_method = "hist",
         subsample = 0.8,
         max_bin = 32,
