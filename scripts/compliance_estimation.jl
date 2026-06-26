@@ -53,6 +53,14 @@ using Distributed
     end
 
     xgboost_params = (
+        # Identity link in XGBoost's view; our custom objective re-interprets
+        # raw output as logit-space and applies σ in the gradient/Hessian.
+        objective = "reg:squarederror",
+        # Raw-space 0 ⇒ σ(0) = 0.5 starting probability for both p_base and ρ̃.
+        # XGBoost's "reg:squarederror" default is 0.5 in raw space (σ(0.5) ≈ 0.62),
+        # which biases predictions up and makes ρ̃ "look positive" even on random
+        # partitions, defeating CEM.
+        base_score = 0.0,
         max_depth = 3,
         num_round = 4,
         lambda = 10.0,
