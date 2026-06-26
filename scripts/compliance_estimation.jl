@@ -18,6 +18,14 @@ using Distributed
 
     DEMOS = Empirics.DEFAULT_DEMOGRAPHICS
 
+    # quadratic Probit: linear demographics + their squares + pairwise crosses
+    EXTRA_DEMOS = vcat(
+        [Symbol(d, :_sq) for d in DEMOS],
+        [Symbol(DEMOS[i], :_x_, DEMOS[j]) for i in 1:length(DEMOS) for
+        j in (i + 1):length(DEMOS)],
+    )
+    ALL_DEMOS = vcat(DEMOS, EXTRA_DEMOS)
+
     # cross-fit folds for honest ρ̃ estimation
     K = 3
 
@@ -27,12 +35,25 @@ using Distributed
 
     state_matrix = JLD2.load_object("data/residual_demand.jld2")
 
-    # calculates the index of the closest dealers, and standardizes demographics
+    # whitens the linear demographics, then adds standardized squared and
+    # pairwise cross-product columns for the quadratic Probit.
     function prepare_dealers!(dealer_demographics)
         M = Matrix(dealer_demographics[!, DEMOS])
         M .-= mean(M, dims = 1)
         M *= sqrt(inv(cov(M)))
         dealer_demographics[!, DEMOS] .= M # demos now approx a multivariate standard normal
+
+        for d in DEMOS
+            dealer_demographics[!, Symbol(d, :_sq)] = dealer_demographics[!, d] .^ 2
+        end
+        for i in 1:length(DEMOS), j in (i + 1):length(DEMOS)
+            dealer_demographics[!, Symbol(DEMOS[i], :_x_, DEMOS[j])] =
+                dealer_demographics[!, DEMOS[i]] .* dealer_demographics[!, DEMOS[j]]
+        end
+        Q = Matrix(dealer_demographics[!, EXTRA_DEMOS])
+        Q .-= mean(Q, dims = 1)
+        Q ./= std(Q, dims = 1)
+        dealer_demographics[!, EXTRA_DEMOS] .= Q
         return nothing
     end
 
@@ -75,7 +96,7 @@ using Distributed
         α_intercept, α_demos... = α
         base_probs = DataFrame(
             dealer_uid = dealer_demographics.uid,
-            p_base = Φ.(α_intercept .+ Matrix(dealer_demographics[!, DEMOS]) * α_demos),
+            p_base = Φ.(α_intercept .+ Matrix(dealer_demographics[!, ALL_DEMOS]) * α_demos),
         )
         cars = leftjoin(cars, base_probs, on = :dealer_uid)
         compliers = subset(cars, :is_compliant)
@@ -105,7 +126,7 @@ using Distributed
         return vcat(ll_compliers, ll_noncompliers)
     end
 
-    α_0 = zeros(length(DEMOS) + 1)
+    α_0 = zeros(length(ALL_DEMOS) + 1)
     ls = BackTracking()
 
     function custom_bhhh(params; max_iter = 50)
@@ -259,7 +280,7 @@ function (@main)(_)
                     α_intercept, α_demos... = coefs
                     base_probs = DataFrame(
                         dealer_uid = dealer_demographics.uid,
-                        p_base = Φ.(α_intercept .+ Matrix(dealer_demographics[!, DEMOS]) * α_demos),
+                        p_base = Φ.(α_intercept .+ Matrix(dealer_demographics[!, ALL_DEMOS]) * α_demos),
                     )
                     cars = leftjoin(cars, base_probs, on = :dealer_uid)
                     compliers = subset(cars, :is_compliant)
@@ -291,7 +312,7 @@ function (@main)(_)
                     mapped,
                     init = Dict{
                         Tuple{String, Int64, String},
-                        Tuple{NTuple{7, Float64}, Vector{Vector{UInt8}}},
+                        Tuple{NTuple{28, Float64}, Vector{Vector{UInt8}}},
                     }(),
                 )
             end
@@ -304,7 +325,7 @@ function (@main)(_)
             demos = pluck(dealer_demographics, :uid => ByRow(==(r.dealer_uid)))
             cars.p_base = map(eachrow(cars)) do (; model, model_year, extra)
                 α_intercept, α_demo... = M_step[(model, model_year, extra)][1]
-                Φ(α_intercept + dot(α_demo, demos[DEMOS]))
+                Φ(α_intercept + dot(α_demo, demos[ALL_DEMOS]))
             end
             k = fold_map[(r.dealer_uid, r.t)]
             dm = XGBoost.DMatrix(X_matrix(hcat(cars[[1], :], DataFrame(demos))))
