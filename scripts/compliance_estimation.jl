@@ -56,13 +56,12 @@ using Distributed
 
     xgboost_params = (
         max_depth = 3,
-        num_round = 10,
-        early_stopping_rounds = 3,
+        num_round = 4,
         lambda = 10.0,
         eta = 0.15,
         tree_method = "hist",
         subsample = 0.8,
-        min_child_weight = 15,
+        min_child_weight = 25,
         max_bin = 32,
         seed = 85704,
     )
@@ -327,7 +326,7 @@ function (@main)(_)
             JLD2.save_object("data/compliance_fits.jld2", M_step)
             break
         end
-        γ = 0.5
+        γ = 0.8
         compliance.p_compliant .= γ .* compliance.p_compliant .+ (1 - γ) .* E_step.p_compliant
     end
     @error "Boohoo, no convergence after 100 steps"
