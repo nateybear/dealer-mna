@@ -53,13 +53,13 @@ using Distributed
 
     xgboost_params = (
         max_depth = 3,
-        num_round = 10,
+        num_round = 3,
         early_stopping_rounds = 3,
         lambda = 10.0,
-        eta = 0.15,
+        eta = 0.05,
         tree_method = "hist",
         subsample = 0.8,
-        min_child_weight = 15,
+        min_child_weight = 25,
         max_bin = 32,
         seed = 85704,
     )
@@ -234,7 +234,7 @@ function (@main)(_)
         @info "Starting E step"
 
         E_step = copy(compliance)
-        E_step.p_compliant = pmap(eachrow(E_step); batch_size = 100) do r
+        E_results = pmap(eachrow(E_step); batch_size = 100) do r
             cars = subset(panel, :dealer_uid => ByRow(==(r.dealer_uid)), :t => ByRow(==(r.t)))
             demos = pluck(dealer_demographics, :uid => ByRow(==(r.dealer_uid)))
             cars.p_base = map(eachrow(cars)) do (; model, model_year, extra)
@@ -257,8 +257,27 @@ function (@main)(_)
             ll_noncomplier = let (; is_sold, p_base) = cars
                 sum(@. is_sold * log(p_base) + (1 - is_sold) * log(1 - p_base))
             end
-            return softmax([log(π) + ll_complier, log(1 - π) + ll_noncomplier])[1]
+            p_compliant = softmax([log(π) + ll_complier, log(1 - π) + ll_noncomplier])[1]
+            return (;
+                p_compliant,
+                ll_complier,
+                ll_noncomplier,
+                ρ̃_mean = mean(cars.ρ_tilde),
+                p_base_mean = mean(cars.p_base),
+                n_cars = nrow(cars),
+            )
         end
+        E_step.p_compliant = [r.p_compliant for r in E_results]
+        ll_gap = [r.ll_complier - r.ll_noncomplier for r in E_results]
+        ρ̃_means = [r.ρ̃_mean for r in E_results]
+        p_base_means = [r.p_base_mean for r in E_results]
+        n_cars_vec = [r.n_cars for r in E_results]
+        qs = [0.1, 0.5, 0.9]
+        @info "  ll_complier - ll_noncomplier per (d,t)" mean=mean(ll_gap) q=quantile(ll_gap, qs) n_positive=sum(>(0), ll_gap) total=length(ll_gap)
+        @info "  γ = p_compliant" mean=mean(E_step.p_compliant) q=quantile(E_step.p_compliant, qs) frac_above_0_9=mean(>(0.9), E_step.p_compliant) frac_below_0_1=mean(<(0.1), E_step.p_compliant)
+        @info "  ρ̃ (mean per d,t)" mean=mean(ρ̃_means) q=quantile(ρ̃_means, qs)
+        @info "  p_base (mean per d,t)" mean=mean(p_base_means) q=quantile(p_base_means, qs)
+        @info "  cars per (d,t)" mean=mean(n_cars_vec) q=quantile(n_cars_vec, qs)
 
         step_change = norm(E_step.p_compliant - compliance.p_compliant)
         max_change = maximum(abs, E_step.p_compliant - compliance.p_compliant)
