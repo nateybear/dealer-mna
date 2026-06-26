@@ -66,7 +66,7 @@ using Distributed
         # the booster adds no useful trees, and ρ̃ stays pinned at σ(base_score).
         num_round = 6,
         eta = 0.15,
-        lambda = 5.0,
+        lambda = 1.0,
         min_child_weight = 5,
         tree_method = "hist",
         subsample = 0.8,
