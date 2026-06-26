@@ -166,7 +166,6 @@ using Distributed
                             return ls(ϕ, dϕ, ϕdϕ, a_init, F(α), dot(-g, newton_step))
                         catch e
                             if e isa XGBoost.XGBoostError
-                                @warn "[$tag] XGBoost error at $(a_init)"
                                 n -= 1
                                 a_init /= 1.2
                             else
