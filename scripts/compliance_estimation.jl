@@ -195,7 +195,7 @@ function (@main)(_)
     for i in 1:100
         @info "Starting round $i"
         compliance.is_compliant = compliance.p_compliant .> 0.5
-        π = mean(compliance.p_compliant)
+        π = mean(compliance.is_compliant)
         M_step =
             let mapped = pmap(collect(gdf)) do cars
                     empty!(Memoize.memoize_cache(X_matrix))
