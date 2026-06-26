@@ -183,6 +183,33 @@ using Distributed
         @warn "[$tag] Uncoverged after $max_iter steps"
         return α
     end
+
+    function log_e_step_diagnostics(E_results)
+        qs = [0.1, 0.5, 0.9]
+        p_compliant = [r.p_compliant for r in E_results]
+        ll_gap = [r.ll_complier - r.ll_noncomplier for r in E_results]
+        ρ̃_means = [r.ρ̃_mean for r in E_results]
+        p_base_means = [r.p_base_mean for r in E_results]
+        n_cars_vec = [r.n_cars for r in E_results]
+        obs_means = [r.obs_mean for r in E_results]
+        obs_vars = [r.obs_var for r in E_results]
+        nc_var_pred = @. p_base_means * (1 - p_base_means)
+        sale_lift = obs_means .- p_base_means
+
+        @info "  ll_complier - ll_noncomplier per (d,t)" mean = mean(ll_gap) q = quantile(
+            ll_gap, qs
+        ) n_positive = sum(>(0), ll_gap) total = length(ll_gap)
+        @info "  γ = p_compliant" mean = mean(p_compliant) q = quantile(p_compliant, qs) frac_above_0_9 =
+            mean(>(0.9), p_compliant) frac_below_0_1 = mean(<(0.1), p_compliant)
+        @info "  ρ̃ (mean per d,t)" mean = mean(ρ̃_means) q = quantile(ρ̃_means, qs)
+        @info "  p_base (mean per d,t)" mean = mean(p_base_means) q = quantile(p_base_means, qs)
+        @info "  cars per (d,t)" mean = mean(n_cars_vec) q = quantile(n_cars_vec, qs)
+        @info "  within-(d,t) variance" obs = mean(obs_vars) nc_pred = mean(nc_var_pred) frac_obs_above_nc =
+            mean(obs_vars .> nc_var_pred)
+        @info "  observed sale rate vs p_base" obs = mean(obs_means) p_base = mean(p_base_means) lift_mean =
+            mean(sale_lift) lift_q = quantile(sale_lift, qs)
+        return nothing
+    end
 end
 
 function (@main)(_)
@@ -296,25 +323,12 @@ function (@main)(_)
                 ρ̃_mean = mean(cars.ρ_tilde),
                 p_base_mean = mean(cars.p_base),
                 n_cars = nrow(cars),
+                obs_mean = mean(cars.is_sold),
+                obs_var = var(cars.is_sold),
             )
         end
         E_step.p_compliant = [r.p_compliant for r in E_results]
-        ll_gap = [r.ll_complier - r.ll_noncomplier for r in E_results]
-        ρ̃_means = [r.ρ̃_mean for r in E_results]
-        p_base_means = [r.p_base_mean for r in E_results]
-        n_cars_vec = [r.n_cars for r in E_results]
-        qs = [0.1, 0.5, 0.9]
-        @info "  ll_complier - ll_noncomplier per (d,t)" mean = mean(ll_gap) q = quantile(
-            ll_gap, qs
-        ) n_positive = sum(>(0), ll_gap) total = length(ll_gap)
-        @info "  γ = p_compliant" mean = mean(E_step.p_compliant) q = quantile(
-            E_step.p_compliant, qs
-        ) frac_above_0_9 = mean(>(0.9), E_step.p_compliant) frac_below_0_1 = mean(
-            <(0.1), E_step.p_compliant
-        )
-        @info "  ρ̃ (mean per d,t)" mean = mean(ρ̃_means) q = quantile(ρ̃_means, qs)
-        @info "  p_base (mean per d,t)" mean = mean(p_base_means) q = quantile(p_base_means, qs)
-        @info "  cars per (d,t)" mean = mean(n_cars_vec) q = quantile(n_cars_vec, qs)
+        log_e_step_diagnostics(E_results)
 
         γ = 0.8
         next_p_compliant = γ .* compliance.p_compliant .+ (1 - γ) .* E_step.p_compliant
