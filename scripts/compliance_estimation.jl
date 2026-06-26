@@ -60,7 +60,7 @@ using Distributed
         # XGBoost's "reg:squarederror" default is 0.5 in raw space (σ(0.5) ≈ 0.62),
         # which biases predictions up and makes ρ̃ "look positive" even on random
         # partitions, defeating CEM.
-        base_score = -50.0,
+        base_score = -2.0,
         max_depth = 3,
         num_round = 4,
         lambda = 10.0,
