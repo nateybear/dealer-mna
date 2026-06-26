@@ -351,7 +351,7 @@ function (@main)(_)
             @info "Partition stable, CEM converged at step $i"
             Arrow.write("data/compliance.arrow", E_step)
             JLD2.save_object("data/compliance_fits.jld2", M_step)
-            break
+            return nothing
         end
         compliance.p_compliant .= next_p_compliant
     end
