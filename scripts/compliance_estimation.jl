@@ -42,7 +42,7 @@ using Distributed
         return Dict(k => i for (i, k) in enumerate(keys(intermed)))
     end
 
-    @memoize function X_matrix(compliers)
+    function X_matrix(compliers)
         nrows = nrow(compliers)
         ncols = size(state_matrix, 2)
         X = Matrix{Float32}(undef, nrows, ncols)
