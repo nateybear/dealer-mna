@@ -56,18 +56,20 @@ using Distributed
         # Identity link in XGBoost's view; our custom objective re-interprets
         # raw output as logit-space and applies σ in the gradient/Hessian.
         objective = "reg:squarederror",
-        # Raw-space 0 ⇒ σ(0) = 0.5 starting probability for both p_base and ρ̃.
-        # XGBoost's "reg:squarederror" default is 0.5 in raw space (σ(0.5) ≈ 0.62),
-        # which biases predictions up and makes ρ̃ "look positive" even on random
-        # partitions, defeating CEM.
+        # σ(-2) ≈ 0.12 starting prediction for both p_base and ρ̃. p_base climbs
+        # toward the observed rate from below.
         base_score = -2.0,
         max_depth = 3,
-        num_round = 4,
-        lambda = 10.0,
-        eta = 0.15,
+        # Loosened from earlier conservative defaults: the ρ̃ Hessian is
+        # ρ̃²(1-ρ̃)·(1-p)/q ≈ 0.03 per row at ρ̃ = 0.12, ~10x smaller than p_base's.
+        # With high min_child_weight and lambda, regularization swamps the gain,
+        # the booster adds no useful trees, and ρ̃ stays pinned at σ(base_score).
+        num_round = 10,
+        eta = 0.3,
+        lambda = 1.0,
+        min_child_weight = 1,
         tree_method = "hist",
         subsample = 0.8,
-        min_child_weight = 25,
         max_bin = 32,
         seed = 85704,
     )
