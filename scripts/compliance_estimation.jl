@@ -318,7 +318,7 @@ function (@main)(_)
             ll_noncomplier = let (; is_sold, p_base) = cars
                 sum(@. is_sold * log(p_base) + (1 - is_sold) * log(1 - p_base))
             end
-            p_compliant = softmax([log(π) + ll_complier, log(1 - π) + ll_noncomplier])[1]
+            p_compliant = softmax([ll_complier, ll_noncomplier])[1]
             return (;
                 p_compliant,
                 ll_complier,
