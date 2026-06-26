@@ -240,9 +240,13 @@ function (@main)(_)
                         train_idx_k = findall(!=(k), folds)
                         dm_k = XGBoost.DMatrix(X[train_idx_k, :])
                         XGBoost.setinfo!(dm_k, "label", Float32.(ρ[train_idx_k]))
-                        with_logger(NullLogger()) do
-                            XGBoost.serialize(xgboost(dm_k; xgboost_params...))
+                        booster_k = with_logger(NullLogger()) do
+                            xgboost(dm_k; xgboost_params...)
                         end
+                        # copy: XGBoost.serialize returns a Vector{UInt8} backed
+                        # by C-owned memory tied to booster_k's lifetime; copy
+                        # before the booster goes out of scope.
+                        copy(XGBoost.serialize(booster_k))
                     end
                     (; model, model_year, extra) = cars[1, :]
                     return (model, model_year, extra) =>
