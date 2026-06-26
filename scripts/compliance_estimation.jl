@@ -18,6 +18,9 @@ using Distributed
 
     DEMOS = Empirics.DEFAULT_DEMOGRAPHICS
 
+    # cross-fit folds for honest ρ̃ estimation
+    K = 3
+
     include("plot_assortment_probs.jl")
 
     demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
@@ -53,20 +56,23 @@ using Distributed
 
     xgboost_params = (
         max_depth = 3,
-        num_round = 3,
+        num_round = 10,
         early_stopping_rounds = 3,
         lambda = 10.0,
-        eta = 0.05,
+        eta = 0.15,
         tree_method = "hist",
         subsample = 0.8,
-        min_child_weight = 25,
+        min_child_weight = 15,
         max_bin = 32,
         seed = 85704,
     )
 
-    # calculate the log likelihood, concentrating out rho tilde
+    # calculate the log likelihood, concentrating out rho tilde via K-fold
+    # cross-fitted XGBoost: each complier's ρ̃ comes from a booster trained on
+    # rows whose fold differs from its own.
     function loglikelihood(α, params)
-        (; cars, dealer_demographics, dm) = params
+        (; cars, dealer_demographics, train_dms, test_dms, train_idx, test_idx) =
+            params
         α_intercept, α_demos... = α
         base_probs = DataFrame(
             dealer_uid = dealer_demographics.uid,
@@ -75,10 +81,14 @@ using Distributed
         cars = leftjoin(cars, base_probs, on = :dealer_uid)
         compliers = subset(cars, :is_compliant)
         ρ = @. FD.value((compliers.is_sold - compliers.p_base) / (1 - compliers.p_base))
-        XGBoost.setlabel!(dm, Float32.(ρ))
-        ρ_hat = with_logger(NullLogger()) do
-            booster = xgboost(dm; xgboost_params...)
-            XGBoost.predict(booster, dm)
+
+        ρ_hat = Vector{Float32}(undef, length(ρ))
+        for k in 1:K
+            XGBoost.setlabel!(train_dms[k], Float32.(ρ[train_idx[k]]))
+            booster_k = with_logger(NullLogger()) do
+                xgboost(train_dms[k]; xgboost_params...)
+            end
+            ρ_hat[test_idx[k]] = XGBoost.predict(booster_k, test_dms[k])
         end
         compliers.ρ_tilde = clamp.(ρ_hat, 1e-12, 1 - 1e-12)
 
@@ -102,8 +112,13 @@ using Distributed
         (; model, model_year, extra) = params.cars[1, :]
         tag = "$model_year $model $extra"
         compliers = subset(params.cars, :is_compliant)
-        dm = XGBoost.DMatrix(X_matrix(compliers))
-        params = (; params..., dm)
+        X = X_matrix(compliers)
+        folds = [params.fold_map[(c.dealer_uid, c.t)] for c in eachrow(compliers)]
+        train_idx = [findall(!=(k), folds) for k in 1:K]
+        test_idx = [findall(==(k), folds) for k in 1:K]
+        train_dms = [XGBoost.DMatrix(X[train_idx[k], :]) for k in 1:K]
+        test_dms = [XGBoost.DMatrix(X[test_idx[k], :]) for k in 1:K]
+        params = (; params..., train_dms, test_dms, train_idx, test_idx)
         F_i = Base.Fix2((-) ∘ loglikelihood, params)
         F = sum ∘ F_i
         G_i = let gcache = FD.JacobianConfig(F_i, α_0)
@@ -187,6 +202,13 @@ function (@main)(_)
     compliance = selectunique(panel, [:dealer_uid, :t])
     compliance.p_compliant = rand(nrow(compliance))
 
+    # global fold assignment so each (dealer, t) is in the same fold across
+    # every vehicle's M-step booster and matches its E-step prediction.
+    fold_map = Dict(
+        (row.dealer_uid, row.t) => mod(hash((row.dealer_uid, row.t)), K) + 1 for
+        row in eachrow(compliance)
+    )
+
     gdf = groupby(panel, [:model, :model_year, :extra])
 
     M_step = Dict()
@@ -201,7 +223,7 @@ function (@main)(_)
                     empty!(Memoize.memoize_cache(X_matrix))
                     cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
                     coefs = custom_bhhh(
-                        (; cars, dealer_demographics),
+                        (; cars, dealer_demographics, fold_map),
                         max_iter = 20,
                     )
                     α_intercept, α_demos... = coefs
@@ -213,12 +235,18 @@ function (@main)(_)
                     compliers = subset(cars, :is_compliant)
                     ρ = @. FD.value((compliers.is_sold - compliers.p_base) / (1 - compliers.p_base))
                     X = X_matrix(compliers)
-                    booster = with_logger(NullLogger()) do
-                        xgboost((X, ρ); xgboost_params...)
+                    folds = [fold_map[(c.dealer_uid, c.t)] for c in eachrow(compliers)]
+                    boosters_bytes = map(1:K) do k
+                        train_idx_k = findall(!=(k), folds)
+                        dm_k = XGBoost.DMatrix(X[train_idx_k, :])
+                        XGBoost.setinfo!(dm_k, "label", Float32.(ρ[train_idx_k]))
+                        with_logger(NullLogger()) do
+                            XGBoost.serialize(xgboost(dm_k; xgboost_params...))
+                        end
                     end
                     (; model, model_year, extra) = cars[1, :]
                     return (model, model_year, extra) =>
-                        (Tuple(coefs), XGBoost.serialize(booster))
+                        (Tuple(coefs), boosters_bytes)
                 end
                 mapreduce(
                     Dict,
@@ -226,7 +254,7 @@ function (@main)(_)
                     mapped,
                     init = Dict{
                         Tuple{String, Int64, String},
-                        Tuple{NTuple{7, Float64}, Vector{UInt8}},
+                        Tuple{NTuple{7, Float64}, Vector{Vector{UInt8}}},
                     }(),
                 )
             end
@@ -241,10 +269,11 @@ function (@main)(_)
                 α_intercept, α_demo... = M_step[(model, model_year, extra)][1]
                 Φ(α_intercept + dot(α_demo, demos[DEMOS]))
             end
+            k = fold_map[(r.dealer_uid, r.t)]
             dm = XGBoost.DMatrix(X_matrix(hcat(cars[[1], :], DataFrame(demos))))
             booster = XGBoost.Booster(dm)
             cars.ρ_tilde = map(eachrow(cars)) do (; model, model_year, extra)
-                XGBoost.deserialize!(booster, M_step[(model, model_year, extra)][2])
+                XGBoost.deserialize!(booster, M_step[(model, model_year, extra)][2][k])
                 clamp(only(XGBoost.predict(booster, dm)), 1e-12, 1 - 1e-12)
             end
             ll_complier = let (; is_sold, p_base, ρ_tilde) = cars
