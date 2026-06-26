@@ -245,7 +245,6 @@ function (@main)(_)
         π = mean(compliance.is_compliant)
         M_step =
             let mapped = pmap(collect(gdf)) do cars
-                    empty!(Memoize.memoize_cache(X_matrix))
                     cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
                     coefs = custom_bhhh(
                         (; cars, dealer_demographics, fold_map),
