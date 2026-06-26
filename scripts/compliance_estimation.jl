@@ -139,15 +139,19 @@ using Distributed
             dϕ(a) = dot(-newton_step, G(α - a * newton_step))
             ϕdϕ(a) = (ϕ(a), dϕ(a))
             linesearch() =
-                while true
-                    try
-                        return ls(ϕ, dϕ, ϕdϕ, a_init, F(α), dot(-g, newton_step))
-                    catch e
-                        if e isa XGBoost.XGBoostError
-                            @warn "[$tag] XGBoost error at $(a_init)"
-                            a_init /= 1.2
-                        else
-                            rethrow(e)
+                let n = 100
+                    while true
+                        iszero(n) && return (0, 0)
+                        try
+                            return ls(ϕ, dϕ, ϕdϕ, a_init, F(α), dot(-g, newton_step))
+                        catch e
+                            if e isa XGBoost.XGBoostError
+                                @warn "[$tag] XGBoost error at $(a_init)"
+                                n -= 1
+                                a_init /= 1.2
+                            else
+                                rethrow(e)
+                            end
                         end
                     end
                 end
