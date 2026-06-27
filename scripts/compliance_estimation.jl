@@ -16,7 +16,7 @@ using Distributed
     K = 3
 
     # Alternating fits of (p_base, ρ̃) within each M-step fold.
-    N_INNER_SWEEPS = 2
+    N_INNER_SWEEPS = 20
 
     include("plot_assortment_probs.jl")
 
