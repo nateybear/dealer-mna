@@ -15,8 +15,10 @@ using Distributed
     # K-fold cross-fitting for honest p_base and ρ̃; both share the fold map.
     K = 3
 
-    # Alternating fits of (p_base, ρ̃) within each M-step fold.
-    N_INNER_SWEEPS = 20
+    # Alternating fits of (p_base, ρ̃) within each M-step fold. Iterate until
+    # ‖Δρ̃_tr‖_∞ < tolerance, capped by MAX_INNER_SWEEPS.
+    MAX_INNER_SWEEPS = 20
+    Ρ̃_TOL = 1.0f-3
 
     include("plot_assortment_probs.jl")
 
@@ -198,6 +200,7 @@ function (@main)(_)
 
                     pbase_bytes = Vector{Vector{UInt8}}(undef, K)
                     rho_bytes = Vector{Vector{UInt8}}(undef, K)
+                    sweep_counts = Vector{Int}(undef, K)
 
                     for k in 1:K
                         train_idx = findall(!=(k), folds)
@@ -213,8 +216,12 @@ function (@main)(_)
                         ρ̃_tr = zeros(Float32, n_tr)
                         saved_p_bytes = UInt8[]
                         saved_r_bytes = UInt8[]
+                        last_sweep = 0
 
-                        for sweep in 1:N_INNER_SWEEPS
+                        for sweep in 1:MAX_INNER_SWEEPS
+                            last_sweep = sweep
+                            ρ̃_prev = copy(ρ̃_tr)
+
                             # p_base fit: every row contributes
                             booster_p = fit_xgb_custom(dm_tr) do ŷ
                                 grad = Vector{Float32}(undef, n_tr)
@@ -228,11 +235,10 @@ function (@main)(_)
                             end
                             p_tr =
                                 logistic.(XGBoost.predict(booster_p, dm_tr; margin = true))
-                            sweep == N_INNER_SWEEPS &&
-                                (saved_p_bytes = copy(XGBoost.serialize(booster_p)))
+                            saved_p_bytes = copy(XGBoost.serialize(booster_p))
                             finalize(booster_p)
 
-                            isempty(complier_local) && continue
+                            isempty(complier_local) && break
 
                             # ρ̃ fit: complier-classified rows only, p_base held fixed
                             X_tr_c = X_tr[complier_local, :]
@@ -253,19 +259,22 @@ function (@main)(_)
                             end
                             ρ̃_tr[complier_local] .=
                                 logistic.(XGBoost.predict(booster_r, dm_tr_c; margin = true))
-                            sweep == N_INNER_SWEEPS &&
-                                (saved_r_bytes = copy(XGBoost.serialize(booster_r)))
+                            saved_r_bytes = copy(XGBoost.serialize(booster_r))
                             finalize(booster_r)
                             finalize(dm_tr_c)
+
+                            maximum(abs, ρ̃_tr .- ρ̃_prev) < Ρ̃_TOL && break
                         end
 
                         pbase_bytes[k] = saved_p_bytes
                         rho_bytes[k] = saved_r_bytes
+                        sweep_counts[k] = last_sweep
                         finalize(dm_tr)
                     end
 
                     (; model, model_year, extra) = cars[1, :]
-                    return (model, model_year, extra) => (pbase_bytes, rho_bytes)
+                    return (model, model_year, extra) =>
+                        (pbase_bytes, rho_bytes, sweep_counts)
                 end
                 mapreduce(
                     Dict,
@@ -273,10 +282,16 @@ function (@main)(_)
                     mapped,
                     init = Dict{
                         Tuple{String, Int64, String},
-                        Tuple{Vector{Vector{UInt8}}, Vector{Vector{UInt8}}},
+                        Tuple{
+                            Vector{Vector{UInt8}}, Vector{Vector{UInt8}}, Vector{Int}
+                        },
                     }(),
                 )
             end
+        all_sweeps = reduce(vcat, [v[3] for v in values(M_step)])
+        @info "M-step inner sweeps" mean = mean(all_sweeps) q = quantile(
+            all_sweeps, [0.1, 0.5, 0.9]
+        ) hit_cap = sum(==(MAX_INNER_SWEEPS), all_sweeps) total = length(all_sweeps)
 
         @info "Starting E step"
 
