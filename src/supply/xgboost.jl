@@ -252,19 +252,24 @@ function rho_nll(gᵣ::Real, y::Real, p::Real)
     return -(y * log(q) + (1 - y) * log((1 - p) * (1 - ρ̃) + 1.0f-12))
 end
 
-# Sales-target loss. P(ι = 1 | q, φ) = σ(q − φ); ι passed as a soft label in
-# [0, 1] (typically the compliance posterior p_compliant). NLL is the soft
-# binary cross-entropy −ι log π − (1 − ι) log(1 − π) with π = σ(q − f).
-# Gradient (dNLL/df) = ι − π, Hessian = π(1 − π). Reduces to the binary form
-# when ι ∈ {0, 1}.
-function phi_grad_hess(f::Real, q::Real, ι::Real)
-    π = logistic(q - f)
-    g = ι - π
-    h = π * (1 - π)
+# Sales-target loss. P(ι = 1 | q, φ) = σ((q − φ)/τ); ι passed as a soft label
+# in [0, 1] (typically the compliance posterior p_compliant). τ is a link
+# temperature on the q scale — without it σ saturates (Hessian → 0) for every
+# row whose q is more than a few units from φ, so no tree finds a split.
+# Caller should pass τ ≈ std(q).
+#
+# With z = (q − f)/τ and π = σ(z):
+#   NLL = −ι log π − (1 − ι) log(1 − π)
+#   dNLL/df = (ι − π) / τ
+#   d²NLL/df² = π(1 − π) / τ²
+function phi_grad_hess(f::Real, q::Real, ι::Real, τ::Real)
+    π = logistic((q - f) / τ)
+    g = (ι - π) / τ
+    h = π * (1 - π) / (τ * τ)
     return Float32(g), Float32(h)
 end
 
-function phi_nll(f::Real, q::Real, ι::Real)
-    π = clamp(logistic(q - f), 1.0f-12, 1 - 1.0f-12)
+function phi_nll(f::Real, q::Real, ι::Real, τ::Real)
+    π = clamp(logistic((q - f) / τ), 1.0f-12, 1 - 1.0f-12)
     return -(ι * log(π) + (1 - ι) * log(1 - π))
 end

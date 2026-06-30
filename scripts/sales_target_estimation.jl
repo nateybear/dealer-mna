@@ -3,7 +3,7 @@ using XGBoost
 using LoggingExtras
 using LinearAlgebra
 using LogExpFunctions
-using StatsBase: mean
+using StatsBase: mean, std
 
 function (@main)(_)
     snakemake!()
@@ -53,11 +53,18 @@ function (@main)(_)
         # soft-signed quantity (2ι − 1)·q for inspectability.
         y = @. (2 * ι - 1) * q
 
-        # Start the raw-output prediction near mean(q) so π = σ(q − f) hovers
-        # around 0.5 and the Hessian π(1 − π) is healthy. The default
-        # base_score = −2.0 (appropriate for p_base/ρ̃) leaves π ≈ 1 for every
-        # row and the Newton step degenerates — no tree ever splits.
+        # Start the raw-output prediction near mean(q) so (q − f)/τ centers
+        # around 0 and the Hessian is healthy. The default base_score = −2.0
+        # (appropriate for p_base/ρ̃) leaves π ≈ 1 for every row and the
+        # Newton step degenerates — no tree ever splits.
         params = merge(Supply.XGB_DEFAULT_PARAMS, (base_score = Float64(mean(q)),))
+
+        # Link temperature τ = std(q). Without it σ((q − f)/1) saturates on
+        # the q scale (range 1 → ~1000), Hessian π(1 − π) ≈ 0 everywhere
+        # except a ±5-car window, and split-gain ≈ Σg² / (Σh + λ) collapses
+        # to λ-dominated noise — best_round stays at 0.
+        τ = Float32(std(q))
+        @info "Sales-target link" mean_q = mean(q) τ
 
         booster, best_round = Supply.fit_xgb_custom_oos(
             idxs ->
@@ -66,7 +73,8 @@ function (@main)(_)
                         grad = Vector{Float32}(undef, m)
                         hess = Vector{Float32}(undef, m)
                         @inbounds for j in 1:m
-                            grad[j], hess[j] = Supply.phi_grad_hess(ŷ[j], q_s[j], ι_s[j])
+                            grad[j], hess[j] =
+                                Supply.phi_grad_hess(ŷ[j], q_s[j], ι_s[j], τ)
                         end
                         return grad, hess
                     end
@@ -76,7 +84,7 @@ function (@main)(_)
                     ŷ -> begin
                         nll = 0.0
                         @inbounds for j in 1:m
-                            nll += Supply.phi_nll(ŷ[j], q_s[j], ι_s[j])
+                            nll += Supply.phi_nll(ŷ[j], q_s[j], ι_s[j], τ)
                         end
                         return nll / m
                     end
@@ -87,11 +95,13 @@ function (@main)(_)
             patience = 5,
             params = params,
         )
-        @info "Sales-target booster" best_round nrows = n mean_q = mean(q) mean_p_compliant = mean(
-            ι
-        )
+        @info "Sales-target booster" best_round nrows = n mean_p_compliant = mean(ι)
 
-        JLD2.save_object(snakemake.output["sales_targets"], XGBoost.serialize(booster))
+        # Save (booster_bytes, τ): consumers need τ to recover
+        # P(ι=1) = σ((q − φ̂)/τ) from the booster's raw φ predictions.
+        JLD2.save_object(
+            snakemake.output["sales_targets"], (XGBoost.serialize(booster), τ)
+        )
     end
     return nothing
 end
