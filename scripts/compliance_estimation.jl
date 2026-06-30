@@ -7,7 +7,7 @@ using Distributed
     using LoggingExtras
     using LinearAlgebra
     using LogExpFunctions
-    using StatsBase: mean, cov
+    using StatsBase: mean, cov, quantile
     import .Supply: selectunique
 
     BLAS.set_num_threads(1)
