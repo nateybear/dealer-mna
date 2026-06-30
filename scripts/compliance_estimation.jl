@@ -8,6 +8,7 @@ using Distributed
     using LinearAlgebra
     using LogExpFunctions
     using StatsBase: mean, cov
+    import .Supply: selectunique
 
     BLAS.set_num_threads(1)
 
