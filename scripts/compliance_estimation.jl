@@ -1,5 +1,6 @@
 using Distributed
 @everywhere using Memoize
+@everywhere using StatsBase: mean, quantile
 
 @everywhere begin
     using DealerMnA
