@@ -7,6 +7,7 @@ using Distributed
     using LoggingExtras
     using LinearAlgebra
     using LogExpFunctions
+    using StatsBase: mean, cov
 
     BLAS.set_num_threads(1)
 
@@ -373,7 +374,6 @@ function (@main)(_)
                             booster_r, br_r = Supply.fit_xgb_custom_oos(
                                 idxs ->
                                     let m = length(idxs), y_s = y_c[idxs], p_s = p_c[idxs]
-
                                         ŷ -> begin
                                             grad = Vector{Float32}(undef, m)
                                             hess = Vector{Float32}(undef, m)
@@ -387,7 +387,6 @@ function (@main)(_)
                                     end,
                                 idxs ->
                                     let m = length(idxs), y_s = y_c[idxs], p_s = p_c[idxs]
-
                                         ŷ -> begin
                                             nll = 0.0
                                             @inbounds for j in 1:m
@@ -404,9 +403,10 @@ function (@main)(_)
                                 patience = 5,
                             )
                             dm_c = XGBoost.DMatrix(X_c)
-                            ρ̃[complier_idx] .= logistic.(
-                                XGBoost.predict(booster_r, dm_c; margin = true)
-                            )
+                            ρ̃[complier_idx] .=
+                                logistic.(
+                                    XGBoost.predict(booster_r, dm_c; margin = true)
+                                )
                             rho_bytes = copy(XGBoost.serialize(booster_r))
                             best_round_r = br_r
                             finalize(booster_r)
