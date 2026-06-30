@@ -281,24 +281,29 @@ function rho_nll(gᵣ::Real, y::Real, p::Real)
     return -(y * log(q) + (1 - y) * log((1 - p) * (1 - ρ̃) + 1.0f-12))
 end
 
-# Sales-target loss. P(ι = 1 | q, φ) = σ((q − φ)/τ); ι passed as a soft label
-# in [0, 1] (typically the compliance posterior p_compliant). τ is a link
-# temperature on the q scale — without it σ saturates (Hessian → 0) for every
-# row whose q is more than a few units from φ, so no tree finds a split.
-# Caller should pass τ ≈ std(q).
+# Sales-target loss with a log link on φ: the booster's raw output is f = log φ,
+# so φ = exp(f) is always positive (a sales target can't be negative). ι passed
+# as a soft label in [0, 1] (the compliance posterior p_compliant). τ is the
+# link temperature on the q scale — caller should pass τ ≈ std(q).
 #
-# With z = (q − f)/τ and π = σ(z):
+#   π = σ((q − exp(f))/τ)
 #   NLL = −ι log π − (1 − ι) log(1 − π)
-#   dNLL/df = (ι − π) / τ
-#   d²NLL/df² = π(1 − π) / τ²
+#   dNLL/df = (ι − π) · exp(f) / τ
+#   Fisher Hessian = exp(2f) · π(1 − π) / τ²
+#
+# The Fisher approximation drops the (ι − π) · exp(f)/τ cross-term from the
+# exact Hessian — standard practice, since E[ι − π] = 0 at the truth and
+# XGBoost wants a non-negative Hessian. The chain-rule exp(f) factor lifts
+# the Hessian back to O(1) magnitude, so default λ / min_child_weight work.
 function phi_grad_hess(f::Real, q::Real, ι::Real, τ::Real)
-    π = logistic((q - f) / τ)
-    g = (ι - π) / τ
-    h = π * (1 - π) / (τ * τ)
+    ef = exp(f)
+    π = logistic((q - ef) / τ)
+    g = (ι - π) * ef / τ
+    h = ef * ef * π * (1 - π) / (τ * τ)
     return Float32(g), Float32(h)
 end
 
 function phi_nll(f::Real, q::Real, ι::Real, τ::Real)
-    π = clamp(logistic((q - f) / τ), 1.0f-12, 1 - 1.0f-12)
+    π = clamp(logistic((q - exp(f)) / τ), 1.0f-12, 1 - 1.0f-12)
     return -(ι * log(π) + (1 - ι) * log(1 - π))
 end

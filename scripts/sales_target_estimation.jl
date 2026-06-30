@@ -53,25 +53,23 @@ function (@main)(_)
         # soft-signed quantity (2ι − 1)·q for inspectability.
         y = @. (2 * ι - 1) * q
 
-        # Link temperature τ = std(q) — σ((q − f)/τ) transitions over a ±τ-car
+        # Link temperature τ = std(q) — σ((q − φ)/τ) transitions over a ±τ-car
         # window, matching the realistic fuzziness of "made target."
         τ = Float32(std(q))
 
-        # Per-row Hessian is π(1 − π)/τ² ≈ 0.25/τ², so per-leaf ΣH for ~50
-        # rows is O(50/τ²) ≈ 1e-3 here. Defaults (λ=1, min_child_weight=5)
-        # were tuned for the binary p_base/ρ̃ boosters where per-row H ≈ 0.1;
-        # carrying them over makes λ and min_child_weight both swamp ΣH, so
-        # nothing splits and the booster collapses to a constant. Scale them
-        # down by ~τ², deepen the trees, and ease the learning rate to let
-        # the booster move on the q-scale within max_round.
+        # Log link on φ: booster fits f = log φ, so φ = exp(f) > 0. The
+        # chain-rule exp(f) factor in the gradient/Hessian also lifts the
+        # Hessian back to O(1) magnitude, so default-ish λ / min_child_weight
+        # work. base_score = log(mean(q)) so initial exp(f) ≈ mean(q) and π
+        # centers near 0.5.
         params = merge(
             Supply.XGB_DEFAULT_PARAMS,
             (
-                base_score = Float64(mean(q)),
-                max_depth = 6,
-                min_child_weight = 1.0f-4,
-                lambda = 1.0f-5,
-                eta = 0.05,
+                base_score = Float64(log(mean(q))),
+                max_depth = 4,
+                min_child_weight = 1,
+                lambda = 1.0,
+                eta = 0.1,
             ),
         )
 
@@ -109,15 +107,15 @@ function (@main)(_)
                 end,
             X,
             y;
-            max_round = 1000,
-            patience = 20,
+            max_round = 200,
+            patience = 5,
             params = params,
             strata = ι_strata,
         )
         @info "Sales-target booster" best_round nrows = n
 
-        # Save (booster_bytes, τ): consumers need τ to recover
-        # P(ι=1) = σ((q − φ̂)/τ) from the booster's raw φ predictions.
+        # Save (booster_bytes, τ): the booster's raw output is f = log φ, so
+        # consumers recover φ̂ = exp(f̂) and then P(ι=1) = σ((q − φ̂)/τ).
         JLD2.save_object(
             snakemake.output["sales_targets"], (XGBoost.serialize(booster), τ)
         )
