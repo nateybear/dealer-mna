@@ -23,7 +23,7 @@ function (@main)(_)
         select!(dq, :dealer_uid, :t, :total_units => :q)
 
         panel = innerjoin(compliance, dq, on = [:dealer_uid, :t])
-        panel.ι = Float32.(panel.p_compliant .> 0.5)
+        panel.ι = Float32.(panel.p_compliant)
 
         # Every (dealer, t) in the panel must have a state-matrix entry; error if not.
         unmapped = [
@@ -49,8 +49,9 @@ function (@main)(_)
 
         q = Float32.(panel.q)
         ι = panel.ι
-        # ±q encoding for the DMatrix label is decorative — closures recover q and ι.
-        y = @. sign(2 * ι - 1) * q
+        # DMatrix label is decorative — closures recover q and ι. Use the
+        # soft-signed quantity (2ι − 1)·q for inspectability.
+        y = @. (2 * ι - 1) * q
 
         # Start the raw-output prediction near mean(q) so π = σ(q − f) hovers
         # around 0.5 and the Hessian π(1 − π) is healthy. The default
@@ -86,7 +87,7 @@ function (@main)(_)
             patience = 5,
             params = params,
         )
-        @info "Sales-target booster" best_round nrows = n mean_q = mean(q) frac_compliant = mean(
+        @info "Sales-target booster" best_round nrows = n mean_q = mean(q) mean_p_compliant = mean(
             ι
         )
 
