@@ -76,12 +76,14 @@ function _stratified_split(strata::AbstractVector, val_frac::Float64, rng::Abstr
 end
 
 """
-    fit_xgb_custom_oos(make_gh, make_nll, X, y; ...) -> (booster, best_round)
+    fit_xgb_custom_oos(make_gh, make_nll, X, y; ...) -> (booster, best_round, best_val)
 
 Split rows 80/20 by `val_frac`, fit on train while tracking the validation NLL
 each round, stop after `patience` non-improving rounds, then *refit* on the full
-data for `best_round` iterations. Returns the full-data booster plus the
-best-round count.
+data for `best_round` iterations. Returns the full-data booster, the best-round
+count, and the best-val NLL (useful for grid-searching link hyperparameters).
+When `best_round == 0` the returned booster has no trees and can't be
+serialized — callers should check before saving.
 
   - `make_gh(row_idxs)::(ŷ -> (grad::Vector, hess::Vector))` — produces the
     per-subset gradient/Hessian closure with the right per-row context sliced
@@ -165,7 +167,7 @@ function fit_xgb_custom_oos(
         end
     end
     finalize(dm_full)
-    return b_final, best_round
+    return b_final, best_round, best_val
 end
 
 #### OOS-best-round refit protocol (stock objective)

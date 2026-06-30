@@ -53,19 +53,10 @@ function (@main)(_)
         # soft-signed quantity (2ι − 1)·q for inspectability.
         y = @. (2 * ι - 1) * q
 
-        # Link temperature τ controls how "fuzzy" the make-target threshold is.
-        # τ = std(q) ≈ 157 was too loose — a 60%-not-compliant row (ι = 0.4)
-        # ended up with |φ̂ − q| ≈ 0.405·τ ≈ 64 cars, and lower-ι rows tens of
-        # times worse, so the booster predicted targets far above realized
-        # sales for almost every dealer-quarter. τ = std(q)/5 keeps the
-        # implied target within tens of cars of q for moderately-compliant
-        # rows and within ~100 even for very-not-compliant rows.
-        τ = Float32(std(q) / 5)
-
         # Log link on φ: booster fits f = log φ, so φ = exp(f) > 0. The
-        # chain-rule exp(f) factor in the gradient/Hessian also lifts the
-        # Hessian back to O(1) magnitude, so default-ish λ / min_child_weight
-        # work. base_score = log(mean(q)) so initial exp(f) ≈ mean(q) and π
+        # chain-rule exp(f) factor in the gradient/Hessian lifts H back to
+        # O(1) magnitude, so default-ish λ / min_child_weight work.
+        # base_score = log(mean(q)) so initial exp(f) ≈ mean(q) and π
         # centers near 0.5.
         params = merge(
             Supply.XGB_DEFAULT_PARAMS,
@@ -80,13 +71,12 @@ function (@main)(_)
 
         # Stratify the 80/20 OOS split on ι > 0.5 vs ι ≤ 0.5 so val NLL is
         # always computed on a mix of compliers and non-compliers — without
-        # this, an unlucky draw of the ~13% compliers can throw the
-        # stopping criterion.
+        # this, an unlucky draw of the ~13% high-ι rows throws stopping.
         ι_strata = [x > 0.5 ? 1 : 0 for x in ι]
 
-        @info "Sales-target setup" mean_q = mean(q) τ mean_p_compliant = mean(ι)
-
-        booster, best_round = Supply.fit_xgb_custom_oos(
+        # τ-dependent gradient/NLL factories. Closures capture τ; we build
+        # fresh ones per grid point.
+        make_factories(τ) = (
             idxs ->
                 let m = length(idxs), q_s = q[idxs], ι_s = ι[idxs]
                     ŷ -> begin
@@ -109,14 +99,50 @@ function (@main)(_)
                         return nll / m
                     end
                 end,
-            X,
-            y;
-            max_round = 200,
-            patience = 5,
-            params = params,
-            strata = ι_strata,
         )
-        @info "Sales-target booster" best_round nrows = n
+
+        # τ is formally underidentified in the population (can be absorbed
+        # into a rescaling of φ), but with a capacity-bounded booster it
+        # trades off bias vs variance. Pick τ by OOS val NLL on a geometric
+        # grid bracketing std(q) ≈ 157. Failures (best_round == 0, etc.)
+        # are caught so a single τ blowing up doesn't kill the search.
+        τ_grid = Float32.([40, 80, 160, 320, 640, 1280])
+        @info "Sales-target setup" mean_q = mean(q) std_q = std(q) mean_p_compliant = mean(
+            ι
+        ) τ_grid
+        grid_results = map(τ_grid) do τ_cand
+            try
+                gh, nll = make_factories(τ_cand)
+                b, br, bv = Supply.fit_xgb_custom_oos(
+                    gh,
+                    nll,
+                    X,
+                    y;
+                    max_round = 200,
+                    patience = 5,
+                    params = params,
+                    strata = ι_strata,
+                )
+                br > 0 || @warn "τ produced best_round = 0; skipping" τ_cand
+                return (τ = τ_cand, booster = b, best_round = br, best_val = bv)
+            catch e
+                @warn "τ fit failed; skipping" τ_cand exception = (e, catch_backtrace())
+                return (τ = τ_cand, booster = nothing, best_round = 0, best_val = Inf)
+            end
+        end
+        for r in grid_results
+            @info "τ grid" τ = r.τ best_round = r.best_round best_val = r.best_val
+        end
+
+        valid = filter(r -> r.best_round > 0 && isfinite(r.best_val), grid_results)
+        isempty(valid) &&
+            error("No τ in $(τ_grid) produced a valid fit. Widen the grid.")
+        i = argmin([r.best_val for r in valid])
+        best = valid[i]
+        τ = best.τ
+        booster = best.booster
+        best_round = best.best_round
+        @info "Picked τ" τ best_round best_val = best.best_val
 
         # Sanity-check the fitted φ̂ distribution.
         φ̂ = exp.(XGBoost.predict(booster, X))
