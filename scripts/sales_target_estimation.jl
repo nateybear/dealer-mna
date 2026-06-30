@@ -53,9 +53,14 @@ function (@main)(_)
         # soft-signed quantity (2ι − 1)·q for inspectability.
         y = @. (2 * ι - 1) * q
 
-        # Link temperature τ = std(q) — σ((q − φ)/τ) transitions over a ±τ-car
-        # window, matching the realistic fuzziness of "made target."
-        τ = Float32(std(q))
+        # Link temperature τ controls how "fuzzy" the make-target threshold is.
+        # τ = std(q) ≈ 157 was too loose — a 60%-not-compliant row (ι = 0.4)
+        # ended up with |φ̂ − q| ≈ 0.405·τ ≈ 64 cars, and lower-ι rows tens of
+        # times worse, so the booster predicted targets far above realized
+        # sales for almost every dealer-quarter. τ = std(q)/5 keeps the
+        # implied target within tens of cars of q for moderately-compliant
+        # rows and within ~100 even for very-not-compliant rows.
+        τ = Float32(std(q) / 5)
 
         # Log link on φ: booster fits f = log φ, so φ = exp(f) > 0. The
         # chain-rule exp(f) factor in the gradient/Hessian also lifts the
