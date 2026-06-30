@@ -52,6 +52,12 @@ function (@main)(_)
         # ±q encoding for the DMatrix label is decorative — closures recover q and ι.
         y = @. sign(2 * ι - 1) * q
 
+        # Start the raw-output prediction near mean(q) so π = σ(q − f) hovers
+        # around 0.5 and the Hessian π(1 − π) is healthy. The default
+        # base_score = −2.0 (appropriate for p_base/ρ̃) leaves π ≈ 1 for every
+        # row and the Newton step degenerates — no tree ever splits.
+        params = merge(Supply.XGB_DEFAULT_PARAMS, (base_score = Float64(mean(q)),))
+
         booster, best_round = Supply.fit_xgb_custom_oos(
             idxs ->
                 let m = length(idxs), q_s = q[idxs], ι_s = ι[idxs]
@@ -78,6 +84,7 @@ function (@main)(_)
             y;
             max_round = 200,
             patience = 5,
+            params = params,
         )
         @info "Sales-target booster" best_round nrows = n mean_q = mean(q) frac_compliant = mean(
             ι
