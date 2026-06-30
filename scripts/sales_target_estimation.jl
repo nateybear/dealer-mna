@@ -23,7 +23,10 @@ function (@main)(_)
         select!(dq, :dealer_uid, :t, :total_units => :q)
 
         panel = innerjoin(compliance, dq, on = [:dealer_uid, :t])
-        panel.ι = Float32.(panel.p_compliant)
+        # Binarize at 0.5: p_compliant is a CEM-posterior estimate of a hard
+        # latent ι ∈ {0,1}, not a continuous compliance probability with
+        # standalone statistical meaning.
+        panel.ι = Float32.(panel.p_compliant .> 0.5)
 
         # Every (dealer, t) in the panel must have a state-matrix entry; error if not.
         unmapped = [
@@ -79,8 +82,7 @@ function (@main)(_)
         # stopping criterion.
         ι_strata = [x > 0.5 ? 1 : 0 for x in ι]
 
-        @info "Sales-target setup" mean_q = mean(q) τ mean_p_compliant = mean(ι) frac_strata_1 =
-            mean(ι_strata)
+        @info "Sales-target setup" mean_q = mean(q) τ frac_compliant = mean(ι)
 
         booster, best_round = Supply.fit_xgb_custom_oos(
             idxs ->
@@ -113,6 +115,12 @@ function (@main)(_)
             strata = ι_strata,
         )
         @info "Sales-target booster" best_round nrows = n
+
+        # Sanity-check the fitted φ̂ distribution.
+        φ̂ = exp.(XGBoost.predict(booster, X))
+        φ̂_qs = quantile(φ̂, [0.05, 0.25, 0.5, 0.75, 0.95])
+        q_qs = quantile(q, [0.05, 0.25, 0.5, 0.75, 0.95])
+        @info "Sales-target φ̂ quantiles (5/25/50/75/95)" φ̂_qs q_qs
 
         # Save (booster_bytes, τ): the booster's raw output is f = log φ, so
         # consumers recover φ̂ = exp(f̂) and then P(ι=1) = σ((q − φ̂)/τ).
