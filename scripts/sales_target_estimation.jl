@@ -4,6 +4,7 @@ using LoggingExtras
 using LinearAlgebra
 using LogExpFunctions
 using StatsBase: mean, std, quantile
+using Random
 
 function (@main)(_)
     snakemake!()
@@ -107,7 +108,7 @@ function (@main)(_)
         # trades off bias vs variance. Pick τ by OOS val NLL on a geometric
         # grid bracketing std(q) ≈ 157. Failures (best_round == 0, etc.)
         # are caught so a single τ blowing up doesn't kill the search.
-        τ_grid = Float32.(60:10:120)
+        τ_grid = Float32.(60:10:100)
         @info "Sales-target setup" mean_q = mean(q) std_q = std(q) mean_p_compliant = mean(
             ι
         ) τ_grid
@@ -123,6 +124,7 @@ function (@main)(_)
                     patience = 5,
                     params = params,
                     strata = ι_strata,
+                    rng = MersenneTwister(85704),
                 )
                 br > 0 || @warn "τ produced best_round = 0; skipping" τ_cand
                 return (τ = τ_cand, booster = b, best_round = br, best_val = bv)
