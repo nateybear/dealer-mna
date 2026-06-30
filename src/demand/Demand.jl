@@ -34,6 +34,8 @@ const QuarterKey = Tuple{Int64, Int64}                          # (year, quarter
 const VehicleKey = Tuple{String, String, Int64, Float32}        # (make, model, model_year, trim_rank)
 const TJFKey = Tuple{QuarterKey, VehicleKey, UUID}              # (t, j, f)
 
+export QuarterKey, VehicleKey
+
 ProductInfo = @NamedTuple begin
     is_coupe::Bool
     is_suv::Bool

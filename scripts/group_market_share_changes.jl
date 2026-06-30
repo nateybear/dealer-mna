@@ -14,6 +14,11 @@ with_logging() do
 
     out = DataFrame(
         change_market_share = Float64[],
+        old_market_share = Float64[],
+        new_market_share = Float64[],
+        change_hhi = Float64[],
+        old_hhi = Float64[],
+        new_hhi = Float64[],
         transaction_uid = UUID[],
         dealer_uid = UUID[],
         group = String[],
@@ -31,7 +36,7 @@ with_logging() do
             if t.uid == transaction_uid
         )
 
-        period = [Dealers.eventtime(t, -3)]
+        period = Dealers.eventtime.(Ref(t), -4:-3)
 
         buyer_seller_dealers = Dict(
             "seller" =>
@@ -45,7 +50,13 @@ with_logging() do
                 @info "$count Evaluating $(group) market share" transaction_uid dealer_uid
                 count += 1
 
-                change_market_share = Empirics.market_share(
+                change_market_share, old_market_share, new_market_share = Empirics.market_share(
+                    dealer_uid,
+                    period,
+                    Dict(transacted_dealers .=> t.buyer_gid)
+                )
+
+                change_hhi, old_hhi, new_hhi = Empirics.hhi(
                     dealer_uid,
                     period,
                     Dict(transacted_dealers .=> t.buyer_gid)
@@ -57,6 +68,11 @@ with_logging() do
                     out,
                     (;
                         change_market_share,
+                        old_market_share,
+                        new_market_share,
+                        change_hhi,
+                        old_hhi,
+                        new_hhi,
                         transaction_uid,
                         dealer_uid,
                         group,

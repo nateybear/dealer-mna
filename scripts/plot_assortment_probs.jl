@@ -1,183 +1,107 @@
 using DealerMnA
 using Plots
-using StatsPlots
-using StatsBase: cov, ordinalrank
-using Distributions
-using LinearAlgebra
-using OhMyThreads
-using FixedEffectModels
+using StatsBase: mean, quantile
 using Printf
+using DataFrames
 
-import Random
-Random.seed!(85704)
+# Three quantities of interest (dealer-quarter aggregates). After residualizing
+# against demographics and subtracting within-dealer means, the high-ε tercile
+# should show a price ↓ → quantity ↑ → trim-count ↑ dynamic; the low/mid
+# terciles should not.
+const OUTCOMES = [:total_units, :unique_trims, :median_markup]
 
-D = vcat(Empirics.DEFAULT_DEMOGRAPHICS, [:closest_first, :closest_second])
-
-selectunique(X, cols) = select(unique(X, cols), cols)
-
-struct Mahalanobis{T}
-    Σ::T
-end
-mahalanobis(X) = Mahalanobis(qr(cov(Matrix(X))))
-(d::Mahalanobis)(x) = sqrt(only(x' * (d.Σ \ x)))
-Base.Broadcast.broadcastable(d::Mahalanobis) = Ref(d)
-
-function optimal_bandwidth(X, y; distance = mahalanobis(X), K = pdf$Normal(), binary = false)
-    h_steps = 10 .^ range(-0.5, 2.5, length = 25)
-    train_idxs = sample(axes(X, 1), floor(Int64, 0.8 * Base.size(X, 1)), replace = false)
-    sse = map(h_steps) do h_candidate
-        ŷ = try
-            npregress(
-                X[train_idxs, :],
-                y[train_idxs],
-                X[Not(train_idxs), :];
-                h = h_candidate,
-                distance,
-                K,
-                binary,
-            )[
-                :, 1
-            ]
-        catch
-            Inf
-        end
-        sum((y[Not(train_idxs)] .- ŷ) .^ 2)
+function residualize_within_quarter!(dq, demos)
+    transform!(groupby(dq, :t)) do df
+        X = Matrix(df[!, demos])
+        yu = Float32.(df.total_units)
+        yt = Float32.(df.unique_trims)
+        yp = Float32.(df.median_markup)
+        return (;
+            total_units_resid = yu .- Supply.npregress(X, yu)[:, 1],
+            unique_trims_resid = yt .- Supply.npregress(X, yt)[:, 1],
+            median_markup_resid = yp .- Supply.npregress(X, yp)[:, 1],
+        )
     end
-    @info "Optimal bandwidth: $(h_steps[argmin(sse)])"
-    return h_steps[argmin(sse)]
+    return nothing
 end
 
-logit(x) = @. log(x / (1 - x))
-invlogit(x) = @. 1 / (1 + exp(-x))
-
-function npregress(
-    X, y, Xstar = X; h = nothing, distance = mahalanobis(X), K = pdf$Normal(), binary = false
-)
-    h = isnothing(h) ? optimal_bandwidth(X, y; distance, K, binary) : h
-    if binary
-        mapreduce(vcat, eachrow(Xstar)) do x0
-            local μ = 0.5
-            local vx = 0.0
-            for i in 1:20
-                η = logit(μ)
-                @debug "Iteration $i" μ extrema(μ) extrema(η)
-                z = @. η + (y - μ) / (μ * (1 - μ))
-                new_K = let μ = μ
-                    σ = @. μ * (1 - μ)
-                    x -> begin
-                        K(x) .* σ
-                    end
-                end
-                z_new, vx = only(
-                    eachrow(npregress(X, z, x0'; h, distance, binary = false, K = new_K))
-                )
-                μ_new = clamp(invlogit(z_new), 1e-6, 1 - 1e-6)
-                if abs(μ - μ_new) < 1e-4
-                    @debug "Early return at iteration $i"
-                    return [μ_new vx * (exp(-z_new) / (1 + exp(-z_new))^2)^2]
-                end
-                μ = 0.5μ + 0.5μ_new
-            end
-            return [μ vx * (exp(-logit(μ)) / (1 + exp(-logit(μ)))^2)^2]
-        end
-    else
-        return mapreduce(vcat, eachrow(Xstar)) do x
-            Z = X .- x'
-            W = X .- x' |>
-                eachrow .|>
-                distance .|>
-                Base.Fix2(/, h) |>
-                K |>
-                Diagonal
-            Z = [ones(Base.size(X, 1)) Z]
-            βₓ = (Z' * W * Z) \ (Z' * W * y)
-            u = y - Z * βₓ
-            V_βₓ = inv(Z' * W * Z) * (Z' * W * Diagonal(u .^ 2) * W * Z) * inv(Z' * W * Z)
-            return reduce(hcat, Iterators.flatten(zip(βₓ, diag(V_βₓ))))
-        end
+function add_within_dealer_demean!(dq)
+    for col in OUTCOMES
+        in_col = Symbol(col, :_resid)
+        out_col = Symbol(col, :_dr)
+        transform!(
+            groupby(dq, :dealer_uid),
+            in_col => (x -> x .- mean(x)) => out_col,
+        )
     end
+    return nothing
 end
 
-lag(x) =
-    let N = length(x)
-        vcat(missing, first(x, N - 1))
-    end
-
-extract_stat((v, (k, col))) = k => col => v
-extract_stats(stats) = extract_stat.(collect(pairs(stats)))
-
-trim_cut(x) =
-    if x < 1 / 3
-        "Low"
-    elseif x < 2 / 3
-        "Mid"
-    else
-        "High"
-    end
-
-function make_panel(cars, dealers)
-    out = @> cars begin
-        # transform(:trim_rank => ByRow(trim_cut) => :trim_rank) 
-        groupby([:t, :dealer_uid, :model, :model_year, :extra])
-        combine(nrow => :q)
-    end
-
-    let appropriate_t = (m, t) -> (Date(m) - Quarter(1)) <= t <= (Date(m) + Year(1))
-        subset!(out, [:model_year, :t] => ByRow(appropriate_t))
-    end
-
-    ## attach lagged aggregate statistics
-    agg_statistics = @> cars groupby([:t, :dealer_uid]) combine(
-        extract_stats(Empirics.STATISTICS)...
+# Per dealer, lag by one row (data already sorted by t within dealer).
+function lagged_within_dealer!(dq)
+    sort!(dq, [:dealer_uid, :t])
+    transform!(
+        groupby(dq, :dealer_uid),
+        :median_markup_dr =>
+            (x -> [missing; collect(x)[1:(end - 1)]]) => :lag_median_markup_dr,
+        :total_units_dr =>
+            (x -> [missing; collect(x)[1:(end - 1)]]) => :lag_total_units_dr,
     )
-    transform!(agg_statistics, :t => ByRow(Base.Fix2(-, Quarter(1))) => :t)
-    DataFrames.rename!(Base.Fix1(*, "lag_"), agg_statistics, cols = Not([:t, :dealer_uid]))
-    out = innerjoin(out, agg_statistics, on = [:t, :dealer_uid])
+    return nothing
+end
 
-    out = tmapreduce(vcat, groupby(out, :t)) do sales
-        J = @> sales selectunique([:model, :model_year, :extra])
-        J.is_new_model_year = J.model_year .== maximum(J.model_year)
-        F = @> sales selectunique(:dealer_uid)
-        JF = crossjoin(J, F)
-        JF.t .= first(sales.t)
-        leftjoin!(
-            JF,
-            select(unique(sales, :dealer_uid), :dealer_uid, names(sales, r"lag")),
-            on = :dealer_uid,
-        ) # attach lagged sales
-        leftjoin!(
-            JF,
-            select(sales, Not(names(sales, r"lag"))),
-            on = [:t, :dealer_uid, :model, :model_year, :extra],
-        )
-        JF.q = coalesce.(JF.q, 0)
-        JF.is_sold = JF.q .> 0
-        leftjoin!(
-            JF,
-            select(dealers, :uid, D),
-            on = :dealer_uid => :uid,
-        )
-        return JF
-    end
-    subset!(groupby(out, [:model, :model_year, :extra]), :t => (>(1) ∘ length ∘ unique))
+# Equal-width quantile bins; aggregate (x_mean, y_mean) per bin.
+function binned_means(x, y; nbins = 15)
+    edges = quantile(x, range(0.0, 1.0, length = nbins + 1))
+    bin = clamp.(searchsortedlast.(Ref(edges), x), 1, nbins)
+    df = DataFrame(; bin, x, y)
+    out = combine(groupby(df, :bin), :x => mean => :x_mean, :y => mean => :y_mean)
+    sort!(out, :bin)
     return out
 end
 
-# first residualize dealer fixed effects
-# then, within period, residualize as a function of demographics
-function calculate_ε!(panel)
-    estimation_sample = selectunique(panel, [:dealer_uid, :t, :lag_total_units, D...])
-    transform!(groupby(estimation_sample, :t)) do df
-        X = Matrix(df[:, D])
-        y = df.lag_total_units
-        (; lag_ε = y - npregress(X, y)[:, 1])
+function tercile_panel(dq, x_col, y_col; xlabel, ylabel)
+    plots = map(["Low", "Mid", "High"]) do t
+        sub = subset(dq, :tercile => ByRow(==(t)))
+        bm = binned_means(sub[!, x_col], sub[!, y_col])
+        p = scatter(
+            bm.x_mean,
+            bm.y_mean;
+            xlabel = xlabel,
+            ylabel = ylabel,
+            title = "$t ε tercile",
+            legend = false,
+            markersize = 4,
+            markerstrokewidth = 0,
+        )
+        # OLS line on the binned means for visual reference.
+        if nrow(bm) >= 2
+            β = [ones(nrow(bm)) bm.x_mean] \ bm.y_mean
+            xs = [minimum(bm.x_mean), maximum(bm.x_mean)]
+            plot!(p, xs, β[1] .+ β[2] .* xs, lw = 2)
+        end
+        return p
     end
-    leftjoin!(
-        panel,
-        select(estimation_sample, :dealer_uid, :t, :lag_ε),
-        on = [:dealer_uid, :t],
-    )
-    return nothing
+    return plot(plots...; layout = (1, 3), size = (1500, 400))
+end
+
+function trim_variation_table(fords)
+    trim_counts = @> fords groupby([:model, :extra]) combine(nrow => :total_count)
+
+    dealer_quarter_trim =
+        @> fords groupby([:model, :extra, :dealer_uid, :t]) combine(nrow => :_sales)
+    dq_with_trim = @> dealer_quarter_trim begin
+        groupby([:model, :extra])
+        combine(nrow => :n_dealer_quarters_with_trim)
+    end
+    n_total_dq = nrow(unique(select(fords, :dealer_uid, :t)))
+
+    leftjoin!(trim_counts, dq_with_trim, on = [:model, :extra])
+    trim_counts.n_dealer_quarters_total .= n_total_dq
+    trim_counts.share_dealer_quarters_with_trim =
+        trim_counts.n_dealer_quarters_with_trim ./ n_total_dq
+    sort!(trim_counts, :total_count, rev = true)
+    return trim_counts
 end
 
 function (@main)(_)
@@ -185,87 +109,64 @@ function (@main)(_)
     with_logging() do
         fords = read_arrow(snakemake.input["fords"])
         dealer_demographics = read_arrow(snakemake.input["dealer_demographics"])
-        panel = make_panel(fords, dealer_demographics)
-        # subset!(panel, :is_new_model_year)
-        subset!(panel, :model_year => ByRow(<(2020))) # not a full year of data for 2020, so exclude
-        calculate_ε!(panel)
-        dropmissing!(panel, :lag_ε)
-        transform!(groupby(panel, :dealer_uid), :lag_total_units => median => :avg_units)
-        panel.lag_ε ./= panel.avg_units
+        demos = Empirics.DEFAULT_DEMOGRAPHICS
 
-        rankdense(x) =
-            let r = ordinalrank(x)
-                r ./ length(x)
-            end
+        @info "Aggregating dealer-quarter panel"
+        dq = Supply.make_dealer_quarter(fords)
+        leftjoin!(
+            dq, select(dealer_demographics, :uid, demos...), on = :dealer_uid => :uid
+        )
+        dropmissing!(dq, demos)
 
-        panel = @> panel groupby(:t) transform(:lag_ε => rankdense => :lag_ε_rank)
-        transform!(groupby(panel, [:model, :model_year, :extra, :t]), threads = false) do df
-            X = Matrix(df[!, D])
-            y = df.is_sold
-            @info "Running" first(df.model) first(df.model_year) first(df.t) first(df.extra)
-            (; is_sold_resid = y - npregress(X, y)[:, 1])
-        end
+        @info "Residualizing by demographics within quarter" nrows = nrow(dq)
+        residualize_within_quarter!(dq, demos)
+        add_within_dealer_demean!(dq)
 
-        plots = let gdf = groupby(panel, [:model, :model_year, :extra])
-            combine(gdf, threads = false) do df
-                ε_range = range(quantile.(Ref(df.lag_ε_rank), [0.1, 0.9])..., length = 50)
-                npmodel = npregress(
-                    reshape(df.lag_ε_rank, :, 1),
-                    df.is_sold_resid,
-                    reshape(ε_range, :, 1),
-                    h = 0.5,
-                )
-                p = plot(
-                    ε_range,
-                    npmodel[:, 1],
-                    ribbon = 1.96 * sqrt.(npmodel[:, 2]),
-                    xlabel = "Quantile Lagged ε",
-                    ylabel = "Probability Sold",
-                    label = """Model: $(first(df.model)), Year: $(first(df.model_year))
-                    Trim: $(first(df.extra))
-                    Avg derivative: $(@sprintf("%.2e", mean(npmodel[:, 3])))
-                    Baseline probability: $(@sprintf("%.2f", mean(df.is_sold)))
-                    """,
-                )
-                # sort!(out, :f_stat, rev = true)
-                # range_out = out.ε |> extrema |> collect |> diff |> only
-                # best_stat = out[1, :]
-                # if abs(current_stat.t_stat) < 1.96
-                #     break
-                # end
-                # slope = current_stat.npmodel[1, 3]
-                # plot!(
-                #     p
-                # )
-                # scatter!(p, df.lag_ε, df.is_sold_resid, label = "Data", alpha = 0.1, markerstrokewidth=0)
-                return (;
-                    p, is_sold_mean = mean(df.is_sold)
-                )
+        # ε = total_units residual (pre-demean). Drives the tercile cut.
+        dq.ε = dq.total_units_resid
+        dealer_avg = @> dq groupby(:dealer_uid) combine(:ε => mean => :avg_ε)
+        cuts = quantile(dealer_avg.avg_ε, [1 / 3, 2 / 3])
+        dealer_avg.tercile = map(dealer_avg.avg_ε) do ε
+            if ε < cuts[1]
+                "Low"
+            elseif ε < cuts[2]
+                "Mid"
+            else
+                "High"
             end
         end
+        leftjoin!(dq, select(dealer_avg, :dealer_uid, :tercile), on = :dealer_uid)
 
-        if !isdir(snakemake.output["plots"])
-            mkdir(snakemake.output["plots"])
-        end
+        lagged_within_dealer!(dq)
+        dropmissing!(dq, [:lag_median_markup_dr, :lag_total_units_dr])
 
-        for (; model, model_year) in eachrow(selectunique(panel, [:model, :model_year]))
-            performance_plots = subset(
-                plots, [:model, :model_year] => ByRow((x...) -> x == (model, model_year))
-            )
-            dens = plot(xlabel = "Average Sales Probability", ylabel = "Density")
-            for g in groupby(
-                subset(panel, [:model, :model_year] => ByRow((x...) -> x == (model, model_year))),
-                [:extra],
-            )
-                means = combine(groupby(g, :t), :is_sold => mean).is_sold_mean
-                density!(dens, means, label = first(g.extra), xlims = (0, 1), bandwidth = 0.05)
-            end
-            out = plot(
-                performance_plots.p..., dens, size = (1600, 900)
-            )
-            png(out, snakemake.output["plots"] * "/$(model_year)_$(model).png")
-        end
-        touch(snakemake.output["sentinel"])
+        outdir = snakemake.output["plots"]
+        isdir(outdir) || mkdir(outdir)
+
+        @info "Plotting price → quantity dynamic (per tercile)"
+        p1 = tercile_panel(
+            dq,
+            :lag_median_markup_dr,
+            :total_units_resid;
+            xlabel = "Lagged price residual (within-dealer demeaned)",
+            ylabel = "Quantity residual",
+        )
+        png(p1, joinpath(outdir, "price_to_quantity.png"))
+
+        @info "Plotting quantity → trim dynamic (per tercile)"
+        p2 = tercile_panel(
+            dq,
+            :lag_total_units_dr,
+            :unique_trims_resid;
+            xlabel = "Lagged quantity residual (within-dealer demeaned)",
+            ylabel = "Trim-count residual",
+        )
+        png(p2, joinpath(outdir, "quantity_to_trims.png"))
+
+        @info "Writing trim-variation table"
+        trim_table = trim_variation_table(fords)
+        CSV.write(snakemake.output["trim_csv"], trim_table)
+        @info "  rows" nrow(trim_table) top_share = first(trim_table.share_dealer_quarters_with_trim, 5)
     end
     return nothing
 end

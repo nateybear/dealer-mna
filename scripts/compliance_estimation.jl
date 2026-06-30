@@ -20,7 +20,9 @@ using Distributed
     MAX_INNER_SWEEPS = 20
     Ρ̃_TOL = 1.0f-3
 
-    include("plot_assortment_probs.jl")
+    # Number of boosting rounds in the step-1 cross-fit. Step 2's final refit
+    # picks its own num_round per booster via Supply.fit_xgb_custom_oos.
+    NUM_ROUND_STEP1 = 6
 
     demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
 
@@ -52,79 +54,6 @@ using Distributed
             X[i, :] .= @view state_matrix[lookup[(quarter, c.dealer_uid)], :]
         end
         return X
-    end
-
-    xgboost_params = (
-        # Identity link in XGBoost's view; our custom objective re-interprets
-        # raw output as logit-space and applies σ in the gradient/Hessian.
-        objective = "reg:squarederror",
-        # σ(-2) ≈ 0.12 starting prediction for both p_base and ρ̃. p_base climbs
-        # toward the observed rate from below.
-        base_score = -2.0,
-        max_depth = 3,
-        # Loosened from earlier conservative defaults: the ρ̃ Hessian is
-        # ρ̃²(1-ρ̃)·(1-p)/q ≈ 0.03 per row at ρ̃ = 0.12, ~10x smaller than p_base's.
-        # With high min_child_weight and lambda, regularization swamps the gain,
-        # the booster adds no useful trees, and ρ̃ stays pinned at σ(base_score).
-        num_round = 6,
-        eta = 0.15,
-        lambda = 1.0,
-        min_child_weight = 5,
-        tree_method = "hist",
-        subsample = 0.8,
-        max_bin = 32,
-        seed = 85704,
-    )
-    XGB_NUM_ROUND = xgboost_params.num_round
-    XGB_BOOSTER_PARAMS = Base.structdiff(xgboost_params, (num_round = nothing,))
-
-    # ---- Custom mixture-likelihood objectives for XGBoost ----
-    #
-    # Both p_base and ρ̃ are σ(raw XGBoost output) under a logistic link. Per-row
-    # gradient and Fisher-information Hessian derived from the mixture data
-    # log-likelihood; Hessian is positive for all p, ρ̃, y. See plan file for
-    # the full derivation.
-
-    # p_base loss derivative w.r.t. raw output f, given y, complier flag z,
-    # and current ρ̃ estimate (held fixed).
-    function pbase_grad_hess(f::Real, y::Real, z::Real, ρ̃::Real)
-        p = logistic(f)
-        if iszero(z)
-            return Float32(p - y), Float32(p * (1 - p))
-        end
-        u = 1 - ρ̃
-        q = p + (1 - p) * ρ̃
-        g = (1 - y) * p - y * u * p * (1 - p) / q
-        h = u * p^2 * (1 - p) / q
-        return Float32(g), Float32(h)
-    end
-
-    # ρ̃ loss derivative w.r.t. raw output gᵣ, given y and current p_base
-    # (held fixed). Only applied to complier-classified rows.
-    function rho_grad_hess(gᵣ::Real, y::Real, p::Real)
-        ρ̃ = logistic(gᵣ)
-        q = p + (1 - p) * ρ̃
-        g = (1 - y) * ρ̃ - y * (1 - p) * ρ̃ * (1 - ρ̃) / q
-        h = (1 - p) * ρ̃^2 * (1 - ρ̃) / q
-        return Float32(g), Float32(h)
-    end
-
-    # Train a Booster for XGB_NUM_ROUND iterations using a custom per-row
-    # gradient/Hessian. compute_g_h(ŷ::Vector) -> (grad::Vector, hess::Vector)
-    # where ŷ is the raw (margin) prediction at each row of dm. Closure-first
-    # signature so callers can use `do`-block syntax.
-    function fit_xgb_custom(compute_g_h, dm::XGBoost.DMatrix)
-        b = with_logger(NullLogger()) do
-            XGBoost.Booster(dm; XGB_BOOSTER_PARAMS...)
-        end
-        for _ in 1:XGB_NUM_ROUND
-            ŷ = XGBoost.predict(b, dm; margin = true)
-            grad, hess = compute_g_h(ŷ)
-            with_logger(NullLogger()) do
-                XGBoost.updateone!(b, dm, grad, hess)
-            end
-        end
-        return b
     end
 
     function log_e_step_diagnostics(E_results)
@@ -166,7 +95,7 @@ function (@main)(_)
     )
     prepare_dealers!(dealer_demographics)
 
-    panel = make_panel(fords, dealer_demographics)
+    panel = Supply.make_panel(fords, dealer_demographics)
     select!(panel, :dealer_uid, :t, :model, :model_year, :extra, :is_sold)
     subset!(panel, :t => ByRow(≥(Date(2017))))
 
@@ -223,11 +152,13 @@ function (@main)(_)
                             ρ̃_prev = copy(ρ̃_tr)
 
                             # p_base fit: every row contributes
-                            booster_p = fit_xgb_custom(dm_tr) do ŷ
+                            booster_p = Supply.fit_xgb_custom(
+                                dm_tr; num_round = NUM_ROUND_STEP1
+                            ) do ŷ
                                 grad = Vector{Float32}(undef, n_tr)
                                 hess = Vector{Float32}(undef, n_tr)
                                 @inbounds for j in 1:n_tr
-                                    grad[j], hess[j] = pbase_grad_hess(
+                                    grad[j], hess[j] = Supply.pbase_grad_hess(
                                         ŷ[j], y_tr[j], z_tr[j], ρ̃_tr[j]
                                     )
                                 end
@@ -247,11 +178,13 @@ function (@main)(_)
                             n_tr_c = length(complier_local)
                             dm_tr_c = XGBoost.DMatrix(X_tr_c)
                             XGBoost.setinfo!(dm_tr_c, "label", y_tr_c)
-                            booster_r = fit_xgb_custom(dm_tr_c) do ŷ
+                            booster_r = Supply.fit_xgb_custom(
+                                dm_tr_c; num_round = NUM_ROUND_STEP1
+                            ) do ŷ
                                 grad = Vector{Float32}(undef, n_tr_c)
                                 hess = Vector{Float32}(undef, n_tr_c)
                                 @inbounds for j in 1:n_tr_c
-                                    grad[j], hess[j] = rho_grad_hess(
+                                    grad[j], hess[j] = Supply.rho_grad_hess(
                                         ŷ[j], y_tr_c[j], p_tr_c[j]
                                     )
                                 end
@@ -363,6 +296,140 @@ function (@main)(_)
             @info "Partition stable, CEM converged at step $i"
             Arrow.write("data/compliance.arrow", E_step)
             JLD2.save_object("data/compliance_fits.jld2", M_step)
+
+            @info "Step 2: full-data refit with OOS early stopping"
+            compliance.is_compliant = E_step.p_compliant .> 0.5
+            final_M_step =
+                let mapped = pmap(collect(gdf)) do cars
+                        cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
+                        X = X_matrix(cars)
+                        y_all = Float32.(cars.is_sold)
+                        z_all = Float32.(cars.is_compliant)
+                        n = length(y_all)
+
+                        ρ̃ = zeros(Float32, n)
+                        pbase_bytes = UInt8[]
+                        rho_bytes = UInt8[]
+                        best_round_p = 0
+                        best_round_r = 0
+
+                        for sweep in 1:MAX_INNER_SWEEPS
+                            ρ̃_prev = copy(ρ̃)
+
+                            booster_p, br_p = Supply.fit_xgb_custom_oos(
+                                idxs ->
+                                    let m = length(idxs),
+                                        y_s = y_all[idxs],
+                                        z_s = z_all[idxs],
+                                        ρ̃_s = ρ̃[idxs]
+
+                                        ŷ -> begin
+                                            grad = Vector{Float32}(undef, m)
+                                            hess = Vector{Float32}(undef, m)
+                                            @inbounds for j in 1:m
+                                                grad[j], hess[j] = Supply.pbase_grad_hess(
+                                                    ŷ[j], y_s[j], z_s[j], ρ̃_s[j]
+                                                )
+                                            end
+                                            return grad, hess
+                                        end
+                                    end,
+                                idxs ->
+                                    let m = length(idxs),
+                                        y_s = y_all[idxs],
+                                        z_s = z_all[idxs],
+                                        ρ̃_s = ρ̃[idxs]
+
+                                        ŷ -> begin
+                                            nll = 0.0
+                                            @inbounds for j in 1:m
+                                                nll += Supply.pbase_nll(
+                                                    ŷ[j], y_s[j], z_s[j], ρ̃_s[j]
+                                                )
+                                            end
+                                            return nll / m
+                                        end
+                                    end,
+                                X,
+                                y_all;
+                                max_round = 50,
+                                patience = 5,
+                            )
+                            pbase_bytes = copy(XGBoost.serialize(booster_p))
+                            best_round_p = br_p
+
+                            dm_full = XGBoost.DMatrix(X)
+                            p = logistic.(XGBoost.predict(booster_p, dm_full; margin = true))
+                            finalize(booster_p)
+                            finalize(dm_full)
+
+                            complier_idx = findall(==(1.0f0), z_all)
+                            isempty(complier_idx) && break
+
+                            X_c = X[complier_idx, :]
+                            y_c = y_all[complier_idx]
+                            p_c = p[complier_idx]
+
+                            booster_r, br_r = Supply.fit_xgb_custom_oos(
+                                idxs ->
+                                    let m = length(idxs), y_s = y_c[idxs], p_s = p_c[idxs]
+
+                                        ŷ -> begin
+                                            grad = Vector{Float32}(undef, m)
+                                            hess = Vector{Float32}(undef, m)
+                                            @inbounds for j in 1:m
+                                                grad[j], hess[j] = Supply.rho_grad_hess(
+                                                    ŷ[j], y_s[j], p_s[j]
+                                                )
+                                            end
+                                            return grad, hess
+                                        end
+                                    end,
+                                idxs ->
+                                    let m = length(idxs), y_s = y_c[idxs], p_s = p_c[idxs]
+
+                                        ŷ -> begin
+                                            nll = 0.0
+                                            @inbounds for j in 1:m
+                                                nll += Supply.rho_nll(
+                                                    ŷ[j], y_s[j], p_s[j]
+                                                )
+                                            end
+                                            return nll / m
+                                        end
+                                    end,
+                                X_c,
+                                y_c;
+                                max_round = 50,
+                                patience = 5,
+                            )
+                            dm_c = XGBoost.DMatrix(X_c)
+                            ρ̃[complier_idx] .= logistic.(
+                                XGBoost.predict(booster_r, dm_c; margin = true)
+                            )
+                            rho_bytes = copy(XGBoost.serialize(booster_r))
+                            best_round_r = br_r
+                            finalize(booster_r)
+                            finalize(dm_c)
+
+                            maximum(abs, ρ̃ .- ρ̃_prev) < Ρ̃_TOL && break
+                        end
+
+                        (; model, model_year, extra) = cars[1, :]
+                        @info "  refit" model model_year extra best_round_p best_round_r
+                        return (model, model_year, extra) => (pbase_bytes, rho_bytes)
+                    end
+                    mapreduce(
+                        Dict,
+                        merge,
+                        mapped,
+                        init = Dict{
+                            Tuple{String, Int64, String},
+                            Tuple{Vector{UInt8}, Vector{UInt8}},
+                        }(),
+                    )
+                end
+            JLD2.save_object("data/compliance_fits_final.jld2", final_M_step)
             return nothing
         end
         compliance.p_compliant .= next_p_compliant

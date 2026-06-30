@@ -10,14 +10,29 @@ import NonlinearSolve as NLS
 import ForwardDiff as FD
 using StaticArrays
 using QuadGK
+using LogExpFunctions
+using Memoize
 
 using Plots
 using LaTeXStrings
 
 ########### PARAMETERS AND SETUP
 
-F = cdf$(truncated(Exponential(1), upper = 10))
-f = pdf$(truncated(Exponential(1), upper = 10))
+Dθ = truncated(Exponential(1), lower = 1, upper = 5)
+F = cdf$Dθ
+f = pdf$Dθ
+
+function D(pL, pH; vL, vH)
+    int = quadgk(extrema(Dθ)...) do θ
+            uL = vL - pL / θ
+            uH = vH - pH / θ
+            out = 1e2 * [uL, uH, 0] # soft arg-max
+            softmax!(out)
+            out .*= f(θ)
+            return out[1:2]
+        end
+    return first(int)
+end
 
 function CS(pL, pH; vL, vH)
     ΔH = (pH - pL) / (vH - vL)
@@ -31,60 +46,34 @@ function CS(pL, pH; vL, vH)
     return low_surplus + high_surplus
 end
 
-softplus(x) = log(1 + exp(x))
-invsoftplus(y) = log(exp(y) - 1)
-function to_prices(x)
-    base, Δ = softplus.(x[1:2])
-    return SVector{2}(base, base + Δ)
-end
-function from_prices(p)
-    base = p[1]
-    Δ = p[2] - p[1]
-    return invsoftplus.(SVector{2}(base, Δ))
-end
-∂to_prices(x) = [1 0; 1 1] .* logit.(x[1:2])
-logit(x) = exp(x) / (1 + exp(x))
+softplus(x) = LogExpFunctions.softplus(x)
+invsoftplus(y) = y + LogExpFunctions.log1mexp(-y)
+to_prices(x) = SVector{2}(softplus.(x[1:2]))
+from_prices(p) = invsoftplus.(SVector{2}(p[1:2]))
+∂to_prices(x) = Diagonal(logit.(x[1:2]))
+logit(x) = LogExpFunctions.logistic(x) + 1e-6 # add small constant to prevent near-zero derivative
 
-# Smooth approximation of max(a, b): τ·log(exp(a/τ) + exp(b/τ))
-# Prevents negative q_L when ΔH < ΔL without introducing a kink
-const τ_SMOOTH = 0.1
-smoothmax(a, b) =
-    let m = max(a, b)
-        m + τ_SMOOTH * log(exp((a - m) / τ_SMOOTH) + exp((b - m) / τ_SMOOTH))
-    end
-smoothmax_σ(a, b) = 1 / (1 + exp((b - a) / τ_SMOOTH)) # ∂smoothmax/∂a
-
-function D(pL, pH; vL, vH)
-    ΔH = (pH - pL) / (vH - vL)
-    ΔL = pL / vL
-    Δ̃H = smoothmax(ΔH, ΔL)
-    return [F(Δ̃H) - F(ΔL), 1 - F(Δ̃H)]
-end
+@memoize ∂D_cache(vL, vH, T = Float64) = FD.JacobianConfig(splat(D$(; vL, vH)), T[1.0, 2.0])
 
 function ∂D(pL, pH; vL, vH)
-    ΔH = (pH - pL) / (vH - vL)
-    ΔL = pL / vL
-    Δ̃H = smoothmax(ΔH, ΔL)
-    σ = smoothmax_σ(ΔH, ΔL)
-    dΔH_dpL = -1 / (vH - vL)
-    dΔH_dpH = 1 / (vH - vL)
-    dΔL_dpL = 1 / vL
-    dΔ̃H_dpL = σ * dΔH_dpL + (1 - σ) * dΔL_dpL
-    dΔ̃H_dpH = σ * dΔH_dpH
-    dD_dpL = [f(Δ̃H) * dΔ̃H_dpL - f(ΔL) * dΔL_dpL, -f(Δ̃H) * dΔ̃H_dpL]
-    dD_dpH = [f(Δ̃H) * dΔ̃H_dpH, -f(Δ̃H) * dΔ̃H_dpH]
-    return hcat(dD_dpL, dD_dpH)
+    return FD.jacobian(splat(D$(; vL, vH)), [pL, pH], ∂D_cache(vL, vH, typeof(pL)))
 end
 
+@memoize ∂D_cache(vL, T = Float64) = FD.GradientConfig(splat(D$(; vL)), T[1.0])
+
 function ∂D(pL; vL)
-    ΔL = pL / vL
-    dΔL_dpL = 1 / vL
-    return -f(ΔL) * dΔL_dpL
+    return FD.gradient(splat(D$(; vL)), [pL], ∂D_cache(vL, typeof(pL)))[1]
 end
 
 function D(pL; vL)
-    ΔL = pL / vL
-    return 1 - F(ΔL)
+    int = quadgk(extrema(Dθ)...) do θ
+            uL = vL - pL / θ
+            out = 1e2 * [uL, 0] # soft arg-max
+            softmax!(out)
+            out .*= f(θ)
+            return out[1]
+        end
+    return first(int)
 end
 
 struct QuadraticCost{T}
@@ -113,11 +102,11 @@ function _SimpleRetailerFOC(dρ, ρ, params)
     (; vL, vH, C) = params
     p = to_prices(ρ)
     q = D(p[1], p[2]; vL, vH)
-    return dρ .= q + ∂D(p[1], p[2]; vL, vH)' * (p - ∂C(C, q))
+    return dρ .= q + ∂D(p[1], p[2]; vL, vH) * (p - ∂C(C, q))
 end
 function SimpleRetailer(; C, vL, vH)
     T = containerType(C)
-    init = MVector{2}(convert(T, [invsoftplus(vL / 2), invsoftplus(vH - vL)]))
+    init = MVector{2}(convert(T, [invsoftplus(vL / 2), invsoftplus(vH / 2)]))
     prob = NLS.NonlinearProblem(_SimpleRetailerFOC, init, (; C, vL, vH))
     return NLS.solve(prob)
 end
@@ -154,13 +143,13 @@ function _SimpleManufacturerFOC(dθ, θ, params)
     p = to_prices(ρ)
     q = D(p[1], p[2]; vL, vH)
     dpdw = ∂to_prices(ρ) * dρdθ / ∂to_prices(θ)
-    dqdw = ∂D(p[1], p[2]; vL, vH) * dpdw
+    dqdw = ∂D(p[1], p[2]; vL, vH)' * dpdw
     return dθ .= q + dqdw' * (w - ∂C(C, q))
 end
 
 function SimpleManufacturer(; C, vL, vH)
     p_vi = to_prices(SimpleRetailer(; C, vL, vH))
-    init = MVector{2}(invsoftplus(p_vi[1] / 2), invsoftplus((p_vi[2] - p_vi[1]) / 2))
+    init = MVector{2}(invsoftplus(p_vi[1]/2), invsoftplus(p_vi[2]/2))
     prob = NLS.NonlinearProblem(_SimpleManufacturerFOC, init, (; C, vL, vH))
     return NLS.solve(prob)
 end
@@ -169,16 +158,18 @@ function _ConstrainedRetailerFOC(dρ, ρ, params)
     (; vL, vH, C, q_bar) = params
     p = to_prices(ρ)
     λ = softplus(ρ[3])
-    ∂D∂p = ∂D(p[1], p[2]; vL, vH)'
+    ∂D∂p = ∂D(p[1], p[2]; vL, vH)
     q = D(p[1], p[2]; vL, vH)
     dρ[1:2] .= q + ∂D∂p * (p - ∂C(C, q)) + λ * ∂D∂p[:, 1]
-    dρ[3] = λ * (q[1] - q_bar)
+    dρ[3] = let a = λ, b = (q[1] - q_bar)
+        sqrt(a^2 + b^2) - a - b # fischer-burmeister reformulation of complementarity condition λ * (q[1] - q_bar) = 0
+    end
     return dρ
 end
 
 function ConstrainedRetailer(; C, vL, vH, q_bar)
     T = eltype(containerType(C))
-    init = MVector{3}(T.([invsoftplus(vL / 2), invsoftplus(vH - vL), 0]))
+    init = MVector{3}(T.([invsoftplus(C.k[1]), invsoftplus(C.k[2]), -1]))
     prob = NLS.NonlinearProblem(_ConstrainedRetailerFOC, init, (; C, vL, vH, q_bar))
     return NLS.solve(prob)
 end
@@ -198,7 +189,7 @@ function DefectingRetailer(θ, vL)
     end
     dρdθ = only(-drdρ \ drdθ)
     dpdw = logit(sol.u[1]) * dρdθ / logit(θ[1])
-    dqdw = ∂D(p; vL) * dpdw
+    dqdw = ∂D(p; vL)' * dpdw
     dwL = q * (dpdw - 1) + dqdw * (p - wL)
     return (Π, dwL)
 end
@@ -222,7 +213,7 @@ function _ConstrainedManufacturer(dθ, θ, params)
     q = D(p[1], p[2]; vL, vH)
     Jρ = [∂to_prices(rsol.u) zeros(2); 0 0 logit(rsol.u[3])]
     dpdθ = Jρ * dρdθ                                          # 3×2, ∂(p₁,p₂,λ)/∂θ
-    dqdθ = ∂D(p[1], p[2]; vL, vH) * dpdθ[1:2, :]             # 2×2, ∂q/∂θ
+    dqdθ = ∂D(p[1], p[2]; vL, vH)' * dpdθ[1:2, :]             # 2×2, ∂q/∂θ
     Jw = ∂to_prices(θ)                                        # 2×2, ∂w/∂θ
     Π_comply = (p - w) ⋅ q
     dcomplydθ = dqdθ' * (p - w) + (dpdθ[1:2, :] - Jw)' * q
@@ -230,14 +221,17 @@ function _ConstrainedManufacturer(dθ, θ, params)
     dθ[1:2] .=
         Jw' * q + dqdθ' * (w - ∂C(C, q)) + μ * dcomplydθ -
         μ * vcat(ddefectdwL * logit(θ[1]), 0)
-    dθ[3] = μ * (Π_comply - Π_defect)
+    dθ[3] = let a = μ, b = (Π_comply - Π_defect)
+        sqrt(a^2 + b^2) - a - b # fischer-burmeister reformulation of complementarity condition μ * (Π_comply - Π_defect) = 0
+    end
     return dθ
 end
 
 function ConstrainedManufacturer(; C, vL, vH, q_bar)
-    init = MVector{3}(Float64[invsoftplus(vL), invsoftplus(vH - vL), -1.0])
+    p_vi = to_prices(SimpleRetailer(; C, vL, vH))
+    init = MVector{3}(Float64[invsoftplus(p_vi[1]), invsoftplus(p_vi[2]), -1.0])
     prob = NLS.NonlinearProblem(_ConstrainedManufacturer, init, (; C, vL, vH, q_bar))
-    return NLS.solve(prob)
+    return NLS.solve(prob, NLS.SimpleBroyden(), maxiters = 250)
 end
 
 function simple_manufacturer(; C, vL, vH)
@@ -261,10 +255,12 @@ end
 
 function allocating_manufacturer(; C, vL, vH)
     q_search = optimize(0, 0.5) do q
+        @info "Trying q_bar = $q"
         try
             w = to_prices(ConstrainedManufacturer(; C, vL, vH, q_bar = q))
             p = to_prices(ConstrainedRetailer(; C = LinearCost(w), vL, vH, q_bar = q))
             q = D(p[1], p[2]; vL, vH)
+            @info "Converged" q w p
             return -(w ⋅ q - C(q))
         catch e
             @debug "Optimization error" q e
@@ -281,7 +277,9 @@ function allocating_manufacturer(; C, vL, vH)
     Π_defect = (p_defection - w[1]) * q_defection
     Π_comply = (p - w) ⋅ q
     Π_manufacturer = w ⋅ q - C(q)
-    return (; w, p, q, surplus, q_bar, Π_comply, Π_defect, Π_manufacturer, CS = CS(p[1], p[2]; vL, vH))
+    return (;
+        w, p, q, surplus, q_bar, Π_comply, Π_defect, Π_manufacturer, CS = CS(p[1], p[2]; vL, vH)
+    )
 end
 
 recovered_surplus(d::Dict) = recovered_surplus(d["c_L"], d["c_H"], d["v_L"], d["v_H"])
@@ -310,7 +308,7 @@ function (@main)(_)
 
         makerange(label) = range(data[label] - 0.1, data[label] + 0.1, length = RESOLUTION)
         JLD2.save_object(snakemake.output["jld2"], recovered_surplus(data))
-        grids = Dict{Tuple{String, String}, Matrix{Float64}}()
+        # grids = Dict{Tuple{String, String}, Matrix{Float64}}()
         # for (label1, label2) in [("c_L", "c_H"), ("v_L", "v_H"), ("c_L", "v_L"), ("c_H", "v_H")]
         #     range1 = makerange(label1)
         #     range2 = makerange(label2)

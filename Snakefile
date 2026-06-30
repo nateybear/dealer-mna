@@ -162,7 +162,7 @@ checkpoint data_all_manufacturers:
 
 rule data_demand_estimates:
     input:
-        "scripts/demand_estimation.jl",
+        "scripts/demand_estimation_dense.jl",
         model="data/model_frames.jld2",
         params_restart=lambda _: config.get("params_restart", []),
     output:
@@ -170,15 +170,15 @@ rule data_demand_estimates:
     log:
         "logs/demand_estimation.log",
     params:
-        tmpdir="/scratch/09405/nch772/tmp",
-        objective=lambda _: config.get("objective", "combined"),
+        tmpdir=lambda _: config.get("tmpdir", None),
     run:
         julia(
-            "scripts/demand_estimation.jl",
+            "scripts/demand_estimation_dense.jl",
             input=input,
             output=output,
             log=log,
             params=params,
+            extra_args=["knitro", "--full", "--multistart"],
         )
 
 # ============================================================================
@@ -995,6 +995,83 @@ rule plot_effect_on_closest:
             wildcards=wildcards,
         )
 
+rule data_compliance_estimation:
+    """
+    Cross-fit CEM (step 1) + full-data OOS-best-round refit (step 2). The script
+    uses hardcoded data/ paths, so the input/output declarations exist only for
+    Snakemake dependency tracking. Runs with Distributed via `-p N` — set
+    `--config processes=N` to choose the worker count.
+    """
+    input:
+        "scripts/compliance_estimation.jl",
+        dealers_init="data/dealers_init_filtered.jld2",
+        fords="data/arrow/fords.arrow",
+        dealer_demographics="data/dealer_demographics.arrow",
+        model_frames="data/model_frames.jld2",
+        residual_demand="data/residual_demand.jld2",
+    output:
+        compliance="data/compliance.arrow",
+        fits="data/compliance_fits.jld2",
+        fits_final="data/compliance_fits_final.jld2",
+    log:
+        "logs/compliance_estimation.log",
+    run:
+        julia(
+            "scripts/compliance_estimation.jl",
+            input=input,
+            output=output,
+            log=log,
+            processes=config.get("processes", 1),
+        )
+
+
+rule data_price_density_estimation:
+    """
+    Per-VehicleKey XGBoost mean and stddev boosters with OOS best-round selection.
+    Hardcoded input paths in the script; rule inputs exist for dependency tracking.
+    """
+    input:
+        "scripts/price_density_estimation.jl",
+        model_frames="data/model_frames.jld2",
+        residual_demand="data/residual_demand.jld2",
+    output:
+        price_densities="data/price_densities.jld2",
+    log:
+        "logs/price_density_estimation.log",
+    run:
+        julia(
+            "scripts/price_density_estimation.jl",
+            input=input,
+            output=output,
+            log=log,
+            processes=config.get("processes", 1),
+        )
+
+
+rule data_sales_target_estimation:
+    """
+    Recovers φ(X) via the custom logistic objective P(ι=1)=σ(q − φ). Consumes
+    the compliance output from `data_compliance_estimation`.
+    """
+    input:
+        "scripts/sales_target_estimation.jl",
+        compliance="data/compliance.arrow",
+        fords="data/arrow/fords.arrow",
+        model_frames="data/model_frames.jld2",
+        state_matrix="data/residual_demand.jld2",
+    output:
+        sales_targets="data/sales_targets.jld2",
+    log:
+        "logs/sales_target_estimation.log",
+    run:
+        julia(
+            "scripts/sales_target_estimation.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 rule plot_assortment_probs:
     input:
         "scripts/plot_assortment_probs.jl",
@@ -1002,7 +1079,7 @@ rule plot_assortment_probs:
         dealer_demographics = "data/dealer_demographics.arrow",
     output:
         plots=directory("plots/assortment_probs_ford"),
-        sentinel="data/assortment_probs_sentinel.txt",
+        trim_csv="tables/trim_variation_dealer_quarter.csv",
     log:
         "logs/plot_assortment_probs.log",
     run:
@@ -1035,6 +1112,24 @@ rule toy_model:
         "logs/toy_model.log",
     run:
         julia("scripts/toy_model.jl", input=input, output=output, log=log)
+
+
+rule table_demand_standard_errors:
+    input:
+        "scripts/demand_standard_errors.jl",
+        model="data/model_frames.jld2",
+        estimates="data/demand_estimates.jld2",
+    output:
+        "tables/demand_standard_errors.csv",
+    log:
+        "logs/demand_standard_errors.log",
+    run:
+        julia(
+            "scripts/demand_standard_errors.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
 
 
 rule table_diff_in_diff:
@@ -1200,8 +1295,13 @@ rule all:
         ),
         # Trim distribution plots
         get_plot_trim_distns,
-        # Assortment probability plots
-        "data/assortment_probs_sentinel.txt",
+        # Assortment probability plots and trim-variation CSV
+        "plots/assortment_probs_ford",
+        "tables/trim_variation_dealer_quarter.csv",
+        # Supply-side XGBoost estimations
+        "data/compliance_fits_final.jld2",
+        "data/price_densities.jld2",
+        "data/sales_targets.jld2",
         # Facts
         "facts.tex",
         # # Demand model things
@@ -1283,11 +1383,19 @@ def process_args(x):
         return list(x)
 
 
-def julia(scriptfile, **rule):
+def julia(scriptfile, extra_args=None, processes=None, **rule):
     """
-    Run a Julia script.
+    Run a Julia script. `extra_args` is a list of CLI tokens spliced after the script
+    name; the script reads the snakemake JSON from stdin (non-MPI, non-daemon mode).
+
+    `processes`: when set, adds `-p N` before the script name so the worker pool is
+    spun up for scripts that use Distributed. May also be supplied at invocation time
+    via `--config processes=N` (this argument wins).
     """
     rule_dict = {k: process_args(v) for k, v in rule.items()}
+    args_str = " ".join(extra_args) if extra_args else ""
+    n_proc = config.get("processes", processes)
+    p_flag = f"-p {n_proc}" if n_proc else ""
     # write dumps(rule) to a temp file
     # use tempfile package
     tmpdir = rule.get("params", {}).get("tmpdir", None)
@@ -1299,15 +1407,15 @@ def julia(scriptfile, **rule):
         daemon_mode = config.get("daemon-mode", "no") == "yes"
         if daemon_mode:
             shell(
-                f"julia --project=. -e 'using DaemonMode; runargs()' {scriptfile} '{f.name}'"
+                f"julia --project=. -e 'using DaemonMode; runargs()' {scriptfile} {args_str} '{f.name}'"
             )
         else:
             threads = config.get("threads", "auto")
             # run the script with the temp file as input
             if config.get("mpi", ""):
-                cmd = f"{config["mpi"]} julia --project=. --threads={threads} {scriptfile} '{f.name}'"
+                cmd = f"{config["mpi"]} julia --project=. --threads={threads} {p_flag} {scriptfile} {args_str} '{f.name}'"
             else:
-                cmd = f"julia --project=. --threads={threads} {scriptfile} < '{f.name}'"
+                cmd = f"julia --project=. --threads={threads} {p_flag} {scriptfile} {args_str} < '{f.name}'"
             shell(cmd)
         # delete the temp file
         os.remove(f.name)
