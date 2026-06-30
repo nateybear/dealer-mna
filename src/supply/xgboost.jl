@@ -252,19 +252,18 @@ function rho_nll(gᵣ::Real, y::Real, p::Real)
     return -(y * log(q) + (1 - y) * log((1 - p) * (1 - ρ̃) + 1.0f-12))
 end
 
-# Sales-target loss. P(ι = 1 | q, φ) = σ(q − φ); ι passed as a soft label in
-# [0, 1] (typically the compliance posterior p_compliant). NLL is the soft
-# binary cross-entropy −ι log π − (1 − ι) log(1 − π) with π = σ(q − f).
-# Gradient (dNLL/df) = ι − π, Hessian = π(1 − π). Reduces to the binary form
-# when ι ∈ {0, 1}.
+# Sales-target loss. P(ι = 1 | q, φ) = σ(q − φ). NLL = −log σ(s(q − f))
+# where s = 2ι − 1 ∈ {−1, +1}. Gradient s(1 − p), Hessian p(1 − p) with
+# p = σ(s(q − f)). Sign on s captures both branches in one closed form.
 function phi_grad_hess(f::Real, q::Real, ι::Real)
-    π = logistic(q - f)
-    g = ι - π
-    h = π * (1 - π)
+    s = 2ι - 1
+    p = logistic(s * (q - f))
+    g = s * (1 - p)
+    h = p * (1 - p)
     return Float32(g), Float32(h)
 end
 
 function phi_nll(f::Real, q::Real, ι::Real)
-    π = clamp(logistic(q - f), 1.0f-12, 1 - 1.0f-12)
-    return -(ι * log(π) + (1 - ι) * log(1 - π))
+    s = 2ι - 1
+    return -log(clamp(logistic(s * (q - f)), 1.0f-12, 1 - 1.0f-12))
 end

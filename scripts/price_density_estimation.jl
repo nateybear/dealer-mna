@@ -7,6 +7,7 @@ using Distributed
     using .Demand
     using XGBoost
     using LoggingExtras
+    using Statistics: mean
 
     model = DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
     state_matrix = JLD2.load_object("data/residual_demand.jld2")
@@ -40,14 +41,17 @@ using Distributed
         end
 
     # OOS-best-round + full-data refit. Identity link via reg:squarederror; mean
-    # NLL is MSE which Supply.fit_xgb_oos uses as the default val_loss.
+    # NLL is MSE which Supply.fit_xgb_oos uses as the default val_loss. Set
+    # base_score = mean(y) so the booster starts at the right scale (log-prices
+    # are ~9–11, abs residuals ~0.1–0.3); the C default of 0.5 wastes early
+    # rounds climbing to the mean.
     regress(X, y) =
         Supply.fit_xgb_oos(
             X,
             y;
             max_round = 1000,
             patience = 5,
-            params = (subsample = 0.8,),
+            params = (subsample = 0.8, base_score = Float64(mean(y))),
         )
 
     function fit_prices(j)
