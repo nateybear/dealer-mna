@@ -23,10 +23,7 @@ function (@main)(_)
         select!(dq, :dealer_uid, :t, :total_units => :q)
 
         panel = innerjoin(compliance, dq, on = [:dealer_uid, :t])
-        # Binarize at 0.5: p_compliant is a CEM-posterior estimate of a hard
-        # latent ι ∈ {0,1}, not a continuous compliance probability with
-        # standalone statistical meaning.
-        panel.ι = Float32.(panel.p_compliant .> 0.5)
+        panel.ι = Float32.(panel.p_compliant)
 
         # Every (dealer, t) in the panel must have a state-matrix entry; error if not.
         unmapped = [
@@ -82,7 +79,7 @@ function (@main)(_)
         # stopping criterion.
         ι_strata = [x > 0.5 ? 1 : 0 for x in ι]
 
-        @info "Sales-target setup" mean_q = mean(q) τ frac_compliant = mean(ι)
+        @info "Sales-target setup" mean_q = mean(q) τ mean_p_compliant = mean(ι)
 
         booster, best_round = Supply.fit_xgb_custom_oos(
             idxs ->
