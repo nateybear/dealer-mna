@@ -3,7 +3,7 @@ using XGBoost
 using LoggingExtras
 using LinearAlgebra
 using LogExpFunctions
-using StatsBase: mean, std
+using StatsBase: mean, std, quantile
 
 function (@main)(_)
     snakemake!()
@@ -53,18 +53,36 @@ function (@main)(_)
         # soft-signed quantity (2ι − 1)·q for inspectability.
         y = @. (2 * ι - 1) * q
 
-        # Start the raw-output prediction near mean(q) so (q − f)/τ centers
-        # around 0 and the Hessian is healthy. The default base_score = −2.0
-        # (appropriate for p_base/ρ̃) leaves π ≈ 1 for every row and the
-        # Newton step degenerates — no tree ever splits.
-        params = merge(Supply.XGB_DEFAULT_PARAMS, (base_score = Float64(mean(q)),))
-
-        # Link temperature τ = std(q). Without it σ((q − f)/1) saturates on
-        # the q scale (range 1 → ~1000), Hessian π(1 − π) ≈ 0 everywhere
-        # except a ±5-car window, and split-gain ≈ Σg² / (Σh + λ) collapses
-        # to λ-dominated noise — best_round stays at 0.
+        # Link temperature τ = std(q) — σ((q − f)/τ) transitions over a ±τ-car
+        # window, matching the realistic fuzziness of "made target."
         τ = Float32(std(q))
-        @info "Sales-target link" mean_q = mean(q) τ
+
+        # Per-row Hessian is π(1 − π)/τ² ≈ 0.25/τ², so per-leaf ΣH for ~50
+        # rows is O(50/τ²) ≈ 1e-3 here. Defaults (λ=1, min_child_weight=5)
+        # were tuned for the binary p_base/ρ̃ boosters where per-row H ≈ 0.1;
+        # carrying them over makes λ and min_child_weight both swamp ΣH, so
+        # nothing splits and the booster collapses to a constant. Scale them
+        # down by ~τ², deepen the trees, and ease the learning rate to let
+        # the booster move on the q-scale within max_round.
+        params = merge(
+            Supply.XGB_DEFAULT_PARAMS,
+            (
+                base_score = Float64(mean(q)),
+                max_depth = 6,
+                min_child_weight = 1.0f-4,
+                lambda = 1.0f-5,
+                eta = 0.05,
+            ),
+        )
+
+        # Stratify the 80/20 OOS split on ι > 0.5 vs ι ≤ 0.5 so val NLL is
+        # always computed on a mix of compliers and non-compliers — without
+        # this, an unlucky draw of the ~13% compliers can throw the
+        # stopping criterion.
+        ι_strata = [x > 0.5 ? 1 : 0 for x in ι]
+
+        @info "Sales-target setup" mean_q = mean(q) τ mean_p_compliant = mean(ι) frac_strata_1 =
+            mean(ι_strata)
 
         booster, best_round = Supply.fit_xgb_custom_oos(
             idxs ->
@@ -91,11 +109,12 @@ function (@main)(_)
                 end,
             X,
             y;
-            max_round = 200,
-            patience = 5,
+            max_round = 1000,
+            patience = 20,
             params = params,
+            strata = ι_strata,
         )
-        @info "Sales-target booster" best_round nrows = n mean_p_compliant = mean(ι)
+        @info "Sales-target booster" best_round nrows = n
 
         # Save (booster_bytes, τ): consumers need τ to recover
         # P(ι=1) = σ((q − φ̂)/τ) from the booster's raw φ predictions.

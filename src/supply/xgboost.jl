@@ -55,6 +55,26 @@ end
 
 #### OOS-best-round refit protocol (custom objective)
 
+# Per-stratum 80/20 split. Each stratum contributes at least 1 train + 1 val row
+# (strata with <2 rows are placed entirely in train).
+function _stratified_split(strata::AbstractVector, val_frac::Float64, rng::AbstractRNG)
+    val_idx = Int[]
+    tr_idx = Int[]
+    for s in unique(strata)
+        rows = findall(==(s), strata)
+        n_s = length(rows)
+        if n_s < 2
+            append!(tr_idx, rows)
+            continue
+        end
+        n_v = clamp(floor(Int, val_frac * n_s), 1, n_s - 1)
+        perm = randperm(rng, n_s)
+        append!(val_idx, rows[perm[1:n_v]])
+        append!(tr_idx, rows[perm[(n_v + 1):end]])
+    end
+    return tr_idx, val_idx
+end
+
 """
     fit_xgb_custom_oos(make_gh, make_nll, X, y; ...) -> (booster, best_round)
 
@@ -69,6 +89,9 @@ best-round count.
   - `make_nll(row_idxs)::(ŷ -> Float64)` — produces the per-subset mean NLL
     closure used as the validation loss.
   - `y` is the (decorative) DMatrix label; closures recover real per-row context.
+  - `strata::Union{Nothing, AbstractVector}` — if provided, val_frac is taken
+    from each stratum so the val set is representative of the strata
+    distribution (e.g. by ι-quantile bins).
 """
 function fit_xgb_custom_oos(
     make_gh,
@@ -79,13 +102,19 @@ function fit_xgb_custom_oos(
     max_round::Int = 200,
     patience::Int = 5,
     params = XGB_DEFAULT_PARAMS,
+    strata::Union{Nothing, AbstractVector} = nothing,
     rng::AbstractRNG = Random.default_rng(),
 )
     n = length(y)
-    perm = randperm(rng, n)
-    n_val = max(1, floor(Int, val_frac * n))
-    val_idx = perm[1:n_val]
-    tr_idx = perm[(n_val + 1):end]
+    tr_idx, val_idx = if strata === nothing
+        perm = randperm(rng, n)
+        n_val = max(1, floor(Int, val_frac * n))
+        perm[(n_val + 1):end], perm[1:n_val]
+    else
+        length(strata) == n ||
+            throw(ArgumentError("strata length $(length(strata)) ≠ n $n"))
+        _stratified_split(strata, val_frac, rng)
+    end
 
     dm_tr = XGBoost.DMatrix(X[tr_idx, :])
     XGBoost.setinfo!(dm_tr, "label", y[tr_idx])
