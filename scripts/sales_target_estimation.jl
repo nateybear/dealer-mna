@@ -9,7 +9,7 @@ function (@main)(_)
     snakemake!()
     with_logging() do
         demand_model = Demand.DemandModel(;
-            JLD2.load_object(snakemake.input["model_frames"])...,
+            JLD2.load_object(snakemake.input["model_frames"])...
         )
         state_matrix = JLD2.load_object(snakemake.input["state_matrix"])
         intermed = Supply.tf_to_j_lookup(demand_model)
@@ -76,37 +76,38 @@ function (@main)(_)
 
         # τ-dependent gradient/NLL factories. Closures capture τ; we build
         # fresh ones per grid point.
-        make_factories(τ) = (
-            idxs ->
-                let m = length(idxs), q_s = q[idxs], ι_s = ι[idxs]
-                    ŷ -> begin
-                        grad = Vector{Float32}(undef, m)
-                        hess = Vector{Float32}(undef, m)
-                        @inbounds for j in 1:m
-                            grad[j], hess[j] =
-                                Supply.phi_grad_hess(ŷ[j], q_s[j], ι_s[j], τ)
+        function make_factories(τ)
+            (
+                idxs ->
+                    let m = length(idxs), q_s = q[idxs], ι_s = ι[idxs]
+                        ŷ -> begin
+                            grad = Vector{Float32}(undef, m)
+                            hess = Vector{Float32}(undef, m)
+                            @inbounds for j in 1:m
+                                grad[j], hess[j] = Supply.phi_grad_hess(ŷ[j], q_s[j], ι_s[j], τ)
+                            end
+                            return grad, hess
                         end
-                        return grad, hess
-                    end
-                end,
-            idxs ->
-                let m = length(idxs), q_s = q[idxs], ι_s = ι[idxs]
-                    ŷ -> begin
-                        nll = 0.0
-                        @inbounds for j in 1:m
-                            nll += Supply.phi_nll(ŷ[j], q_s[j], ι_s[j], τ)
+                    end,
+                idxs ->
+                    let m = length(idxs), q_s = q[idxs], ι_s = ι[idxs]
+                        ŷ -> begin
+                            nll = 0.0
+                            @inbounds for j in 1:m
+                                nll += Supply.phi_nll(ŷ[j], q_s[j], ι_s[j], τ)
+                            end
+                            return nll / m
                         end
-                        return nll / m
-                    end
-                end,
-        )
+                    end,
+            )
+        end
 
         # τ is formally underidentified in the population (can be absorbed
         # into a rescaling of φ), but with a capacity-bounded booster it
         # trades off bias vs variance. Pick τ by OOS val NLL on a geometric
         # grid bracketing std(q) ≈ 157. Failures (best_round == 0, etc.)
         # are caught so a single τ blowing up doesn't kill the search.
-        τ_grid = Float32.([40, 80, 160, 320, 640, 1280])
+        τ_grid = Float32.([160])
         @info "Sales-target setup" mean_q = mean(q) std_q = std(q) mean_p_compliant = mean(
             ι
         ) τ_grid
