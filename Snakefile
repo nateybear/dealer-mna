@@ -1378,7 +1378,7 @@ def process_args(x):
     kwargs = dict(x)
     if kwargs:
         args_as_dict = {i + 1: v for i, v in enumerate(x)}
-        return args_as_dict | kwargs
+        return {**args_as_dict, **kwargs}
     else:
         return list(x)
 
@@ -1413,7 +1413,7 @@ def julia(scriptfile, extra_args=None, processes=None, **rule):
             threads = config.get("threads", "auto")
             # run the script with the temp file as input
             if config.get("mpi", ""):
-                cmd = f"{config["mpi"]} julia --project=. --threads={threads} {p_flag} {scriptfile} {args_str} '{f.name}'"
+                cmd = f"{config['mpi']} julia --project=. --threads={threads} {p_flag} {scriptfile} {args_str} '{f.name}'"
             else:
                 cmd = f"julia --project=. --threads={threads} {p_flag} {scriptfile} {args_str} < '{f.name}'"
             shell(cmd)
