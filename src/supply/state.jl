@@ -31,7 +31,9 @@ function seed!(cf::Counterfactual)
     end
 end
 
-function residual_demand(cf::Counterfactual, dealer_uid::UUID, quarter)
+function residual_demand(
+    cf::Counterfactual, dealer_uid::UUID, quarter; return_draws::Bool = false
+)
     products = collect(keys(cf.model.product_lookup.j))
     out = fill(NaN32, (length(products), length(products) + 1))
     carried_products = tf_to_j_lookup(cf)[(quarter, dealer_uid)]
@@ -53,6 +55,11 @@ function residual_demand(cf::Counterfactual, dealer_uid::UUID, quarter)
         end
     end
 
+    # Snapshot the raw price/demand levels before the log transform, in case
+    # the caller wants them for BBL moment formation.
+    raw_prices = return_draws ? copy(prices) : nothing
+    raw_demands = return_draws ? copy(demands) : nothing
+
     demands .= log.(demands)
     prices .= log.(prices)
 
@@ -65,5 +72,5 @@ function residual_demand(cf::Counterfactual, dealer_uid::UUID, quarter)
         out[j, product_idxs .+ 1] .= α[2:end]
     end
 
-    return out
+    return return_draws ? (out, raw_prices, raw_demands) : out
 end

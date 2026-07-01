@@ -26,26 +26,28 @@ function (@main)(_)
         panel = innerjoin(compliance, dq, on = [:dealer_uid, :t])
         panel.ι = Float32.(panel.p_compliant)
 
-        # Every (dealer, t) in the panel must have a state-matrix entry; error if not.
-        unmapped = [
-            (r.dealer_uid, r.t) for
-            r in eachrow(panel) if !haskey(
-                state_lookup, ((Dates.year(r.t), Dates.quarterofyear(r.t)), r.dealer_uid)
-            )
-        ]
-        if !isempty(unmapped)
-            error(
-                "$(length(unmapped)) (dealer_uid, t) rows in panel are missing from " *
-                "the state-matrix lookup. Sample: $(first(unmapped, 5))",
-            )
-        end
+        # Manufacturer sets φ_t at the start of t using info known at end of t−1:
+        # last period's state and last period's compliance. Shift compliance
+        # forward one quarter to attach ι_{t−1} to each t.
+        compliance_lag = select(compliance, [:dealer_uid, :t, :p_compliant])
+        transform!(compliance_lag, :t => ByRow(x -> x + Quarter(1)) => :t)
+        rename!(compliance_lag, :p_compliant => :ι_lag)
+        panel = innerjoin(panel, compliance_lag, on = [:dealer_uid, :t])
+
+        # Drop rows whose lagged (dealer, quarter) is missing from the state
+        # lookup — natural burn-in at each dealer's first quarter of activity.
+        subset!(panel, [:t, :dealer_uid] => ByRow((t, f) -> haskey(
+            state_lookup, ((Dates.year(t - Quarter(1)), Dates.quarterofyear(t - Quarter(1))), f)
+        )))
 
         n = nrow(panel)
-        ncols = size(state_matrix, 2)
-        X = Matrix{Float32}(undef, n, ncols)
+        ncols_state = size(state_matrix, 2)
+        X = Matrix{Float32}(undef, n, ncols_state + 1)
         for (i, r) in enumerate(eachrow(panel))
-            quarter = (Dates.year(r.t), Dates.quarterofyear(r.t))
-            X[i, :] .= @view state_matrix[state_lookup[(quarter, r.dealer_uid)], :]
+            tlag = r.t - Quarter(1)
+            quarter = (Dates.year(tlag), Dates.quarterofyear(tlag))
+            X[i, 1:ncols_state] .= @view state_matrix[state_lookup[(quarter, r.dealer_uid)], :]
+            X[i, end] = Float32(r.ι_lag)
         end
 
         q = Float32.(panel.q)

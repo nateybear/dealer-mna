@@ -21,6 +21,7 @@ wildcard_constraints:
     i="[0-9]+",
     specification="(callawaysantanna|twfe|sunabraham|synthetic)",
     who="(treated_dealers|affiliated)",
+    seed="[0-9]+",
 
 
 # ============================================================================
@@ -1028,12 +1029,16 @@ rule data_compliance_estimation:
 rule data_price_density_estimation:
     """
     Per-VehicleKey XGBoost mean and stddev boosters with OOS best-round selection.
-    Hardcoded input paths in the script; rule inputs exist for dependency tracking.
+    Now conditions on (state_{t, f}, log φ_{t, f}) — sales-target booster
+    predictions per (t, f). Hardcoded input paths in the script; rule inputs
+    exist for dependency tracking.
     """
     input:
         "scripts/price_density_estimation.jl",
         model_frames="data/model_frames.jld2",
         residual_demand="data/residual_demand.jld2",
+        sales_targets="data/sales_targets.jld2",
+        compliance="data/compliance.arrow",
     output:
         price_densities="data/price_densities.jld2",
     log:
@@ -1045,6 +1050,63 @@ rule data_price_density_estimation:
             output=output,
             log=log,
             processes=config.get("processes", 1),
+        )
+
+
+rule data_state_transition_estimation:
+    """
+    Per-VehicleKey (α₀, α_own, α_cross) XGBoost boosters for the state
+    transition s_t = g(s_{t-1}). Follows the p_base/ρ̃ pattern: hardcoded
+    input paths, Distributed via `-p N`.
+    """
+    input:
+        "scripts/state_transition_estimation.jl",
+        model_frames="data/model_frames.jld2",
+        residual_demand="data/residual_demand.jld2",
+    output:
+        state_transition="data/state_transition.jld2",
+    log:
+        "logs/state_transition_estimation.log",
+    run:
+        julia(
+            "scripts/state_transition_estimation.jl",
+            input=input,
+            output=output,
+            log=log,
+            processes=config.get("processes", 1),
+        )
+
+
+rule data_bbl_simulation:
+    """
+    One BBL forward-simulation sample path from Q1 2017 through Q4 2019.
+    RNG seeded via the `seed` wildcard so Snakemake can fan out across
+    seeds in parallel. Consumes every supply-side estimator + demand
+    counterfactual machinery.
+    """
+    input:
+        "scripts/bbl_forward_simulation.jl",
+        model_frames="data/model_frames.jld2",
+        demand_estimates="data/demand_estimates.jld2",
+        delta_decomp="data/delta_decomposition_regout.jld2",
+        compliance_fits="data/compliance_fits_final.jld2",
+        sales_targets="data/sales_targets.jld2",
+        price_densities="data/price_densities.jld2",
+        state_transition="data/state_transition.jld2",
+        compliance="data/compliance.arrow",
+        residual_demand="data/residual_demand.jld2",
+        fords="data/arrow/fords.arrow",
+    output:
+        sim="data/bbl_simulation/seed_{seed}.jld2",
+    log:
+        "logs/bbl_forward_simulation_seed_{seed}.log",
+    run:
+        julia(
+            "scripts/bbl_forward_simulation.jl",
+            input=input,
+            output=output,
+            wildcards=wildcards,
+            log=log,
         )
 
 
