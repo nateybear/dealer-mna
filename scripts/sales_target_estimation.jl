@@ -32,7 +32,7 @@ function (@main)(_)
         # forward one quarter to attach ι_{t−1} to each t.
         compliance_lag = select(compliance, [:dealer_uid, :t, :p_compliant])
         transform!(compliance_lag, :t => ByRow(x -> x + Quarter(1)) => :t)
-        rename!(compliance_lag, :p_compliant => :ι_lag)
+        transform!(compliance_lag, :p_compliant => ByRow(>(0.5)) => :ι_lag)
         panel = innerjoin(panel, compliance_lag, on = [:dealer_uid, :t])
 
         # Drop rows whose lagged (dealer, quarter) is missing from the state
