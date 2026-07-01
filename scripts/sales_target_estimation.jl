@@ -5,6 +5,7 @@ using LinearAlgebra
 using LogExpFunctions
 using StatsBase: mean, std, quantile
 using Random
+import DataFrames: rename!
 
 function (@main)(_)
     snakemake!()
