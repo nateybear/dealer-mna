@@ -121,6 +121,14 @@ using Distributed
 
     function fit_prices(j)
         @info "Fitting" j
+        # Products whose entire 6-quarter observation window has no lagged
+        # state coverage (typical: the earliest model year where only its
+        # final quarter falls inside the BLP window) never get added to
+        # j_to_tf_lookup by the log-φ filter. Skip cleanly.
+        if !haskey(j_to_tf_lookup(), j)
+            @warn "No training rows for $j after log-φ lag filter; skipping"
+            return nothing
+        end
         X, y = X_matrix(j), log_prices(j)
         mean_booster, mean_round = regress(X, y)
         y_hat = XGBoost.predict(mean_booster, X)
@@ -137,6 +145,12 @@ end
 function (@main)(_)
     js = collect(keys(model.product_lookup.j))
     fitted = pmap(fit_prices, js)
-    JLD2.save_object("data/price_densities.jld2", Dict(js .=> fitted))
+    out = Dict{VehicleKey, Tuple{Vector{UInt8}, Vector{UInt8}}}()
+    for (j, f) in zip(js, fitted)
+        f === nothing && continue
+        out[j] = f
+    end
+    @info "Fit price densities" n_kept = length(out) n_skipped = length(js) - length(out)
+    JLD2.save_object("data/price_densities.jld2", out)
     return nothing
 end
