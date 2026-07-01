@@ -105,17 +105,30 @@ using Distributed
             rng = rng,
         )
 
-        b_int, br_int = fit_scalar(X_common, y_int)
-        b_own, br_own = fit_scalar(X_common, y_own)
+        # For each of {intercept, own, cross} we fit a mean booster and a
+        # variance booster (squared-residual target). BBL draws the transition
+        # as Normal(mean, sqrt(clip(var, 0))). Same 2-step density pattern as
+        # price_density_estimation.
+        function fit_pair(X, y)
+            b_mean, br_mean = fit_scalar(X, y)
+            ŷ = XGBoost.predict(b_mean, X)
+            u = (y .- ŷ) .^ 2
+            b_var, br_var = fit_scalar(X, u)
+            return b_mean, br_mean, b_var, br_var
+        end
 
-        b_cross, br_cross = if n_cross >= 20
-            fit_scalar(X_cross, cross_y)
+        b_int_mean, br_int_mean, b_int_var, br_int_var = fit_pair(X_common, y_int)
+        b_own_mean, br_own_mean, b_own_var, br_own_var = fit_pair(X_common, y_own)
+
+        b_cross_mean, br_cross_mean, b_cross_var, br_cross_var = if n_cross >= 20
+            fit_pair(X_cross, cross_y)
         else
-            nothing, 0
+            nothing, 0, nothing, 0
         end
 
         # Held-out R² on a fresh 20% split (cheap diagnostic; not the OOS split
-        # that fit_xgb_oos uses internally).
+        # that fit_xgb_oos uses internally). Only on the mean boosters — the
+        # variance boosters don't have a natural R² baseline.
         function r2_diag(X, y, b)
             b === nothing && return NaN
             perm = randperm(rng, length(y))
@@ -126,20 +139,30 @@ using Distributed
             finalize(dm_val)
             return r2
         end
-        r2_int = r2_diag(X_common, y_int, b_int)
-        r2_own = r2_diag(X_common, y_own, b_own)
-        r2_cross = r2_diag(X_cross, cross_y, b_cross)
+        r2_int = r2_diag(X_common, y_int, b_int_mean)
+        r2_own = r2_diag(X_common, y_own, b_own_mean)
+        r2_cross = r2_diag(X_cross, cross_y, b_cross_mean)
 
-        @info "product fit" j_idx n n_cross br_int br_own br_cross r2_int r2_own r2_cross
+        @info "product fit" j_idx n n_cross br_int_mean br_int_var br_own_mean br_own_var br_cross_mean br_cross_var r2_int r2_own r2_cross
 
-        bytes_int = XGBoost.serialize(b_int)
-        bytes_own = XGBoost.serialize(b_own)
-        bytes_cross = b_cross === nothing ? UInt8[] : XGBoost.serialize(b_cross)
-        finalize(b_int)
-        finalize(b_own)
-        b_cross === nothing || finalize(b_cross)
+        bytes_int_mean = XGBoost.serialize(b_int_mean)
+        bytes_int_var = XGBoost.serialize(b_int_var)
+        bytes_own_mean = XGBoost.serialize(b_own_mean)
+        bytes_own_var = XGBoost.serialize(b_own_var)
+        bytes_cross_mean = b_cross_mean === nothing ? UInt8[] : XGBoost.serialize(b_cross_mean)
+        bytes_cross_var = b_cross_var === nothing ? UInt8[] : XGBoost.serialize(b_cross_var)
+        finalize(b_int_mean)
+        finalize(b_int_var)
+        finalize(b_own_mean)
+        finalize(b_own_var)
+        b_cross_mean === nothing || finalize(b_cross_mean)
+        b_cross_var === nothing || finalize(b_cross_var)
 
-        return (bytes_int, bytes_own, bytes_cross)
+        return (
+            bytes_int_mean, bytes_int_var,
+            bytes_own_mean, bytes_own_var,
+            bytes_cross_mean, bytes_cross_var,
+        )
     end
 end
 
@@ -152,7 +175,14 @@ function (@main)(_)
             return nothing
         end
     end
-    out = Dict{VehicleKey, Tuple{Vector{UInt8}, Vector{UInt8}, Vector{UInt8}}}()
+    out = Dict{
+        VehicleKey,
+        Tuple{
+            Vector{UInt8}, Vector{UInt8},  # intercept: mean, var
+            Vector{UInt8}, Vector{UInt8},  # own:        mean, var
+            Vector{UInt8}, Vector{UInt8},  # cross:      mean, var
+        },
+    }()
     for (j_idx, f) in enumerate(fitted)
         f === nothing && continue
         out[products[j_idx]] = f

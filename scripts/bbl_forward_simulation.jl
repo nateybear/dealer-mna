@@ -34,7 +34,7 @@ function (@main)(_)
         state_transition = JLD2.load_object(snakemake.input["state_transition"])
         compliance_arrow = read_arrow(snakemake.input["compliance"])
         state_matrix_obs = JLD2.load_object(snakemake.input["residual_demand"])
-        fords = read_arrow(snakemake.input["fords"])
+        price_table = read_arrow(snakemake.input["price_table"])
 
         # -----------------------------------------------------------------------------
         # Indices and lookups
@@ -46,17 +46,17 @@ function (@main)(_)
         prod_index = Dict(p => i for (i, p) in enumerate(products))
         ncols_state = size(state_matrix_obs, 2)
 
-        # VehicleKey ↔ compliance group (model, model_year, extra). extra ↔
-        # trim_rank is 1-to-1 within (make, model, model_year), so the map is
-        # unambiguous for the Ford subset.
+        # VehicleKey ↔ compliance group (model, model_year, extra). price_table
+        # is the canonical source of the extra ↔ trim_rank mapping — the
+        # demand model's VehicleKeys and the compliance groups both flow from
+        # it, so joining on trim_rank is exact.
         vk_to_group = Dict{VehicleKey, Tuple{String, Int64, String}}()
-        for row in eachrow(unique(fords, [:make, :model, :model_year, :trim_rank, :extra]))
+        group_to_vks = Dict{Tuple{String, Int64, String}, Vector{VehicleKey}}()
+        for row in eachrow(price_table)
             vk = (row.make, row.model, row.model_year, Float32(row.trim_rank))
             haskey(model.product_lookup.j, vk) || continue
-            vk_to_group[vk] = (row.model, row.model_year, row.extra)
-        end
-        group_to_vks = Dict{Tuple{String, Int64, String}, Vector{VehicleKey}}()
-        for (vk, group) in vk_to_group
+            group = (row.model, row.model_year, row.extra)
+            vk_to_group[vk] = group
             push!(get!(group_to_vks, group, VehicleKey[]), vk)
         end
         @info "VehicleKey ↔ compliance-group map" n_vks = length(vk_to_group) n_groups = length(group_to_vks)
@@ -83,18 +83,27 @@ function (@main)(_)
         end
         sales_booster = bootup(sales_bytes, ncols_state + 1)
         price_mean_boosters = Dict{VehicleKey, XGBoost.Booster}()
-        price_stddev_boosters = Dict{VehicleKey, XGBoost.Booster}()
-        for (vk, (mean_bytes, stddev_bytes)) in price_densities
+        price_var_boosters = Dict{VehicleKey, XGBoost.Booster}()
+        for (vk, (mean_bytes, var_bytes)) in price_densities
             price_mean_boosters[vk] = bootup(mean_bytes, ncols_state + 1)
-            price_stddev_boosters[vk] = bootup(stddev_bytes, ncols_state + 1)
+            price_var_boosters[vk] = bootup(var_bytes, ncols_state + 1)
         end
-        st_int_boosters = Dict{VehicleKey, XGBoost.Booster}()
-        st_own_boosters = Dict{VehicleKey, XGBoost.Booster}()
-        st_cross_boosters = Dict{VehicleKey, XGBoost.Booster}()
-        for (vk, (int_bytes, own_bytes, cross_bytes)) in state_transition
-            st_int_boosters[vk] = bootup(int_bytes, ncols_state)
-            st_own_boosters[vk] = bootup(own_bytes, ncols_state)
-            isempty(cross_bytes) || (st_cross_boosters[vk] = bootup(cross_bytes, ncols_state + 1))
+        st_int_mean_boosters = Dict{VehicleKey, XGBoost.Booster}()
+        st_int_var_boosters = Dict{VehicleKey, XGBoost.Booster}()
+        st_own_mean_boosters = Dict{VehicleKey, XGBoost.Booster}()
+        st_own_var_boosters = Dict{VehicleKey, XGBoost.Booster}()
+        st_cross_mean_boosters = Dict{VehicleKey, XGBoost.Booster}()
+        st_cross_var_boosters = Dict{VehicleKey, XGBoost.Booster}()
+        for (vk, tup) in state_transition
+            im_b, iv_b, om_b, ov_b, cm_b, cv_b = tup
+            st_int_mean_boosters[vk] = bootup(im_b, ncols_state)
+            st_int_var_boosters[vk] = bootup(iv_b, ncols_state)
+            st_own_mean_boosters[vk] = bootup(om_b, ncols_state)
+            st_own_var_boosters[vk] = bootup(ov_b, ncols_state)
+            if !isempty(cm_b)
+                st_cross_mean_boosters[vk] = bootup(cm_b, ncols_state + 1)
+                st_cross_var_boosters[vk] = bootup(cv_b, ncols_state + 1)
+            end
         end
 
         # -----------------------------------------------------------------------------
@@ -192,31 +201,28 @@ function (@main)(_)
                 finalize(dm_state)
                 assortment_by_dealer[f] = new_assortment
 
-                # Diff against OBSERVED assortment at (t, f) in cf. Each ModelAdd/
-                # ModelDelete tweak is keyed by (t, j, f) so periods don't
-                # interact.
-                obs_at_t = get(intermed, (t, f), VehicleKey[])
-                for vk in setdiff(obs_at_t, new_assortment)
-                    apply!(cf, Demand.ModelDelete(vehicle = vk, quarter = t, dealer_uid = f))
-                end
-                for vk in setdiff(new_assortment, obs_at_t)
-                    apply!(cf, Demand.ModelAdd(vehicle = vk, quarter = t, dealer_uid = f))
-                end
-
                 # Expected state s_t via transition boosters (dealer's belief).
+                # Derived from s_prev and new_assortment only — doesn't need cf
+                # to be mutated, so we compute it before applying tweaks. This
+                # matters because ModelAdd(price=p) below takes the drawn price
+                # directly and skips the hausman_fn lookup that would otherwise
+                # NaN out for (t, j, f) triples not in training data.
                 # Cross-elasticity predictions batched across partners per focal
                 # product — one DMatrix per (vk, all partners) instead of one
                 # per partner.
+                draw_normal(μ, var) = μ + sqrt(max(Float32(var), 0f0)) * Float32(randn(rng))
                 state_exp_mat = fill(NaN32, J, J + 1)
                 dm_prev_row = XGBoost.DMatrix(reshape(s_prev, 1, :))
                 for vk in new_assortment
-                    haskey(st_int_boosters, vk) || continue
+                    haskey(st_int_mean_boosters, vk) || continue
                     j_idx = prod_index[vk]
-                    state_exp_mat[j_idx, 1] =
-                        Float32(only(XGBoost.predict(st_int_boosters[vk], dm_prev_row)))
-                    state_exp_mat[j_idx, j_idx + 1] =
-                        Float32(only(XGBoost.predict(st_own_boosters[vk], dm_prev_row)))
-                    haskey(st_cross_boosters, vk) || continue
+                    μ_int = Float32(only(XGBoost.predict(st_int_mean_boosters[vk], dm_prev_row)))
+                    v_int = Float32(only(XGBoost.predict(st_int_var_boosters[vk], dm_prev_row)))
+                    state_exp_mat[j_idx, 1] = draw_normal(μ_int, v_int)
+                    μ_own = Float32(only(XGBoost.predict(st_own_mean_boosters[vk], dm_prev_row)))
+                    v_own = Float32(only(XGBoost.predict(st_own_var_boosters[vk], dm_prev_row)))
+                    state_exp_mat[j_idx, j_idx + 1] = draw_normal(μ_own, v_own)
+                    haskey(st_cross_mean_boosters, vk) || continue
                     partners = Int[prod_index[vk2] for vk2 in new_assortment if vk2 != vk]
                     isempty(partners) && continue
                     X_cross = Matrix{Float32}(undef, length(partners), ncols_state + 1)
@@ -225,9 +231,10 @@ function (@main)(_)
                         X_cross[i, end] = Float32(partners[i])
                     end
                     dm_cross = XGBoost.DMatrix(X_cross)
-                    cross_preds = XGBoost.predict(st_cross_boosters[vk], dm_cross)
+                    cross_μ = XGBoost.predict(st_cross_mean_boosters[vk], dm_cross)
+                    cross_v = XGBoost.predict(st_cross_var_boosters[vk], dm_cross)
                     for (i, k_idx) in enumerate(partners)
-                        state_exp_mat[j_idx, k_idx + 1] = Float32(cross_preds[i])
+                        state_exp_mat[j_idx, k_idx + 1] = draw_normal(cross_μ[i], cross_v[i])
                     end
                     finalize(dm_cross)
                 end
@@ -245,19 +252,44 @@ function (@main)(_)
                         continue
                     end
                     log_p_mean = only(XGBoost.predict(price_mean_boosters[vk], dm_price))
-                    log_p_stddev = only(XGBoost.predict(price_stddev_boosters[vk], dm_price))
-                    log_p = log_p_mean + Float32(log_p_stddev * randn(rng))
-                    p = Float32(exp(log_p))
-                    drawn_prices[i] = p
-                    apply!(
-                        cf,
-                        Demand.PriceChange(
-                            vehicle = vk, quarter = t, dealer_uid = f, price = p,
-                        ),
-                    )
+                    log_p_var = only(XGBoost.predict(price_var_boosters[vk], dm_price))
+                    log_p_stddev = sqrt(max(Float32(log_p_var), 0f0))
+                    log_p = log_p_mean + log_p_stddev * Float32(randn(rng))
+                    drawn_prices[i] = Float32(exp(log_p))
                 end
                 finalize(dm_price)
                 prices_by_dealer[f] = drawn_prices
+
+                # Apply diffs against OBSERVED assortment at (t, f). ModelAdd
+                # takes the drawn price directly (bypassing hausman_fn), which
+                # matters because (t, j, f) triples that ModelAdd creates
+                # aren't in training so the default hausman lookup would NaN
+                # out. Products present in obs get PriceChange; new products
+                # get ModelAdd(price=p); removed products get ModelDelete.
+                obs_at_t = get(intermed, (t, f), VehicleKey[])
+                obs_set = Set(obs_at_t)
+                for vk in setdiff(obs_at_t, new_assortment)
+                    apply!(cf, Demand.ModelDelete(vehicle = vk, quarter = t, dealer_uid = f))
+                end
+                for (i, vk) in enumerate(new_assortment)
+                    isnan(drawn_prices[i]) && continue
+                    p = drawn_prices[i]
+                    if vk in obs_set
+                        apply!(
+                            cf,
+                            Demand.PriceChange(
+                                vehicle = vk, quarter = t, dealer_uid = f, price = p,
+                            ),
+                        )
+                    else
+                        apply!(
+                            cf,
+                            Demand.ModelAdd(
+                                vehicle = vk, quarter = t, dealer_uid = f, price = p,
+                            ),
+                        )
+                    end
+                end
             end
 
             # Phase 2: q_t, ι_t, actual state

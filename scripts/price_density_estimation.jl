@@ -26,12 +26,14 @@ using Distributed
         state_lookup = Dict(k => i for (i, k) in enumerate(keys(Supply.tf_to_j_lookup(model))))
         tlag_of(t) = t[2] == 1 ? (t[1] - 1, 4) : (t[1], t[2] - 1)
 
+        # Sales-target booster was trained with ι_lag as a hard 1{p_compliant > 0.5}
+        # indicator — use the same threshold here so the input matches training.
         compliance = read_arrow("data/compliance.arrow")
         ι_lag = Dict{Tuple{QuarterKey, UUID}, Float32}()
         for r in eachrow(compliance)
             t_next = r.t + Quarter(1)
             key = ((Dates.year(t_next), Dates.quarterofyear(t_next)), r.dealer_uid)
-            ι_lag[key] = Float32(r.p_compliant)
+            ι_lag[key] = Float32(r.p_compliant > 0.5)
         end
 
         eligible = Tuple{Tuple{QuarterKey, UUID}, Int, Int}[]  # (tf, i_tlag, ι_lag_idx placeholder)
@@ -122,10 +124,13 @@ using Distributed
         X, y = X_matrix(j), log_prices(j)
         mean_booster, mean_round = regress(X, y)
         y_hat = XGBoost.predict(mean_booster, X)
-        u = abs.(y .- y_hat)
-        stddev_booster, stddev_round = regress(X, u)
-        @info "  best rounds" j mean_round stddev_round
-        return XGBoost.serialize(mean_booster), XGBoost.serialize(stddev_booster)
+        # Squared residuals → variance estimate. Draw time takes sqrt of the
+        # (clipped-nonneg) prediction to recover σ. More principled than the
+        # abs-residual proxy: E[(y − ŷ)²|X] = Var(y|X) under an unbiased ŷ.
+        u = (y .- y_hat) .^ 2
+        variance_booster, variance_round = regress(X, u)
+        @info "  best rounds" j mean_round variance_round
+        return XGBoost.serialize(mean_booster), XGBoost.serialize(variance_booster)
     end
 end
 
