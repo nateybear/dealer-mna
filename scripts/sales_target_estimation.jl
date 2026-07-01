@@ -24,7 +24,7 @@ function (@main)(_)
         select!(dq, :dealer_uid, :t, :total_units => :q)
 
         panel = innerjoin(compliance, dq, on = [:dealer_uid, :t])
-        panel.ι = Float32.(panel.p_compliant .> 0.5)
+        panel.ι = Float32.(panel.p_compliant)
 
         # Every (dealer, t) in the panel must have a state-matrix entry; error if not.
         unmapped = [
