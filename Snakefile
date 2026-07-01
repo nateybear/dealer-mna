@@ -1095,7 +1095,7 @@ rule data_bbl_simulation:
         state_transition="data/state_transition.jld2",
         compliance="data/compliance.arrow",
         residual_demand="data/residual_demand.jld2",
-        fords="data/arrow/fords.arrow",
+        price_table="data/price_table.arrow",
     output:
         sim="data/bbl_simulation/seed_{seed}.jld2",
     log:
@@ -1108,6 +1108,10 @@ rule data_bbl_simulation:
             wildcards=wildcards,
             log=log,
         )
+
+rule data_bbl_simulations:
+    input:
+        expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 101))
 
 
 rule data_sales_target_estimation:
