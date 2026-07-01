@@ -38,9 +38,15 @@ function (@main)(_)
 
         # Drop rows whose lagged (dealer, quarter) is missing from the state
         # lookup — natural burn-in at each dealer's first quarter of activity.
-        subset!(panel, [:t, :dealer_uid] => ByRow((t, f) -> haskey(
-            state_lookup, ((Dates.year(t - Quarter(1)), Dates.quarterofyear(t - Quarter(1))), f)
-        )))
+        subset!(
+            panel,
+            [:t, :dealer_uid] => ByRow(
+                (t, f) -> haskey(
+                    state_lookup,
+                    ((Dates.year(t - Quarter(1)), Dates.quarterofyear(t - Quarter(1))), f)
+                ),
+            ),
+        )
 
         n = nrow(panel)
         ncols_state = size(state_matrix, 2)
@@ -112,7 +118,7 @@ function (@main)(_)
         # trades off bias vs variance. Pick τ by OOS val NLL on a geometric
         # grid bracketing std(q) ≈ 157. Failures (best_round == 0, etc.)
         # are caught so a single τ blowing up doesn't kill the search.
-        τ_grid = Float32.(50:10:1000)
+        τ_grid = Float32.(50:5:75)
         @info "Sales-target setup" mean_q = mean(q) std_q = std(q) mean_p_compliant = mean(
             ι
         ) τ_grid
