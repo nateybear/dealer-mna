@@ -24,7 +24,7 @@ function (@main)(_)
         select!(dq, :dealer_uid, :t, :total_units => :q)
 
         panel = innerjoin(compliance, dq, on = [:dealer_uid, :t])
-        panel.ι = Float32.(panel.p_compliant)
+        panel.ι = Float32.(panel.p_compliant .> 0.5)
 
         # Every (dealer, t) in the panel must have a state-matrix entry; error if not.
         unmapped = [
@@ -108,7 +108,7 @@ function (@main)(_)
         # trades off bias vs variance. Pick τ by OOS val NLL on a geometric
         # grid bracketing std(q) ≈ 157. Failures (best_round == 0, etc.)
         # are caught so a single τ blowing up doesn't kill the search.
-        τ_grid = Float32.([50])
+        τ_grid = Float32.([50:5:80])
         @info "Sales-target setup" mean_q = mean(q) std_q = std(q) mean_p_compliant = mean(
             ι
         ) τ_grid
