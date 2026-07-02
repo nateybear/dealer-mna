@@ -169,7 +169,7 @@ function (@main)(_)
                             end
                             p_tr =
                                 logistic.(XGBoost.predict(booster_p, dm_tr; margin = true))
-                            saved_p_bytes = copy(XGBoost.serialize(booster_p))
+                            saved_p_bytes = XGBoost.save(booster_p, Vector{UInt8}; format = "ubj")
                             finalize(booster_p)
 
                             isempty(complier_local) && break
@@ -195,7 +195,7 @@ function (@main)(_)
                             end
                             ρ̃_tr[complier_local] .=
                                 logistic.(XGBoost.predict(booster_r, dm_tr_c; margin = true))
-                            saved_r_bytes = copy(XGBoost.serialize(booster_r))
+                            saved_r_bytes = XGBoost.save(booster_r, Vector{UInt8}; format = "ubj")
                             finalize(booster_r)
                             finalize(dm_tr_c)
 
@@ -243,7 +243,7 @@ function (@main)(_)
 
             cars.p_base = map(eachrow(cars)) do (; model, model_year, extra)
                 pbase_bytes = M_step[(model, model_year, extra)][1][k]
-                XGBoost.deserialize!(booster, pbase_bytes)
+                XGBoost.load!(booster, pbase_bytes)
                 f_raw = only(XGBoost.predict(booster, dm; margin = true))
                 clamp(logistic(f_raw), 1e-12, 1 - 1e-12)
             end
@@ -253,7 +253,7 @@ function (@main)(_)
                 # Empty bytes ⇒ this fold had no compliers in training; fall
                 # back to ρ̃ ≈ 0 so the complier branch collapses to noncomplier.
                 isempty(rho_bytes) && return 1e-12
-                XGBoost.deserialize!(booster, rho_bytes)
+                XGBoost.load!(booster, rho_bytes)
                 g_raw = only(XGBoost.predict(booster, dm; margin = true))
                 clamp(logistic(g_raw), 1e-12, 1 - 1e-12)
             end
@@ -358,7 +358,7 @@ function (@main)(_)
                                 max_round = 50,
                                 patience = 5,
                             )
-                            pbase_bytes = copy(XGBoost.serialize(booster_p))
+                            pbase_bytes = XGBoost.save(booster_p, Vector{UInt8}; format = "ubj")
                             best_round_p = br_p
 
                             dm_full = XGBoost.DMatrix(X)
@@ -409,7 +409,7 @@ function (@main)(_)
                                 logistic.(
                                     XGBoost.predict(booster_r, dm_c; margin = true)
                                 )
-                            rho_bytes = copy(XGBoost.serialize(booster_r))
+                            rho_bytes = XGBoost.save(booster_r, Vector{UInt8}; format = "ubj")
                             best_round_r = br_r
                             finalize(booster_r)
                             finalize(dm_c)

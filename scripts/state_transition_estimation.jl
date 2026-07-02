@@ -145,12 +145,13 @@ using Distributed
 
         @info "product fit" j_idx n n_cross br_int_mean br_int_var br_own_mean br_own_var br_cross_mean br_cross_var r2_int r2_own r2_cross
 
-        bytes_int_mean = XGBoost.serialize(b_int_mean)
-        bytes_int_var = XGBoost.serialize(b_int_var)
-        bytes_own_mean = XGBoost.serialize(b_own_mean)
-        bytes_own_var = XGBoost.serialize(b_own_var)
-        bytes_cross_mean = b_cross_mean === nothing ? UInt8[] : XGBoost.serialize(b_cross_mean)
-        bytes_cross_var = b_cross_var === nothing ? UInt8[] : XGBoost.serialize(b_cross_var)
+        save_ubj(b) = XGBoost.save(b, Vector{UInt8}; format = "ubj")
+        bytes_int_mean = save_ubj(b_int_mean)
+        bytes_int_var = save_ubj(b_int_var)
+        bytes_own_mean = save_ubj(b_own_mean)
+        bytes_own_var = save_ubj(b_own_var)
+        bytes_cross_mean = b_cross_mean === nothing ? UInt8[] : save_ubj(b_cross_mean)
+        bytes_cross_var = b_cross_var === nothing ? UInt8[] : save_ubj(b_cross_var)
         finalize(b_int_mean)
         finalize(b_int_var)
         finalize(b_own_mean)

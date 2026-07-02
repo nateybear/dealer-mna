@@ -166,7 +166,8 @@ function (@main)(_)
         # Save (booster_bytes, τ): the booster's raw output is f = log φ, so
         # consumers recover φ̂ = exp(f̂) and then P(ι=1) = σ((q − φ̂)/τ).
         JLD2.save_object(
-            snakemake.output["sales_targets"], (XGBoost.serialize(booster), τ)
+            snakemake.output["sales_targets"],
+            (XGBoost.save(booster, Vector{UInt8}; format = "ubj"), τ),
         )
     end
     return nothing

@@ -54,7 +54,7 @@ using Distributed
             X[r, end] = ι_lag[tf]
         end
         b = XGBoost.Booster(XGBoost.DMatrix(zeros(Float32, 1, ncols_state + 1)))
-        XGBoost.deserialize!(b, _sales_bytes)
+        XGBoost.load!(b, _sales_bytes)
         dm = XGBoost.DMatrix(X)
         logphi = XGBoost.predict(b, dm; margin = true)
         finalize(dm)
@@ -138,7 +138,8 @@ using Distributed
         u = (y .- y_hat) .^ 2
         variance_booster, variance_round = regress(X, u)
         @info "  best rounds" j mean_round variance_round
-        return XGBoost.serialize(mean_booster), XGBoost.serialize(variance_booster)
+        return XGBoost.save(mean_booster, Vector{UInt8}; format = "ubj"),
+        XGBoost.save(variance_booster, Vector{UInt8}; format = "ubj")
     end
 end
 

@@ -68,7 +68,7 @@ function (@main)(_)
         function bootup(bytes, ncols)
             dummy = XGBoost.DMatrix(zeros(Float32, 1, ncols))
             b = XGBoost.Booster(dummy)
-            XGBoost.deserialize!(b, bytes)
+            XGBoost.load!(b, bytes)
             finalize(dummy)
             return b
         end
