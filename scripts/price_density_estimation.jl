@@ -138,8 +138,10 @@ using Distributed
         u = (y .- y_hat) .^ 2
         variance_booster, variance_round = regress(X, u)
         @info "  best rounds" j mean_round variance_round
-        return XGBoost.save(mean_booster, Vector{UInt8}; format = "ubj"),
-        XGBoost.save(variance_booster, Vector{UInt8}; format = "ubj")
+        # `XGBoost.save` returns an unsafe_wrap over libxgboost-owned memory;
+        # copy so the bytes survive booster GC once fit_prices returns.
+        return copy(XGBoost.save(mean_booster, Vector{UInt8}; format = "ubj")),
+        copy(XGBoost.save(variance_booster, Vector{UInt8}; format = "ubj"))
     end
 end
 

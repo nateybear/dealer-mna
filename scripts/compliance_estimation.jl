@@ -169,7 +169,7 @@ function (@main)(_)
                             end
                             p_tr =
                                 logistic.(XGBoost.predict(booster_p, dm_tr; margin = true))
-                            saved_p_bytes = XGBoost.save(booster_p, Vector{UInt8}; format = "ubj")
+                            saved_p_bytes = copy(XGBoost.save(booster_p, Vector{UInt8}; format = "ubj"))
                             finalize(booster_p)
 
                             isempty(complier_local) && break
@@ -195,7 +195,7 @@ function (@main)(_)
                             end
                             ρ̃_tr[complier_local] .=
                                 logistic.(XGBoost.predict(booster_r, dm_tr_c; margin = true))
-                            saved_r_bytes = XGBoost.save(booster_r, Vector{UInt8}; format = "ubj")
+                            saved_r_bytes = copy(XGBoost.save(booster_r, Vector{UInt8}; format = "ubj"))
                             finalize(booster_r)
                             finalize(dm_tr_c)
 
@@ -358,7 +358,7 @@ function (@main)(_)
                                 max_round = 50,
                                 patience = 5,
                             )
-                            pbase_bytes = XGBoost.save(booster_p, Vector{UInt8}; format = "ubj")
+                            pbase_bytes = copy(XGBoost.save(booster_p, Vector{UInt8}; format = "ubj"))
                             best_round_p = br_p
 
                             dm_full = XGBoost.DMatrix(X)
@@ -409,7 +409,7 @@ function (@main)(_)
                                 logistic.(
                                     XGBoost.predict(booster_r, dm_c; margin = true)
                                 )
-                            rho_bytes = XGBoost.save(booster_r, Vector{UInt8}; format = "ubj")
+                            rho_bytes = copy(XGBoost.save(booster_r, Vector{UInt8}; format = "ubj"))
                             best_round_r = br_r
                             finalize(booster_r)
                             finalize(dm_c)
