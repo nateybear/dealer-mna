@@ -145,7 +145,9 @@ using Distributed
 
         @info "product fit" j_idx n n_cross br_int_mean br_int_var br_own_mean br_own_var br_cross_mean br_cross_var r2_int r2_own r2_cross
 
-        save_ubj(b) = XGBoost.save(b, Vector{UInt8}; format = "ubj")
+        # `XGBoost.save` returns an unsafe_wrap over libxgboost-owned memory;
+        # copy immediately so the bytes survive booster finalization / GC.
+        save_ubj(b) = copy(XGBoost.save(b, Vector{UInt8}; format = "ubj"))
         bytes_int_mean = save_ubj(b_int_mean)
         bytes_int_var = save_ubj(b_int_var)
         bytes_own_mean = save_ubj(b_own_mean)
