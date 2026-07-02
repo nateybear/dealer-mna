@@ -712,7 +712,7 @@ end
     price::Union{Float32, Nothing} = nothing
 end
 
-struct ModelDelete <: AbstractTweak
+@kwdef struct ModelDelete <: AbstractTweak
     vehicle::VehicleKey
     quarter::QuarterKey
     dealer_uid::UUID
