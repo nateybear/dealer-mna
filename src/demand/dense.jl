@@ -735,7 +735,6 @@ end
 function pred_regout(model, df)
     out = modelmatrix(model.formula_schema, df) * model.coef
     for (i, (; year, quarter, vehicleid, dealer_uid)) in enumerate(eachrow(df))
-        @info "Debugging" @macroexpand @getfe model year
         out[i] += @getfe model year
         out[i] += @getfe model quarter
         out[i] += @getfe model vehicleid
