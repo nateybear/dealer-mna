@@ -722,10 +722,12 @@ macro getfe(model, what)
     what_sym = string(what)
     what_fe_sym = "fe_" * string(what)
     quote
-        pluck(
+        subset(
             unique($(esc(model)).fe, [$what_sym, $what_fe_sym]),
             $what_sym => ByRow(==($(esc(what)))),
-        )[$what_fe_sym]
+        )[
+            1, $what_fe_sym
+        ]
     end
 end
 
