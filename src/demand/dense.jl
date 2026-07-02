@@ -10,7 +10,7 @@ export DemandWork, Counterfactual,
     woodbury_newton_step!, eval_envelope_hessian!, definiteness_shift!,
     param_indices, build_nonδ_labels,
     AbstractTweak, PriceMultiply, PriceChange, ModelAdd, ModelDelete,
-    apply!, undo!, refresh!,
+    apply!, undo!, refresh!, sweep_δ!,
     share_matrix, expected_demand, foc_residual, dealer_block_locals
 
 using FixedEffectModels
@@ -893,10 +893,12 @@ function apply!(
     @inbounds for (i, (bi, k_local)) in enumerate(dense_indices)
         old_p = model.X_blocks[bi][K + 1, k_local]
         old_prices[i] = old_p
-        model.X_blocks[bi][K + 1, k_local] = old_p * by
+        new_p = old_p * by
+        model.X_blocks[bi][K + 1, k_local] = new_p
         offset = β_price * old_p * (by - 1.0f0)
         δ_offsets[i] = offset
         δ[δ_idxs[i]] += offset
+        model.product_info[δ_idxs[i]] = merge(model.product_info[δ_idxs[i]], (; p = new_p))
     end
     return (;
         kind = :price_multiply,
@@ -935,6 +937,7 @@ function apply!(
         offset = β_price * (new_p - old_p)
         δ_offsets[i] = offset
         δ[δ_idxs[i]] += offset
+        model.product_info[δ_idxs[i]] = merge(model.product_info[δ_idxs[i]], (; p = new_p))
     end
     return (;
         kind = :price_change,
@@ -976,6 +979,7 @@ function apply!(
     dist_col = model.dist_blocks[bi][k_local, :] |> copy
     counts_col_pairs = _extract_sparse_row(model.counts_blocks[bi], k_local)
     δ_value = δ[δ_idx]
+    product_info_row = model.product_info[δ_idx_raw]
 
     keep_cols = [c for c in 1:N_bi if c != k_local]
     model.X_blocks[bi] = model.X_blocks[bi][:, keep_cols]
@@ -1002,6 +1006,7 @@ function apply!(
     deleteat!(model.product_lookup.j[tweak.vehicle], j_pos)
     deleteat!(model.product_lookup.f[tweak.dealer_uid], f_pos)
     deleteat!(model.product_lookup.make[make_key], make_pos)
+    delete!(model.product_info, δ_idx_raw)
 
     _resize_block_buffers!(work, model, bi, N_bi - 1)
     return (;
@@ -1015,6 +1020,7 @@ function apply!(
         counts_col_pairs,
         tjf_key,
         t_pos, j_pos, f_pos, make_pos,
+        product_info_row,
     )
 end
 
@@ -1129,8 +1135,20 @@ function apply!(
     model.dist_blocks[bi] = vcat(model.dist_blocks[bi], reshape(new_dist_row, 1, Z))
     model.counts_blocks[bi] = _append_empty_sparse_row(model.counts_blocks[bi])
 
+    new_info = (;
+        is_coupe,
+        is_suv,
+        is_pickup,
+        is_sedan,
+        p = p_hat,
+        p_hausman = p_hat,
+        n = Int16(0),
+        g = UUID(UInt128(0)),
+    )
+
     push!(δ, δ_hat)
     new_δ_idx = Int32(length(δ))
+    model.product_info[new_δ_idx] = new_info
     push!(model.block_param_idxs[bi], new_δ_idx)
     k_new_local = Int32(N_bi + 1)
     model.tjf_to_block_k[new_δ_idx] = (Int32(bi), k_new_local)
@@ -1174,6 +1192,8 @@ function undo!(handle::NamedTuple, model::DemandModel, δ::AbstractVector{Float3
     @inbounds for (i, (bi, k_local)) in enumerate(handle.dense_indices)
         model.X_blocks[bi][K + 1, k_local] = handle.old_prices[i]
         δ[handle.δ_indices[i]] -= handle.δ_offsets[i]
+        model.product_info[handle.δ_indices[i]] =
+            merge(model.product_info[handle.δ_indices[i]], (; p = handle.old_prices[i]))
     end
     return nothing
 end
@@ -1214,6 +1234,7 @@ function undo!(
         insert!(model.product_lookup.j[tvehicle], handle.j_pos, handle.δ_idx)
         insert!(model.product_lookup.f[tdealer], handle.f_pos, handle.δ_idx)
         insert!(model.product_lookup.make[make_key], handle.make_pos, handle.δ_idx)
+        model.product_info[handle.δ_idx] = handle.product_info_row
         _resize_block_buffers!(work, model, bi, N_bi_now + 1)
         return nothing
     elseif handle.kind == :model_add
@@ -1230,6 +1251,7 @@ function undo!(
         Int(handle.δ_idx) == length(δ) ||
             error("undo!(:model_add): δ has been modified since apply")
         pop!(δ)
+        delete!(model.product_info, handle.δ_idx)
         # Reverse product_lookup pushes
         tquarter, tvehicle, tdealer = handle.tjf_key
         make_key = first(tvehicle)
@@ -1484,6 +1506,63 @@ function apply!(cf::Counterfactual, tweak::ModelAdd)
     )
     ismissing(h) || _mark_dirty!(cf, h)
     return h
+end
+
+"""
+sweep_δ!(cf::Counterfactual, t::QuarterKey) → cf
+
+Recompute δ for every live product in quarter `t` using the current post-tweak state:
+price is read from `X_blocks[bi][K+1, k_local]`, Hausman instrument from
+`product_info[idx].p_hausman`, and `J` is the *current* `length(block_param_idxs[bi])`
+(reflects any ModelAdd/Delete). Overwrites `cf.δ[idx]` for each product; marks the
+block dirty so the next accessor triggers a fresh forward pass.
+
+Destructive: undo handles from earlier `PriceChange` / `PriceMultiply` calls in the
+same quarter will not correctly restore δ after this runs — the δ they were
+offsetting has been replaced.
+"""
+function sweep_δ!(cf::Counterfactual, t::QuarterKey)
+    model = cf.model
+    bi = _block_index_for_quarter(model, t)
+    K = model.K
+    year_val, quarter_val = t
+    J_t = length(model.block_param_idxs[bi])
+
+    δ_idxs = Int32[]
+    prices = Float64[]
+    p_hausmans = Float64[]
+    vehicleids = String[]
+    dealer_uids = UUID[]
+    for (tjf_key, idx) in pairs(model.product_lookup.tjf)
+        tjf_key[1] == t || continue
+        haskey(model.tjf_to_block_k, idx) || continue
+        _, vehicle, dealer_uid = tjf_key
+        _, k_local = model.tjf_to_block_k[idx]
+        _, model_str, model_year, trim_rank = vehicle
+        push!(δ_idxs, idx)
+        push!(prices, Float64(model.X_blocks[bi][K + 1, Int(k_local)]))
+        push!(p_hausmans, Float64(model.product_info[idx].p_hausman))
+        push!(vehicleids, string(model_str, "_", model_year, "_", trim_rank))
+        push!(dealer_uids, dealer_uid)
+    end
+    isempty(δ_idxs) && return cf
+
+    n = length(δ_idxs)
+    df = DataFrame(;
+        price = prices,
+        price_hausman = p_hausmans,
+        J = fill(J_t, n),
+        vehicleid = vehicleids,
+        dealer_uid = dealer_uids,
+        year = fill(year_val, n),
+        quarter = fill(quarter_val, n),
+    )
+    δ_hats = pred_regout(cf.regout, df)
+    @inbounds for i in 1:n
+        cf.δ[δ_idxs[i]] = Float32(δ_hats[i])
+    end
+    cf.dirty_blocks[bi] = true
+    return cf
 end
 
 function undo!(cf::Counterfactual, handle::NamedTuple)

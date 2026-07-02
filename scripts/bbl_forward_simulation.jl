@@ -59,7 +59,9 @@ function (@main)(_)
             vk_to_group[vk] = group
             push!(get!(group_to_vks, group, VehicleKey[]), vk)
         end
-        @info "VehicleKey ↔ compliance-group map" n_vks = length(vk_to_group) n_groups = length(group_to_vks)
+        @info "VehicleKey ↔ compliance-group map" n_vks = length(vk_to_group) n_groups = length(
+            group_to_vks
+        )
 
         # -----------------------------------------------------------------------------
         # Deserialize boosters up front. Each Booster is stateful — allocate one
@@ -179,19 +181,34 @@ function (@main)(_)
                 dm_state = XGBoost.DMatrix(reshape(s_prev, 1, :))
                 new_assortment = VehicleKey[]
                 for (group, pb_boost) in pbase_boosters
+                    isrelevant_model = let y = group[2]
+                        if t[1] == y
+                            true
+                        elseif t[1] == y - 1
+                            t[2] == 4
+                        elseif t[1] == y + 1
+                            t[2] == 1
+                        else
+                            false
+                        end
+                    end
+                    isrelevant_model || continue
                     p_base = clamp(
                         logistic(only(XGBoost.predict(pb_boost, dm_state; margin = true))),
                         1e-8, 1 - 1e-8,
                     )
                     p_sale = if iota_prev[f] && haskey(rho_boosters, group)
                         ρ̃ = clamp(
-                            logistic(only(XGBoost.predict(rho_boosters[group], dm_state; margin = true))),
+                            logistic(
+                                only(XGBoost.predict(rho_boosters[group], dm_state; margin = true))
+                            ),
                             1e-8, 1 - 1e-8,
                         )
                         p_base + (1 - p_base) * ρ̃
                     else
                         p_base
                     end
+                    @show group p_sale
                     if rand(rng) < p_sale
                         for vk in get(group_to_vks, group, VehicleKey[])
                             push!(new_assortment, vk)
@@ -210,11 +227,12 @@ function (@main)(_)
                 # Cross-elasticity predictions batched across partners per focal
                 # product — one DMatrix per (vk, all partners) instead of one
                 # per partner.
-                draw_normal(μ, var) = μ + sqrt(max(Float32(var), 0f0)) * Float32(randn(rng))
+                draw_normal(μ, var) = μ + sqrt(max(Float32(var), 0.0f0)) * Float32(randn(rng))
                 state_exp_mat = fill(NaN32, J, J + 1)
                 dm_prev_row = XGBoost.DMatrix(reshape(s_prev, 1, :))
                 for vk in new_assortment
-                    haskey(st_int_mean_boosters, vk) || continue
+                    haskey(st_int_mean_boosters, vk) ||
+                        error("We don't have a state booster for $vk")
                     j_idx = prod_index[vk]
                     μ_int = Float32(only(XGBoost.predict(st_int_mean_boosters[vk], dm_prev_row)))
                     v_int = Float32(only(XGBoost.predict(st_int_var_boosters[vk], dm_prev_row)))
@@ -222,7 +240,7 @@ function (@main)(_)
                     μ_own = Float32(only(XGBoost.predict(st_own_mean_boosters[vk], dm_prev_row)))
                     v_own = Float32(only(XGBoost.predict(st_own_var_boosters[vk], dm_prev_row)))
                     state_exp_mat[j_idx, j_idx + 1] = draw_normal(μ_own, v_own)
-                    haskey(st_cross_mean_boosters, vk) || continue
+                    @assert haskey(st_cross_mean_boosters, vk)
                     partners = Int[prod_index[vk2] for vk2 in new_assortment if vk2 != vk]
                     isempty(partners) && continue
                     X_cross = Matrix{Float32}(undef, length(partners), ncols_state + 1)
@@ -247,13 +265,10 @@ function (@main)(_)
                 dm_price = XGBoost.DMatrix(reshape(x_price_common, 1, :))
                 drawn_prices = Vector{Float32}(undef, length(new_assortment))
                 for (i, vk) in enumerate(new_assortment)
-                    if !haskey(price_mean_boosters, vk)
-                        drawn_prices[i] = NaN32
-                        continue
-                    end
+                    @assert haskey(price_mean_boosters, vk) "We need a price booster for $vk"
                     log_p_mean = only(XGBoost.predict(price_mean_boosters[vk], dm_price))
                     log_p_var = only(XGBoost.predict(price_var_boosters[vk], dm_price))
-                    log_p_stddev = sqrt(max(Float32(log_p_var), 0f0))
+                    log_p_stddev = sqrt(max(Float32(log_p_var), 0.0f0))
                     log_p = log_p_mean + log_p_stddev * Float32(randn(rng))
                     drawn_prices[i] = Float32(exp(log_p))
                 end
@@ -278,19 +293,21 @@ function (@main)(_)
                         apply!(
                             cf,
                             Demand.PriceChange(
-                                vehicle = vk, quarter = t, dealer_uid = f, price = p,
+                                vehicle = vk, quarter = t, dealer_uid = f, price = p
                             ),
                         )
                     else
                         apply!(
                             cf,
                             Demand.ModelAdd(
-                                vehicle = vk, quarter = t, dealer_uid = f, price = p,
+                                vehicle = vk, quarter = t, dealer_uid = f, price = p
                             ),
                         )
                     end
                 end
             end
+
+            Demand.sweep_δ!(cf, t)
 
             # Phase 2: q_t, ι_t, actual state
             for f in dealers
@@ -300,8 +317,9 @@ function (@main)(_)
                 p_iota = logistic((q_tot - φ_f) / τ_sales)
                 new_iota = rand(rng) < p_iota
 
-                s_actual, pert_prices, pert_demands =
-                    Supply.residual_demand(cf, f, t; return_draws = true)
+                s_actual, pert_prices, pert_demands = Supply.residual_demand(
+                    cf, f, t; return_draws = true
+                )
 
                 assort = assortment_by_dealer[f]
 

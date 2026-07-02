@@ -263,10 +263,11 @@ function load_model_frames()
     end
 
     @info "Building flat product_info (N=$N)"
-    product_info = Vector{ProductInfo}(undef, N)
+    product_info = Dict{Int32, ProductInfo}()
+    sizehint!(product_info, N)
     for (i, row) in enumerate(eachrow(firm_product_data))
         body = get(body_classes, row.j[1:3], nothing)
-        product_info[i] = (;
+        product_info[Int32(i)] = (;
             is_coupe = body == "Coupe",
             is_suv = body == "SUV/Crossover",
             is_pickup = body == "Pickup",

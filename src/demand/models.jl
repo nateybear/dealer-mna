@@ -8,7 +8,7 @@ struct DemandModel
 
     # Raw load-time data
     distances::NamedMatrix{Float32}                   # zips × dealers (standardized)
-    product_info::Vector{ProductInfo}                 # length N, flat (t,j,f) order
+    product_info::Dict{Int32, ProductInfo}            # δ_idx → info (stable keys across tweaks)
     product_lookup::ProductLookup
     agent_data::Dict{String, AgentInfo}
     zips::Vector{String}                              # column order for D_dense/dist_blocks/counts_blocks
