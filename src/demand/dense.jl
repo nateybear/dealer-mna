@@ -718,6 +718,26 @@ end
     dealer_uid::UUID
 end
 
+macro getfe(model, what)
+    what_sym = string(what)
+    what_fe_sym = "fe_" * string(what)
+    quote
+        pluck(unique($(model).fe, [$what_sym, $what_fe_sym]), $what_sym => ByRow(==($what)))[$what_fe_sym]
+    end
+end
+
+# FixedEffectModels doesn't handle OOS predictions, even though they're possible
+function pred_regout(model, df)
+    out = modelmatrix(model.formula_schema, df) * model.coef
+    for (i, (; year, quarter, vehicleid, dealer_uid)) in enumerate(eachrow(df))
+        out[i] += @getfe model year
+        out[i] += @getfe model quarter
+        out[i] += @getfe model vehicleid
+        out[i] += @getfe model dealer_uid
+    end
+    return out
+end
+
 # Helper: look up flat δ indices matching a tweak's filters. Filters out products that
 # have been deleted (not in tjf_to_block_k). Returns `missing` if no match.
 function resolve_indices(model::DemandModel, tweak::AbstractTweak)
@@ -1065,7 +1085,7 @@ function apply!(
         year = [year_val],
         quarter = [quarter_val],
     )
-    δ_hat_raw = predict(regout, row_df)
+    δ_hat_raw = pred_regout(regout, row_df)
     if ismissing(δ_hat_raw) || ismissing(first(δ_hat_raw))
         @warn "ModelAdd: regout predict returned missing for $tjf_key; no-op"
         return missing
