@@ -27,6 +27,17 @@ using Distributed
     # picks its own num_round per booster via Supply.fit_xgb_custom_oos.
     NUM_ROUND_STEP1 = 6
 
+    # Deterministic annealing EM (Ueda & Nakano 1998). E-step posterior is
+    # γ = σ(β · logit); β starts small so γ stays near 0.5 while the M-step
+    # discovers a nontrivial p_base/ρ̃ separation, then anneals to 1 to recover
+    # standard EM. Prevents the "everyone-noncomplier" trivial local optimum
+    # that pure EM slides into from a random γ initialization.
+    Β_INIT = 0.1f0
+    Β_RATE = 1.5f0
+
+    # Numeric floor for log(π) / log(1-π) in the E-step tempered log-odds.
+    Π_FLOOR = 1.0f-3
+
     demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
 
     state_matrix = JLD2.load_object("data/residual_demand.jld2")
@@ -118,9 +129,10 @@ function (@main)(_)
     E_step = empty!(copy(compliance))
 
     for i in 1:100
-        @info "Starting round $i"
+        β = min(1.0f0, Β_INIT * Β_RATE^(i - 1))
+        @info "Starting round $i" β
         @everywhere GC.gc(true)
-        π = mean(compliance.p_compliant)
+        π = clamp(mean(compliance.p_compliant), Π_FLOOR, 1 - Π_FLOOR)
         M_step =
             let mapped = pmap(collect(gdf)) do cars
                     cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
@@ -256,7 +268,9 @@ function (@main)(_)
             ll_noncomplier = let (; is_sold, p_base) = cars
                 sum(@. is_sold * log(p_base) + (1 - is_sold) * log(1 - p_base))
             end
-            p_compliant = softmax([log(π) + ll_complier, log(1 - π) + ll_noncomplier])[1]
+            p_compliant = softmax(
+                β .* [log(π) + ll_complier, log(1 - π) + ll_noncomplier]
+            )[1]
             return (;
                 p_compliant,
                 ll_complier,
@@ -273,11 +287,13 @@ function (@main)(_)
 
         step_change = norm(E_step.p_compliant - compliance.p_compliant)
         max_change = maximum(abs, E_step.p_compliant - compliance.p_compliant)
-        @info "Round $i" step_change max_change π mean_p_compliant = mean(
+        @info "Round $i" β step_change max_change π mean_p_compliant = mean(
             E_step.p_compliant
         )
 
-        if max_change < 1.0f-4
+        # Convergence only counts once the temperature has fully annealed to 1;
+        # earlier rounds are fitting a smoothed likelihood, not the target one.
+        if β ≥ 1.0f0 && max_change < 1.0f-4
             @info "EM converged at step $i (max Δγ = $max_change)"
             Arrow.write("data/compliance.arrow", E_step)
             JLD2.save_object("data/compliance_fits.jld2", M_step)
