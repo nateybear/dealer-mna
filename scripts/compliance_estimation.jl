@@ -30,6 +30,15 @@ using Distributed
     # Numeric floor for log(π) / log(1-π) in the E-step tempered log-odds.
     Π_FLOOR = 1.0f-3
 
+    # Deterministic annealing EM (Ueda & Nakano 1998). E-step posterior is
+    # γ = σ(β · logit); β starts small so γ can't jump to either boundary
+    # (0 or 1) in early rounds, then anneals to 1 to recover standard EM.
+    # Aggressive schedule because both boundaries are attractors for this
+    # mixture: an unchecked E-step will collapse to whichever the initial
+    # M-step drift favors.
+    Β_INIT = 0.05f0
+    Β_RATE = 1.3f0
+
     # ρ̃ booster overrides:
     #   base_score = −6 → σ(−6) ≈ 0.0025 default. XGB_DEFAULT_PARAMS uses −2
     #   (σ(−2) ≈ 0.12), reasonable for a sales rate but a strong upward bias
