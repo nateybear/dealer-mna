@@ -30,13 +30,23 @@ using Distributed
     # Numeric floor for log(π) / log(1-π) in the E-step tempered log-odds.
     Π_FLOOR = 1.0f-3
 
-    # ρ̃ booster overrides base_score to −6 (σ(−6) ≈ 0.0025). XGB_DEFAULT_PARAMS
-    # uses −2 (σ(−2) ≈ 0.12), which is a reasonable prior for a sales rate but
-    # not for ρ̃: the trivial local optimum of the mixture EM sits at ρ̃ ≡ 0
-    # (complier branch collapses onto noncomplier), so the "no signal → base"
-    # default for ρ̃ should be near 0, not 0.12. Otherwise the complier branch
-    # systematically over-predicts sales and drags γ toward 0.
-    RHO_XGB_PARAMS = merge(Supply.XGB_DEFAULT_PARAMS, (base_score = -6.0,))
+    # ρ̃ booster overrides:
+    #   base_score = −6 → σ(−6) ≈ 0.0025 default. XGB_DEFAULT_PARAMS uses −2
+    #   (σ(−2) ≈ 0.12), reasonable for a sales rate but a strong upward bias
+    #   for ρ̃: the trivial local optimum sits at ρ̃ ≡ 0, so ρ̃'s "no signal"
+    #   default should be near 0.
+    #
+    #   min_child_weight, lambda scaled way down. The ρ̃ gradient/Hessian scale
+    #   as O(ρ̃²) because of the logistic link's chain rule, so at ρ̃ ≈ 0.0025
+    #   the per-row Hessian is ~7e−6 and Σh across a ~200-row per-group
+    #   training set is ~0.0014. With XGB defaults (min_child_weight=5,
+    #   lambda=1) the booster rejects every candidate split and produces a
+    #   no-op tree, so ρ̃ stays glued to base_score forever. Reducing both
+    #   to Hessian-appropriate magnitudes lets the trees actually fit.
+    RHO_XGB_PARAMS = merge(
+        Supply.XGB_DEFAULT_PARAMS,
+        (base_score = -6.0, min_child_weight = 1.0f-4, lambda = 1.0f-1),
+    )
 
     demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
 
