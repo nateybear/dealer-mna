@@ -1,6 +1,6 @@
 using Distributed
 @everywhere using Memoize
-@everywhere using StatsBase: mean, quantile, var, cov
+@everywhere using StatsBase: ecdf, mean, quantile, var, cov
 
 @everywhere begin
     using DealerMnA
@@ -10,7 +10,6 @@ using Distributed
     using LogExpFunctions
     using StatsBase: mean, cov, quantile
     import .Supply: selectunique
-    using Distributions
 
     BLAS.set_num_threads(1)
 
@@ -30,6 +29,14 @@ using Distributed
 
     # Numeric floor for log(π) / log(1-π) in the E-step tempered log-odds.
     Π_FLOOR = 1.0f-3
+
+    # ρ̃ booster overrides base_score to −6 (σ(−6) ≈ 0.0025). XGB_DEFAULT_PARAMS
+    # uses −2 (σ(−2) ≈ 0.12), which is a reasonable prior for a sales rate but
+    # not for ρ̃: the trivial local optimum of the mixture EM sits at ρ̃ ≡ 0
+    # (complier branch collapses onto noncomplier), so the "no signal → base"
+    # default for ρ̃ should be near 0, not 0.12. Otherwise the complier branch
+    # systematically over-predicts sales and drags γ toward 0.
+    RHO_XGB_PARAMS = merge(Supply.XGB_DEFAULT_PARAMS, (base_score = -6.0,))
 
     demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
 
@@ -107,7 +114,26 @@ function (@main)(_)
     subset!(panel, :t => ByRow(≥(Date(2017))))
 
     compliance = selectunique(panel, [:dealer_uid, :t])
-    compliance.p_compliant = rand(Uniform(0.8, 1.0), nrow(compliance))
+
+    # Initialize γ_dt as the empirical CDF value of next-quarter sales count:
+    # cells whose dealer sells many cars at t+1 get high γ_dt, cells with low
+    # next-quarter sales get low γ_dt. Compliance persists across quarters, so
+    # next-quarter sales are a leading indicator of current-quarter compliance
+    # — and, crucially, γ now carries state-informative variation from round 1,
+    # which is what the M-step needs to fit distinct p_base(x) and ρ̃(x).
+    # Cells at the last observed quarter (no t+1) fall back to γ = 0.5.
+    sales_by_dt = combine(groupby(panel, [:dealer_uid, :t]), :is_sold => sum => :n_sold)
+    sales_lookup = Dict((r.dealer_uid, r.t) => r.n_sold for r in eachrow(sales_by_dt))
+    next_sold = Float32[
+        get(sales_lookup, (r.dealer_uid, r.t + Quarter(1)), NaN32) for
+        r in eachrow(compliance)
+    ]
+    mask = .!isnan.(next_sold)
+    F_next = ecdf(next_sold[mask])
+    compliance.p_compliant = fill(0.5f0, nrow(compliance))
+    compliance.p_compliant[mask] .= Float32.(F_next.(next_sold[mask]))
+    @info "γ init from next-quarter sales" mean_γ = mean(compliance.p_compliant) frac_last_quarter = 1 -
+        sum(mask) / length(mask)
 
     # global fold assignment so each (dealer, t) is in the same fold across
     # every vehicle's p_base and ρ̃ boosters and matches its E-step prediction.
@@ -177,7 +203,7 @@ function (@main)(_)
 
                             # ρ̃ fit: every row contributes with weight γ; p_base held fixed
                             booster_r = Supply.fit_xgb_custom(
-                                dm_tr; num_round = NUM_ROUND_STEP1
+                                dm_tr; num_round = NUM_ROUND_STEP1, params = RHO_XGB_PARAMS
                             ) do ŷ
                                 grad = Vector{Float32}(undef, n_tr)
                                 hess = Vector{Float32}(undef, n_tr)
@@ -399,6 +425,7 @@ function (@main)(_)
                                 y_all;
                                 max_round = 50,
                                 patience = 5,
+                                params = RHO_XGB_PARAMS,
                             )
                             ρ̃ .= logistic.(XGBoost.predict(booster_r, dm_full; margin = true))
                             rho_bytes = copy(XGBoost.save(booster_r, Vector{UInt8}; format = "ubj"))
