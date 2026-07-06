@@ -151,7 +151,8 @@ function (@main)(_)
     F_next = ecdf(next_sold[mask])
     compliance.p_compliant = fill(0.5f0, nrow(compliance))
     compliance.p_compliant[mask] .= Float32.(F_next.(next_sold[mask]))
-    @info "γ init from next-quarter sales" mean_γ = mean(compliance.p_compliant) frac_last_quarter = 1 -
+    @info "γ init from next-quarter sales" mean_γ = mean(compliance.p_compliant) frac_last_quarter =
+        1 -
         sum(mask) / length(mask)
 
     # global fold assignment so each (dealer, t) is in the same fold across
@@ -167,7 +168,8 @@ function (@main)(_)
     E_step = empty!(copy(compliance))
 
     for i in 1:100
-        @info "Starting round $i"
+        β = min(B_INIT * B_RATE^(i - 1), 1.0)
+        @info "Starting round $i" β
         @everywhere GC.gc(true)
         π = clamp(mean(compliance.p_compliant), Π_FLOOR, 1 - Π_FLOOR)
         M_step =
@@ -310,8 +312,8 @@ function (@main)(_)
                 sum(@. is_sold * log(p_base) + (1 - is_sold) * log(1 - p_base))
             end
             p_compliant = softmax(
-            [log(π) + ll_complier, log(1 - π) + ll_noncomplier]
-)[1]
+                β .* [log(π) + ll_complier, log(1 - π) + ll_noncomplier]
+            )[1]
             return (;
                 p_compliant,
                 ll_complier,
@@ -334,7 +336,7 @@ function (@main)(_)
 
         # Convergence only counts once the temperature has fully annealed to 1;
         # earlier rounds are fitting a smoothed likelihood, not the target one.
-        if max_change < 1.0f-4
+        if max_change < 1.0f-4 && β ≥ 1.0
             @info "EM converged at step $i (max Δγ = $max_change)"
             Arrow.write("data/compliance.arrow", E_step)
             JLD2.save_object("data/compliance_fits.jld2", M_step)
