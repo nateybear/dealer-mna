@@ -36,8 +36,8 @@ using Distributed
     # Aggressive schedule because both boundaries are attractors for this
     # mixture: an unchecked E-step will collapse to whichever the initial
     # M-step drift favors.
-    Β_INIT = 0.05f0
-    Β_RATE = 1.3f0
+    B_INIT = 0.05f0
+    B_RATE = 1.3f0
 
     # ρ̃ booster overrides:
     #   base_score = −6 → σ(−6) ≈ 0.0025 default. XGB_DEFAULT_PARAMS uses −2
@@ -54,7 +54,7 @@ using Distributed
     #   to Hessian-appropriate magnitudes lets the trees actually fit.
     RHO_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (base_score = -6.0, min_child_weight = 1.0f-4, lambda = 1.0f-1),
+        (base_score = -5.5, min_child_weight = 1.0f-4, lambda = 5.0f-1),
     )
 
     demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
@@ -120,6 +120,8 @@ using Distributed
     end
 end
 
+A_PRIOR=10
+
 function (@main)(_)
     Dealers.load_from_disk!("data/dealers_init_filtered.jld2")
     fords = read_arrow("data/arrow/fords.arrow")
@@ -168,10 +170,12 @@ function (@main)(_)
     E_step = empty!(copy(compliance))
 
     for i in 1:100
-        β = min(B_INIT * B_RATE^(i - 1), 1.0)
+        β = 1.0
         @info "Starting round $i" β
         @everywhere GC.gc(true)
-        π = clamp(mean(compliance.p_compliant), Π_FLOOR, 1 - Π_FLOOR)
+	π = clamp((A_PRIOR - 1 + sum(compliance.p_compliant)) /
+            (2*(A_PRIOR - 1) + nrow(compliance)),
+            Π_FLOOR, 1 - Π_FLOOR)
         M_step =
             let mapped = pmap(collect(gdf)) do cars
                     cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
@@ -312,7 +316,7 @@ function (@main)(_)
                 sum(@. is_sold * log(p_base) + (1 - is_sold) * log(1 - p_base))
             end
             p_compliant = softmax(
-                β .* [log(π) + ll_complier, log(1 - π) + ll_noncomplier]
+                [β * log(π) + ll_complier, β * log(1 - π) + ll_noncomplier]
             )[1]
             return (;
                 p_compliant,
