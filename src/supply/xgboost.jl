@@ -245,42 +245,45 @@ end
 #### (always non-negative). Closures pass per-row context (q, ι, z, ρ̃, p) by
 #### capture; XGBoost label is decorative.
 
-# p_base loss gradient w.r.t. raw output f, given y (sale), z (complier flag),
-# and current ρ̃ estimate (held fixed within a sweep).
-function pbase_grad_hess(f::Real, y::Real, z::Real, ρ̃::Real)
+# p_base loss gradient w.r.t. raw output f, given y (sale), γ (soft compliance
+# posterior in [0,1]), and current ρ̃ estimate (held fixed within a sweep).
+# Each row's expected-complete-data contribution is γ·complier + (1−γ)·noncomplier.
+function pbase_grad_hess(f::Real, y::Real, γ::Real, ρ̃::Real)
     p = logistic(f)
-    if iszero(z)
-        return Float32(p - y), Float32(p * (1 - p))
-    end
+    g_n = p - y
+    h_n = p * (1 - p)
     u = 1 - ρ̃
     q = p + (1 - p) * ρ̃
-    g = (1 - y) * p - y * u * p * (1 - p) / q
-    h = u * p^2 * (1 - p) / q
+    g_c = (1 - y) * p - y * u * p * (1 - p) / q
+    h_c = u * p^2 * (1 - p) / q
+    g = γ * g_c + (1 - γ) * g_n
+    h = γ * h_c + (1 - γ) * h_n
     return Float32(g), Float32(h)
 end
 
-function pbase_nll(f::Real, y::Real, z::Real, ρ̃::Real)
+function pbase_nll(f::Real, y::Real, γ::Real, ρ̃::Real)
     p = clamp(logistic(f), 1.0f-12, 1 - 1.0f-12)
-    if iszero(z)
-        return -(y * log(p) + (1 - y) * log(1 - p))
-    end
+    nll_n = -(y * log(p) + (1 - y) * log(1 - p))
     q = clamp(p + (1 - p) * ρ̃, 1.0f-12, 1 - 1.0f-12)
-    return -(y * log(q) + (1 - y) * log((1 - p) * (1 - ρ̃) + 1.0f-12))
+    nll_c = -(y * log(q) + (1 - y) * log((1 - p) * (1 - ρ̃) + 1.0f-12))
+    return γ * nll_c + (1 - γ) * nll_n
 end
 
-# ρ̃ loss gradient w.r.t. raw output gᵣ. Only applied to complier-classified rows.
-function rho_grad_hess(gᵣ::Real, y::Real, p::Real)
+# ρ̃ loss gradient w.r.t. raw output gᵣ. Under soft EM every row contributes,
+# weighted by γ (only the complier branch depends on ρ̃, so the noncomplier
+# branch drops out).
+function rho_grad_hess(gᵣ::Real, y::Real, γ::Real, p::Real)
     ρ̃ = logistic(gᵣ)
     q = p + (1 - p) * ρ̃
-    g = (1 - y) * ρ̃ - y * (1 - p) * ρ̃ * (1 - ρ̃) / q
-    h = (1 - p) * ρ̃^2 * (1 - ρ̃) / q
+    g = γ * ((1 - y) * ρ̃ - y * (1 - p) * ρ̃ * (1 - ρ̃) / q)
+    h = γ * (1 - p) * ρ̃^2 * (1 - ρ̃) / q
     return Float32(g), Float32(h)
 end
 
-function rho_nll(gᵣ::Real, y::Real, p::Real)
+function rho_nll(gᵣ::Real, y::Real, γ::Real, p::Real)
     ρ̃ = clamp(logistic(gᵣ), 1.0f-12, 1 - 1.0f-12)
     q = clamp(p + (1 - p) * ρ̃, 1.0f-12, 1 - 1.0f-12)
-    return -(y * log(q) + (1 - y) * log((1 - p) * (1 - ρ̃) + 1.0f-12))
+    return γ * -(y * log(q) + (1 - y) * log((1 - p) * (1 - ρ̃) + 1.0f-12))
 end
 
 # Sales-target loss with a log link on φ: the booster's raw output is f = log φ,
