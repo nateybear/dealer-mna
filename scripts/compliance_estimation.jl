@@ -215,7 +215,7 @@ function (@main)(_)
                         dm_tr = XGBoost.DMatrix(X_tr)
                         XGBoost.setinfo!(dm_tr, "label", y_tr)
 
-                        ρ̃_tr = zeros(Float32, n_tr)
+                        ρ̃_tr = fill(Supply.RHO_MIN, n_tr)
                         saved_p_bytes = UInt8[]
                         saved_r_bytes = UInt8[]
                         last_sweep = 0
@@ -250,7 +250,7 @@ function (@main)(_)
                             complier_local = findall(==(1.0f0), γ_tr)
                             if isempty(complier_local)
                                 saved_r_bytes = UInt8[]
-                                fill!(ρ̃_tr, 0.0f0)
+                                fill!(ρ̃_tr, Supply.RHO_MIN)
                             else
                                 X_tr_c = X_tr[complier_local, :]
                                 y_tr_c = y_tr[complier_local]
@@ -273,8 +273,8 @@ function (@main)(_)
                                     end
                                     return grad, hess
                                 end
-                                fill!(ρ̃_tr, 0.0f0)
-                                ρ̃_tr[complier_local] .= logistic.(
+                                fill!(ρ̃_tr, Supply.RHO_MIN)
+                                ρ̃_tr[complier_local] .= Supply.rho_from_margin.(
                                     XGBoost.predict(booster_r, dm_tr_c; margin = true)
                                 )
                                 saved_r_bytes = copy(
@@ -335,12 +335,12 @@ function (@main)(_)
 
             cars.ρ_tilde = map(eachrow(cars)) do (; model, model_year, extra)
                 rho_bytes = M_step[(model, model_year, extra)][2][k]
-                # Empty rho_bytes ⇒ this fold had no sampled compliers; treat
-                # ρ̃ ≈ 0 so the complier branch collapses onto noncomplier.
-                isempty(rho_bytes) && return 1e-12
+                # Empty rho_bytes ⇒ this fold had no sampled compliers; fall
+                # back to the ρ̃_min floor (minimum lift under the parameterization).
+                isempty(rho_bytes) && return Float64(Supply.RHO_MIN)
                 XGBoost.load!(booster, rho_bytes)
                 g_raw = only(XGBoost.predict(booster, dm; margin = true))
-                clamp(logistic(g_raw), 1e-12, 1 - 1e-12)
+                clamp(Supply.rho_from_margin(g_raw), 1e-12, 1 - 1e-12)
             end
 
             finalize(booster)
@@ -411,7 +411,7 @@ function (@main)(_)
                         γ_all = Float32.(cars.p_compliant)
                         n = length(y_all)
 
-                        ρ̃ = zeros(Float32, n)
+                        ρ̃ = fill(Supply.RHO_MIN, n)
                         pbase_bytes = UInt8[]
                         rho_bytes = UInt8[]
                         best_round_p = 0
@@ -508,7 +508,7 @@ function (@main)(_)
                                 patience = 5,
                                 params = RHO_XGB_PARAMS,
                             )
-                            ρ̃ .= logistic.(XGBoost.predict(booster_r, dm_full; margin = true))
+                            ρ̃ .= Supply.rho_from_margin.(XGBoost.predict(booster_r, dm_full; margin = true))
                             rho_bytes = copy(XGBoost.save(booster_r, Vector{UInt8}; format = "ubj"))
                             best_round_r = br_r
                             finalize(booster_r)
