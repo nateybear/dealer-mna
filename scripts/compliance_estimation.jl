@@ -1,6 +1,6 @@
 using Distributed
 @everywhere using Memoize
-@everywhere using StatsBase: ecdf, mean, quantile, var, cov
+@everywhere using StatsBase: ecdf, mean, quantile, std, var, cov
 
 @everywhere begin
     using DealerMnA
@@ -9,6 +9,7 @@ using Distributed
     using LinearAlgebra
     using LogExpFunctions
     using StatsBase: mean, cov, quantile
+    using Distributions: Bernoulli, Beta
     import .Supply: selectunique
 
     BLAS.set_num_threads(1)
@@ -27,17 +28,19 @@ using Distributed
     # picks its own num_round per booster via Supply.fit_xgb_custom_oos.
     NUM_ROUND_STEP1 = 6
 
-    # Numeric floor for log(π) / log(1-π) in the E-step tempered log-odds.
+    # Numeric floor for log(π) / log(1-π) in the E-step log-odds.
     Π_FLOOR = 1.0f-3
 
-    # Deterministic annealing EM (Ueda & Nakano 1998). E-step posterior is
-    # γ = σ(β · logit); β starts small so γ can't jump to either boundary
-    # (0 or 1) in early rounds, then anneals to 1 to recover standard EM.
-    # Aggressive schedule because both boundaries are attractors for this
-    # mixture: an unchecked E-step will collapse to whichever the initial
-    # M-step drift favors.
-    B_INIT = 0.05f0
-    B_RATE = 1.3f0
+    # Stochastic EM: hard latent labels z_dt are sampled from the E-step posterior
+    # Bernoulli(γ_dt) each round, and the M-step's XGBoost boosters fit p_base on
+    # sampled noncomplier cells (z=0) and ρ̃ on sampled complier cells (z=1). π is
+    # sampled from its Beta(A_PRIOR + Σz, A_PRIOR + N − Σz) conditional posterior.
+    # After BURN_IN warmup rounds, the E-step's γ_dt is accumulated across the
+    # remaining N_TOTAL − BURN_IN rounds; the posterior mean is written out.
+    # The Bernoulli noise on z is what prevents deterministic collapse to π=0 or
+    # π=1: even at γ=0.99, ~1% of rounds sample z=0, so p_base stays anchored.
+    N_TOTAL = 100
+    BURN_IN = 30
 
     # ρ̃ booster overrides:
     #   base_score = −6 → σ(−6) ≈ 0.0025 default. XGB_DEFAULT_PARAMS uses −2
@@ -169,13 +172,26 @@ function (@main)(_)
     M_step = Dict()
     E_step = empty!(copy(compliance))
 
-    for i in 1:100
-        β = 1.0
-        @info "Starting round $i" β
+    # Initial hard z sample from the ecdf-initialized γ. Everything downstream
+    # (M-step, π update) treats compliance.p_compliant as the sampled z_dt ∈ {0,1}.
+    compliance.p_compliant .= Float32.(rand.(Bernoulli.(compliance.p_compliant)))
+
+    γ_accum = zeros(Float64, nrow(compliance))
+    π_samples = Float64[]
+    n_kept = 0
+
+    for i in 1:N_TOTAL
+        @info "Starting round $i"
         @everywhere GC.gc(true)
-	π = clamp((A_PRIOR - 1 + sum(compliance.p_compliant)) /
-            (2*(A_PRIOR - 1) + nrow(compliance)),
-            Π_FLOOR, 1 - Π_FLOOR)
+        # π ~ Beta(A_PRIOR + Σz, A_PRIOR + N − Σz) — Gibbs sample, not MAP mode.
+        π = clamp(
+            rand(Beta(
+                Float64(A_PRIOR + sum(compliance.p_compliant)),
+                Float64(A_PRIOR + nrow(compliance) - sum(compliance.p_compliant)),
+            )),
+            Float64(Π_FLOOR),
+            1 - Float64(Π_FLOOR),
+        )
         M_step =
             let mapped = pmap(collect(gdf)) do cars
                     cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
@@ -316,7 +332,7 @@ function (@main)(_)
                 sum(@. is_sold * log(p_base) + (1 - is_sold) * log(1 - p_base))
             end
             p_compliant = softmax(
-                [β * log(π) + ll_complier, β * log(1 - π) + ll_noncomplier]
+                [log(π) + ll_complier, log(1 - π) + ll_noncomplier]
             )[1]
             return (;
                 p_compliant,
@@ -332,21 +348,33 @@ function (@main)(_)
         E_step.p_compliant = [r.p_compliant for r in E_results]
         log_e_step_diagnostics(E_results)
 
-        step_change = norm(E_step.p_compliant - compliance.p_compliant)
-        max_change = maximum(abs, E_step.p_compliant - compliance.p_compliant)
-        @info "Round $i" step_change max_change π mean_p_compliant = mean(
-            E_step.p_compliant
-        )
+        # Accumulate γ posterior mean after burn-in; also snapshot π's trace.
+        if i > BURN_IN
+            γ_accum .+= E_step.p_compliant
+            push!(π_samples, π)
+            n_kept += 1
+        end
 
-        # Convergence only counts once the temperature has fully annealed to 1;
-        # earlier rounds are fitting a smoothed likelihood, not the target one.
-        if max_change < 1.0f-4 && β ≥ 1.0
-            @info "EM converged at step $i (max Δγ = $max_change)"
+        # Hand hard sampled labels z_dt ~ Bern(γ_dt) to the next round's M-step
+        # and π update. This is the data augmentation step; the noise is what
+        # keeps p_base and ρ̃ both anchored to real data every round.
+        compliance.p_compliant .= Float32.(rand.(Bernoulli.(E_step.p_compliant)))
+
+        @info "Round $i" π mean_γ = mean(E_step.p_compliant) frac_z_one = mean(
+            compliance.p_compliant
+        ) accumulated = n_kept
+
+        if i == N_TOTAL
+            @info "Sampler complete: writing posterior-mean γ" n_kept mean_π = mean(
+                π_samples
+            ) std_π = std(π_samples)
+            posterior_γ = Float32.(γ_accum ./ max(n_kept, 1))
+            E_step.p_compliant = posterior_γ
+            compliance.p_compliant .= posterior_γ
             Arrow.write("data/compliance.arrow", E_step)
             JLD2.save_object("data/compliance_fits.jld2", M_step)
 
             @info "Step 2: full-data refit with OOS early stopping"
-            compliance.p_compliant .= E_step.p_compliant
             final_M_step =
                 let mapped = pmap(collect(gdf)) do cars
                         cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
@@ -478,8 +506,6 @@ function (@main)(_)
             JLD2.save_object("data/compliance_fits_final.jld2", final_M_step)
             return nothing
         end
-        compliance.p_compliant .= E_step.p_compliant
     end
-    @error "Boohoo, no convergence after 100 steps"
     return nothing
 end
