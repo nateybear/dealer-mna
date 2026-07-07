@@ -43,14 +43,18 @@ using Distributed
     BURN_IN = 30
 
     # ρ̃ booster overrides:
-    #   base_score = −3 → σ(−3) ≈ 0.047 starting value. Small default so the
-    #   "no signal" fallback is near 0, but with enough Hessian mass (unlike
-    #   the earlier −6) that the booster actually trains.
-    #   Other params inherit from XGB_DEFAULT_PARAMS (max_depth=3, lambda=1,
-    #   min_child_weight=1 per the current default, num_round=NUM_ROUND_STEP1).
-    #   These are moderate — enough flexibility for ρ̃ to reach the observed
-    #   lift, not enough to fit cell-by-cell residuals.
-    RHO_XGB_PARAMS = merge(Supply.XGB_DEFAULT_PARAMS, (base_score = -3.0,))
+    #   base_score = −1.5 → σ(−1.5) ≈ 0.182 → initial ρ̃ ≈ 0.02 + 0.98·0.182 ≈ 0.20
+    #     under the floored parameterization. A warm start matters because at low
+    #     π the ρ̃ booster's per-group training set is tiny (~5 rows) and XGBoost
+    #     often can't move ρ̃ from base_score at all; a starting value near the
+    #     plausible complier lift means "no signal" already fits real compilers,
+    #     so the E-step assigns them nonzero γ and the sampler gets more z=1 data.
+    #   lambda = 0.5 relaxes leaf-value shrinkage so the booster can respond
+    #     to the sparse training signal when it exists.
+    RHO_XGB_PARAMS = merge(
+        Supply.XGB_DEFAULT_PARAMS,
+        (base_score = -1.5, lambda = 5.0f-1),
+    )
 
     # Floor / cap on the Bernoulli sampling probability for z_dt. Even at
     # γ ≈ 0 or γ ≈ 1, we guarantee a small fraction of each class is sampled,

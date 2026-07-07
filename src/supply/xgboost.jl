@@ -274,7 +274,7 @@ end
 # a cell with any positive Bernoulli sample z=1 gets at least this much lift
 # relative to p_base, so the mixture cannot degenerate into "everyone very
 # slightly complier." Consumers convert booster margin → ρ̃ via rho_from_margin.
-const RHO_MIN = 0.05f0
+const RHO_MIN = 0.02f0
 
 """
     rho_from_margin(gᵣ) -> ρ̃ ∈ [RHO_MIN, 1)
