@@ -42,34 +42,22 @@ using Distributed
     N_TOTAL = 100
     BURN_IN = 30
 
-    # ρ̃ booster overrides: deliberately kept nearly rigid.
-    #
-    # If ρ̃(x) is allowed to fit cell-by-cell observed lift, the complier branch
-    # predicts q(x) ≈ observed_rate(x) for every cell, so ℓ_c > ℓ_n uniformly,
-    # γ → 1 across the board, and the mixture collapses to "everyone complier"
-    # regardless of what the noncomplier data actually looks like. The fix is to
-    # keep ρ̃(x) close to a constant — enough state-dependence to matter, not
-    # enough to absorb every cell's lift.
-    #
-    #   base_score = −3 → σ(−3) ≈ 0.047 starting value. Enough Hessian mass
-    #     (unlike the earlier −6) that the booster actually trains, but still a
-    #     small default so the "no signal" fallback is near 0.
-    #   max_depth = 1 (stumps only) — very rigid function class.
-    #   min_child_weight = 1 restored (was pathologically 1e-4).
-    #   lambda = 5 strong shrinkage on leaf values.
-    RHO_XGB_PARAMS = merge(
-        Supply.XGB_DEFAULT_PARAMS,
-        (
-            base_score = -3.0,
-            max_depth = 1,
-            min_child_weight = 1.0f0,
-            lambda = 5.0f0,
-        ),
-    )
+    # ρ̃ booster overrides:
+    #   base_score = −3 → σ(−3) ≈ 0.047 starting value. Small default so the
+    #   "no signal" fallback is near 0, but with enough Hessian mass (unlike
+    #   the earlier −6) that the booster actually trains.
+    #   Other params inherit from XGB_DEFAULT_PARAMS (max_depth=3, lambda=1,
+    #   min_child_weight=1 per the current default, num_round=NUM_ROUND_STEP1).
+    #   These are moderate — enough flexibility for ρ̃ to reach the observed
+    #   lift, not enough to fit cell-by-cell residuals.
+    RHO_XGB_PARAMS = merge(Supply.XGB_DEFAULT_PARAMS, (base_score = -3.0,))
 
-    # Fewer boosting rounds for ρ̃ too — flexibility × depth × rounds all
-    # multiply. Kept separate from p_base's round count.
-    NUM_ROUND_RHO = 3
+    # Floor / cap on the Bernoulli sampling probability for z_dt. Even at
+    # γ ≈ 0 or γ ≈ 1, we guarantee a small fraction of each class is sampled,
+    # so both the p_base (fit on all cells) and ρ̃ (fit on z=1 subset) boosters
+    # always have training data. Without this, the sampler can ratchet into
+    # the π=0 or π=1 boundary where one branch loses its training set entirely.
+    Z_CLAMP = 0.05f0
 
     demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
 
@@ -185,7 +173,9 @@ function (@main)(_)
 
     # Initial hard z sample from the ecdf-initialized γ. Everything downstream
     # (M-step, π update) treats compliance.p_compliant as the sampled z_dt ∈ {0,1}.
-    compliance.p_compliant .= Float32.(rand.(Bernoulli.(compliance.p_compliant)))
+    compliance.p_compliant .= Float32.(
+        rand.(Bernoulli.(clamp.(compliance.p_compliant, Z_CLAMP, 1 - Z_CLAMP)))
+    )
 
     γ_accum = zeros(Float64, nrow(compliance))
     π_samples = Float64[]
@@ -253,25 +243,46 @@ function (@main)(_)
                             )
                             finalize(booster_p)
 
-                            # ρ̃ fit: every row contributes with weight γ; p_base held fixed
-                            booster_r = Supply.fit_xgb_custom(
-                                dm_tr; num_round = NUM_ROUND_RHO, params = RHO_XGB_PARAMS
-                            ) do ŷ
-                                grad = Vector{Float32}(undef, n_tr)
-                                hess = Vector{Float32}(undef, n_tr)
-                                @inbounds for j in 1:n_tr
-                                    grad[j], hess[j] = Supply.rho_grad_hess(
-                                        ŷ[j], y_tr[j], γ_tr[j], p_tr[j]
-                                    )
+                            # ρ̃ fit: restricted to sampled complier rows (z=1). z=0
+                            # rows have γ=0, which zeroes both grad and hess in
+                            # rho_grad_hess — feeding them to XGBoost would dilute
+                            # split candidates without contributing information.
+                            complier_local = findall(==(1.0f0), γ_tr)
+                            if isempty(complier_local)
+                                saved_r_bytes = UInt8[]
+                                fill!(ρ̃_tr, 0.0f0)
+                            else
+                                X_tr_c = X_tr[complier_local, :]
+                                y_tr_c = y_tr[complier_local]
+                                p_tr_c = p_tr[complier_local]
+                                n_tr_c = length(complier_local)
+                                dm_tr_c = XGBoost.DMatrix(X_tr_c)
+                                XGBoost.setinfo!(dm_tr_c, "label", y_tr_c)
+
+                                booster_r = Supply.fit_xgb_custom(
+                                    dm_tr_c;
+                                    num_round = NUM_ROUND_STEP1,
+                                    params = RHO_XGB_PARAMS,
+                                ) do ŷ
+                                    grad = Vector{Float32}(undef, n_tr_c)
+                                    hess = Vector{Float32}(undef, n_tr_c)
+                                    @inbounds for j in 1:n_tr_c
+                                        grad[j], hess[j] = Supply.rho_grad_hess(
+                                            ŷ[j], y_tr_c[j], 1.0f0, p_tr_c[j]
+                                        )
+                                    end
+                                    return grad, hess
                                 end
-                                return grad, hess
+                                fill!(ρ̃_tr, 0.0f0)
+                                ρ̃_tr[complier_local] .= logistic.(
+                                    XGBoost.predict(booster_r, dm_tr_c; margin = true)
+                                )
+                                saved_r_bytes = copy(
+                                    XGBoost.save(booster_r, Vector{UInt8}; format = "ubj")
+                                )
+                                finalize(booster_r)
+                                finalize(dm_tr_c)
                             end
-                            ρ̃_tr .=
-                                logistic.(XGBoost.predict(booster_r, dm_tr; margin = true))
-                            saved_r_bytes = copy(
-                                XGBoost.save(booster_r, Vector{UInt8}; format = "ubj")
-                            )
-                            finalize(booster_r)
 
                             maximum(abs, ρ̃_tr .- ρ̃_prev) < Ρ̃_TOL && break
                         end
@@ -324,6 +335,9 @@ function (@main)(_)
 
             cars.ρ_tilde = map(eachrow(cars)) do (; model, model_year, extra)
                 rho_bytes = M_step[(model, model_year, extra)][2][k]
+                # Empty rho_bytes ⇒ this fold had no sampled compliers; treat
+                # ρ̃ ≈ 0 so the complier branch collapses onto noncomplier.
+                isempty(rho_bytes) && return 1e-12
                 XGBoost.load!(booster, rho_bytes)
                 g_raw = only(XGBoost.predict(booster, dm; margin = true))
                 clamp(logistic(g_raw), 1e-12, 1 - 1e-12)
@@ -367,9 +381,12 @@ function (@main)(_)
         end
 
         # Hand hard sampled labels z_dt ~ Bern(γ_dt) to the next round's M-step
-        # and π update. This is the data augmentation step; the noise is what
-        # keeps p_base and ρ̃ both anchored to real data every round.
-        compliance.p_compliant .= Float32.(rand.(Bernoulli.(E_step.p_compliant)))
+        # and π update. Sampling probability is clamped to [Z_CLAMP, 1-Z_CLAMP]
+        # so neither branch's booster can lose its training set even when γ
+        # drifts near a boundary.
+        compliance.p_compliant .= Float32.(
+            rand.(Bernoulli.(clamp.(E_step.p_compliant, Z_CLAMP, 1 - Z_CLAMP)))
+        )
 
         @info "Round $i" π mean_γ = mean(E_step.p_compliant) frac_z_one = mean(
             compliance.p_compliant
