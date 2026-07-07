@@ -269,19 +269,37 @@ function pbase_nll(f::Real, y::Real, γ::Real, ρ̃::Real)
     return γ * nll_c + (1 - γ) * nll_n
 end
 
-# ρ̃ loss gradient w.r.t. raw output gᵣ. Under soft EM every row contributes,
-# weighted by γ (only the complier branch depends on ρ̃, so the noncomplier
-# branch drops out).
+# Floor on ρ̃ via the reparameterization ρ̃ = RHO_MIN + (1−RHO_MIN)·σ(gᵣ).
+# The floor separates the complier and noncomplier components structurally:
+# a cell with any positive Bernoulli sample z=1 gets at least this much lift
+# relative to p_base, so the mixture cannot degenerate into "everyone very
+# slightly complier." Consumers convert booster margin → ρ̃ via rho_from_margin.
+const RHO_MIN = 0.05f0
+
+"""
+    rho_from_margin(gᵣ) -> ρ̃ ∈ [RHO_MIN, 1)
+
+Apply the ρ̃_min-floored logistic link. Used by the M-step's ρ̃ predictions and
+the E-step's per-cell ρ̃ lookup so the booster's raw output is interpreted
+consistently with `rho_grad_hess` and `rho_nll`.
+"""
+rho_from_margin(gᵣ::Real) = RHO_MIN + (1 - RHO_MIN) * logistic(gᵣ)
+
+# ρ̃ loss gradient w.r.t. raw output gᵣ under the floored parameterization.
+# Chain rule: ∂ρ̃/∂gᵣ = (1 - RHO_MIN)·u·(1-u) where u = σ(gᵣ). The Fisher
+# information Hessian carries (∂ρ̃/∂gᵣ)² and stays non-negative.
 function rho_grad_hess(gᵣ::Real, y::Real, γ::Real, p::Real)
-    ρ̃ = logistic(gᵣ)
+    u = logistic(gᵣ)
+    ρ̃ = RHO_MIN + (1 - RHO_MIN) * u
     q = p + (1 - p) * ρ̃
-    g = γ * ((1 - y) * ρ̃ - y * (1 - p) * ρ̃ * (1 - ρ̃) / q)
-    h = γ * (1 - p) * ρ̃^2 * (1 - ρ̃) / q
+    dρ̃_dgᵣ = (1 - RHO_MIN) * u * (1 - u)
+    g = γ * ((1 - y) / (1 - ρ̃) - y * (1 - p) / q) * dρ̃_dgᵣ
+    h = γ * (1 - p) * dρ̃_dgᵣ^2 / (q * (1 - ρ̃))
     return Float32(g), Float32(h)
 end
 
 function rho_nll(gᵣ::Real, y::Real, γ::Real, p::Real)
-    ρ̃ = clamp(logistic(gᵣ), 1.0f-12, 1 - 1.0f-12)
+    ρ̃ = clamp(rho_from_margin(gᵣ), 1.0f-12, 1 - 1.0f-12)
     q = clamp(p + (1 - p) * ρ̃, 1.0f-12, 1 - 1.0f-12)
     return γ * -(y * log(q) + (1 - y) * log((1 - p) * (1 - ρ̃) + 1.0f-12))
 end
