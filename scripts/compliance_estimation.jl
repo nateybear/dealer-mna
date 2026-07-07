@@ -42,23 +42,34 @@ using Distributed
     N_TOTAL = 100
     BURN_IN = 30
 
-    # ρ̃ booster overrides:
-    #   base_score = −6 → σ(−6) ≈ 0.0025 default. XGB_DEFAULT_PARAMS uses −2
-    #   (σ(−2) ≈ 0.12), reasonable for a sales rate but a strong upward bias
-    #   for ρ̃: the trivial local optimum sits at ρ̃ ≡ 0, so ρ̃'s "no signal"
-    #   default should be near 0.
+    # ρ̃ booster overrides: deliberately kept nearly rigid.
     #
-    #   min_child_weight, lambda scaled way down. The ρ̃ gradient/Hessian scale
-    #   as O(ρ̃²) because of the logistic link's chain rule, so at ρ̃ ≈ 0.0025
-    #   the per-row Hessian is ~7e−6 and Σh across a ~200-row per-group
-    #   training set is ~0.0014. With XGB defaults (min_child_weight=5,
-    #   lambda=1) the booster rejects every candidate split and produces a
-    #   no-op tree, so ρ̃ stays glued to base_score forever. Reducing both
-    #   to Hessian-appropriate magnitudes lets the trees actually fit.
+    # If ρ̃(x) is allowed to fit cell-by-cell observed lift, the complier branch
+    # predicts q(x) ≈ observed_rate(x) for every cell, so ℓ_c > ℓ_n uniformly,
+    # γ → 1 across the board, and the mixture collapses to "everyone complier"
+    # regardless of what the noncomplier data actually looks like. The fix is to
+    # keep ρ̃(x) close to a constant — enough state-dependence to matter, not
+    # enough to absorb every cell's lift.
+    #
+    #   base_score = −3 → σ(−3) ≈ 0.047 starting value. Enough Hessian mass
+    #     (unlike the earlier −6) that the booster actually trains, but still a
+    #     small default so the "no signal" fallback is near 0.
+    #   max_depth = 1 (stumps only) — very rigid function class.
+    #   min_child_weight = 1 restored (was pathologically 1e-4).
+    #   lambda = 5 strong shrinkage on leaf values.
     RHO_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (base_score = -5.5, min_child_weight = 1.0f-4, lambda = 5.0f-1),
+        (
+            base_score = -3.0,
+            max_depth = 1,
+            min_child_weight = 1.0f0,
+            lambda = 5.0f0,
+        ),
     )
+
+    # Fewer boosting rounds for ρ̃ too — flexibility × depth × rounds all
+    # multiply. Kept separate from p_base's round count.
+    NUM_ROUND_RHO = 3
 
     demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
 
@@ -244,7 +255,7 @@ function (@main)(_)
 
                             # ρ̃ fit: every row contributes with weight γ; p_base held fixed
                             booster_r = Supply.fit_xgb_custom(
-                                dm_tr; num_round = NUM_ROUND_STEP1, params = RHO_XGB_PARAMS
+                                dm_tr; num_round = NUM_ROUND_RHO, params = RHO_XGB_PARAMS
                             ) do ŷ
                                 grad = Vector{Float32}(undef, n_tr)
                                 hess = Vector{Float32}(undef, n_tr)
