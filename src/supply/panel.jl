@@ -29,6 +29,12 @@ trim_cut(x) =
         "High"
     end
 
+function filteryears(df, inplace = true)
+    appropriate_t = (m, t) -> (Date(m) - Quarter(1)) <= t <= (Date(m) + Year(1))
+    f = inplace ? subset! : subset
+    return f(df, [:model_year, :t] => ByRow(appropriate_t))
+end
+
 """
     make_dealer_quarter(cars; statistics = Empirics.STATISTICS)
 
@@ -36,7 +42,9 @@ Aggregate per-car registrations to one row per (`t`, `dealer_uid`) with the
 statistics defined in `statistics` (default: `Empirics.STATISTICS`).
 """
 function make_dealer_quarter(cars::AbstractDataFrame; statistics = Empirics.STATISTICS)
-    return @> cars groupby([:t, :dealer_uid]) combine(extract_stats(statistics)...)
+    return @> cars filteryears(false) groupby([:t, :dealer_uid]) combine(
+        extract_stats(statistics)...
+    )
 end
 
 """
@@ -65,9 +73,7 @@ function make_panel(
         combine(nrow => :q)
     end
 
-    let appropriate_t = (m, t) -> (Date(m) - Quarter(1)) <= t <= (Date(m) + Year(1))
-        subset!(out, [:model_year, :t] => ByRow(appropriate_t))
-    end
+    filteryears(out)
 
     agg_statistics = make_dealer_quarter(cars; statistics = statistics)
     transform!(agg_statistics, :t => ByRow(Base.Fix2(-, Quarter(1))) => :t)
