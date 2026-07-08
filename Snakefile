@@ -998,8 +998,9 @@ rule plot_effect_on_closest:
 
 rule data_compliance_estimation:
     """
-    Cross-fit CEM (step 1) + full-data OOS-best-round refit (step 2). The script
-    uses hardcoded data/ paths, so the input/output declarations exist only for
+    Cross-fit CEM (step 1) + full-data OOS-best-round refit (step 2), with the
+    sales-target booster φ(X) fit jointly each SEM round. The script uses
+    hardcoded data/ paths, so the input/output declarations exist only for
     Snakemake dependency tracking. Runs with Distributed via `-p N` — set
     `--config processes=N` to choose the worker count.
     """
@@ -1014,6 +1015,7 @@ rule data_compliance_estimation:
         compliance="data/compliance.arrow",
         fits="data/compliance_fits.jld2",
         fits_final="data/compliance_fits_final.jld2",
+        sales_targets="data/sales_targets.jld2",
     log:
         "logs/compliance_estimation.log",
     run:
@@ -1112,30 +1114,6 @@ rule data_bbl_simulation:
 rule data_bbl_simulations:
     input:
         expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 101))
-
-
-rule data_sales_target_estimation:
-    """
-    Recovers φ(X) via the custom logistic objective P(ι=1)=σ(q − φ). Consumes
-    the compliance output from `data_compliance_estimation`.
-    """
-    input:
-        "scripts/sales_target_estimation.jl",
-        compliance="data/compliance.arrow",
-        fords="data/arrow/fords.arrow",
-        model_frames="data/model_frames.jld2",
-        state_matrix="data/residual_demand.jld2",
-    output:
-        sales_targets="data/sales_targets.jld2",
-    log:
-        "logs/sales_target_estimation.log",
-    run:
-        julia(
-            "scripts/sales_target_estimation.jl",
-            input=input,
-            output=output,
-            log=log,
-        )
 
 
 rule plot_assortment_probs:

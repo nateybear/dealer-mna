@@ -122,6 +122,13 @@ using Distributed
         @info "  observed sale rate vs p_base" obs = mean(obs_means) p_base = mean(p_base_means) lift_mean = mean(
             sale_lift
         ) lift_q = quantile(sale_lift, qs)
+        phi_contribs = [r.phi_contrib for r in E_results]
+        active = filter(!=(0.0), phi_contribs)
+        @info "  φ log-odds contribution (q − φ)/τ" mean = mean(phi_contribs) q = quantile(
+            phi_contribs, qs
+        ) active_mean = isempty(active) ? 0.0 : mean(active) n_active = length(active) total = length(
+            phi_contribs
+        )
         return nothing
     end
 end
@@ -141,6 +148,54 @@ function (@main)(_)
     subset!(panel, :t => ByRow(≥(Date(2017))))
 
     compliance = selectunique(panel, [:dealer_uid, :t])
+
+    # Aggregate dealer-quarter panel for the φ (sales-target) booster. q_{f,t}
+    # is the total-units count from make_dealer_quarter; X_agg indexes
+    # state_matrix at t−1 (matches sales_target_estimation.jl semantics) and
+    # appends the sampled ι_{f,t−1} as the last column each round. Cells whose
+    # t−1 state row is unknown (dealer's first quarter of activity) get
+    # dropped from the aggregate panel — the E-step then simply omits the
+    # (q − φ)/τ contribution for those cells.
+    dq = select(Supply.make_dealer_quarter(fords), :dealer_uid, :t, :total_units => :q)
+    agg_master = innerjoin(compliance, dq, on = [:dealer_uid, :t])
+    subset!(
+        agg_master,
+        [:t, :dealer_uid] => ByRow(
+            (t, f) -> haskey(
+                state_lookup(),
+                ((Dates.year(t - Quarter(1)), Dates.quarterofyear(t - Quarter(1))), f),
+            ),
+        ),
+    )
+    select!(agg_master, :dealer_uid, :t, :q)
+
+    n_agg = nrow(agg_master)
+    ncols_state = size(state_matrix, 2)
+    X_agg_base = Matrix{Float32}(undef, n_agg, ncols_state)
+    for (i, r) in enumerate(eachrow(agg_master))
+        tlag = r.t - Quarter(1)
+        quarter = (Dates.year(tlag), Dates.quarterofyear(tlag))
+        X_agg_base[i, :] .= @view state_matrix[state_lookup()[(quarter, r.dealer_uid)], :]
+    end
+    q_agg = Float32.(agg_master.q)
+
+    # τ fixed at 0.5·std(q). No grid search, no per-round update.
+    τ = Float32(0.5 * std(q_agg))
+    @info "τ fixed for sales-target booster" τ mean_q = mean(q_agg) std_q = std(q_agg) n_agg_rows =
+        n_agg
+
+    # φ booster overrides — mirror sales_target_estimation.jl's params.
+    # base_score = log(mean(q)) so exp(f) starts at mean(q).
+    PHI_XGB_PARAMS = merge(
+        Supply.XGB_DEFAULT_PARAMS,
+        (
+            base_score = Float64(log(mean(q_agg))),
+            max_depth = 4,
+            min_child_weight = 1,
+            lambda = 1.0,
+            eta = 0.1,
+        ),
+    )
 
     # Initialize γ_dt as the empirical CDF value of next-quarter sales count:
     # cells whose dealer sells many cars at t+1 get high γ_dt, cells with low
@@ -184,6 +239,11 @@ function (@main)(_)
     γ_accum = zeros(Float64, nrow(compliance))
     π_samples = Float64[]
     n_kept = 0
+
+    # φ̂ posterior accumulator (aggregate panel rows) and last-round booster
+    # bytes, saved into data/sales_targets.jld2 at the end.
+    φ̂_accum = zeros(Float64, n_agg)
+    phi_booster_bytes = UInt8[]
 
     for i in 1:N_TOTAL
         @info "Starting round $i"
@@ -318,9 +378,57 @@ function (@main)(_)
             all_sweeps, [0.1, 0.5, 0.9]
         ) hit_cap = sum(==(MAX_INNER_SWEEPS), all_sweeps) total = length(all_sweeps)
 
+        # φ booster M-step: fit on aggregate (d,t) panel. ι label is the sampled
+        # z_{f,t}; ι_lag column is the sampled z_{f,t−1} (0 for cells whose
+        # t−1 is not in the compliance table). Log link on φ so exp(margin) > 0.
+        sampled_lookup = Dict(
+            (r.dealer_uid, r.t) => r.p_compliant for r in eachrow(compliance)
+        )
+        ι_agg = Float32[
+            Float32(get(sampled_lookup, (r.dealer_uid, r.t), 0.0f0)) for
+            r in eachrow(agg_master)
+        ]
+        ι_lag_agg = Float32[
+            Float32(get(sampled_lookup, (r.dealer_uid, r.t - Quarter(1)), 0.0f0) > 0.5f0) for
+            r in eachrow(agg_master)
+        ]
+        X_agg = hcat(X_agg_base, ι_lag_agg)
+        dm_agg = XGBoost.DMatrix(X_agg)
+        y_agg = @. (2 * ι_agg - 1) * q_agg
+        XGBoost.setinfo!(dm_agg, "label", y_agg)
+        phi_booster = Supply.fit_xgb_custom(
+            dm_agg; num_round = NUM_ROUND_STEP1, params = PHI_XGB_PARAMS
+        ) do ŷ
+            grad = Vector{Float32}(undef, n_agg)
+            hess = Vector{Float32}(undef, n_agg)
+            @inbounds for j in 1:n_agg
+                grad[j], hess[j] = Supply.phi_grad_hess(ŷ[j], q_agg[j], ι_agg[j], τ)
+            end
+            return grad, hess
+        end
+        φ_pred = exp.(XGBoost.predict(phi_booster, dm_agg; margin = true))
+        phi_booster_bytes = copy(XGBoost.save(phi_booster, Vector{UInt8}; format = "ubj"))
+        finalize(phi_booster)
+        finalize(dm_agg)
+        φ_lookup = Dict(
+            (agg_master.dealer_uid[j], agg_master.t[j]) => φ_pred[j] for j in 1:n_agg
+        )
+        q_lookup = Dict(
+            (agg_master.dealer_uid[j], agg_master.t[j]) => q_agg[j] for j in 1:n_agg
+        )
+        @info "φ̂ quantiles" q = quantile(φ_pred, [0.1, 0.5, 0.9]) mean_lift = mean(
+            @. (q_agg - φ_pred) / τ
+        ) frac_ι_agg_one = mean(ι_agg) frac_ι_lag_one = mean(ι_lag_agg)
+
         @info "Starting E step"
 
         E_step = copy(compliance)
+        E_step.q_agg = Float32[
+            get(q_lookup, (r.dealer_uid, r.t), 0.0f0) for r in eachrow(E_step)
+        ]
+        E_step.phi_hat = Float32[
+            get(φ_lookup, (r.dealer_uid, r.t), NaN32) for r in eachrow(E_step)
+        ]
         E_results = pmap(eachrow(E_step); batch_size = 100) do r
             cars = subset(panel, :dealer_uid => ByRow(==(r.dealer_uid)), :t => ByRow(==(r.t)))
             k = fold_map[(r.dealer_uid, r.t)]
@@ -360,13 +468,19 @@ function (@main)(_)
             ll_noncomplier = let (; is_sold, p_base) = cars
                 sum(@. is_sold * log(p_base) + (1 - is_sold) * log(1 - p_base))
             end
+            # Aggregate log-odds contribution from the sales-target booster:
+            # log P(q|z=1) − log P(q|z=0) = (q − φ)/τ under the discriminative
+            # sigmoid factorization. NaN phi_hat means this cell was dropped
+            # from the aggregate panel (t−1 state unknown); contribution = 0.
+            phi_contrib = isnan(r.phi_hat) ? 0.0 : (r.q_agg - r.phi_hat) / τ
             p_compliant = softmax(
-                [log(π) + ll_complier, log(1 - π) + ll_noncomplier]
+                [log(π) + ll_complier + phi_contrib, log(1 - π) + ll_noncomplier]
             )[1]
             return (;
                 p_compliant,
                 ll_complier,
                 ll_noncomplier,
+                phi_contrib,
                 ρ̃_mean = mean(cars.ρ_tilde),
                 p_base_mean = mean(cars.p_base),
                 n_cars = nrow(cars),
@@ -377,10 +491,12 @@ function (@main)(_)
         E_step.p_compliant = [r.p_compliant for r in E_results]
         log_e_step_diagnostics(E_results)
 
-        # Accumulate γ posterior mean after burn-in; also snapshot π's trace.
+        # Accumulate γ posterior mean after burn-in; also snapshot π's trace
+        # and the φ̂ predictions across aggregate-panel rows.
         if i > BURN_IN
             γ_accum .+= E_step.p_compliant
             push!(π_samples, π)
+            φ̂_accum .+= φ_pred
             n_kept += 1
         end
 
@@ -397,14 +513,23 @@ function (@main)(_)
         ) accumulated = n_kept
 
         if i == N_TOTAL
+            posterior_φ̂ = Float32.(φ̂_accum ./ max(n_kept, 1))
             @info "Sampler complete: writing posterior-mean γ" n_kept mean_π = mean(
                 π_samples
-            ) std_π = std(π_samples)
+            ) std_π = std(π_samples) mean_φ̂ = mean(posterior_φ̂) q_φ̂ = quantile(
+                posterior_φ̂, [0.1, 0.5, 0.9]
+            )
             posterior_γ = Float32.(γ_accum ./ max(n_kept, 1))
             E_step.p_compliant = posterior_γ
             compliance.p_compliant .= posterior_γ
-            Arrow.write("data/compliance.arrow", E_step)
+            # Drop the aggregate scratch columns before persisting compliance —
+            # data/compliance.arrow schema stays what downstream expects.
+            Arrow.write("data/compliance.arrow", select(E_step, Not(:q_agg, :phi_hat)))
             JLD2.save_object("data/compliance_fits.jld2", M_step)
+            # Last-round φ booster bytes + fixed τ. Same layout as
+            # sales_target_estimation.jl's output so downstream consumers
+            # (price_density_estimation, bbl_forward_simulation) don't change.
+            JLD2.save_object("data/sales_targets.jld2", (phi_booster_bytes, τ))
 
             @info "Step 2: full-data refit with OOS early stopping"
             final_M_step =
