@@ -108,6 +108,7 @@ function (@main)(_)
     snakemake!()
     with_logging() do
         fords = read_arrow(snakemake.input["fords"])
+        fords = subset(fords, :t => ByRow(<(Date(2020, 1, 1))))
         dealer_demographics = read_arrow(snakemake.input["dealer_demographics"])
         demos = Empirics.DEFAULT_DEMOGRAPHICS
 
