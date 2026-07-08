@@ -65,14 +65,15 @@ function tercile_panel(dq, x_col, y_col; xlabel, ylabel)
         sub = subset(dq, :tercile => ByRow(==(t)))
         bm = binned_means(sub[!, x_col], sub[!, y_col])
         p = scatter(
-            bm.x_mean,
-            bm.y_mean;
+            sub[!, x_col],
+            sub[!, y_col];
             xlabel = xlabel,
             ylabel = ylabel,
             title = "$t ε tercile",
             legend = false,
             markersize = 4,
             markerstrokewidth = 0,
+            alpha = 0.1,
         )
         # OLS line on the binned means for visual reference.
         if nrow(bm) >= 2
@@ -82,14 +83,15 @@ function tercile_panel(dq, x_col, y_col; xlabel, ylabel)
         end
         return p
     end
-    return plot(plots...; layout = (1, 3), size = (1500, 400))
+    return plot(plots...; layout = (1, 3), size = (1800, 400))
 end
 
 function trim_variation_table(fords)
     trim_counts = @> fords groupby([:model, :extra]) combine(nrow => :total_count)
 
-    dealer_quarter_trim =
-        @> fords groupby([:model, :extra, :dealer_uid, :t]) combine(nrow => :_sales)
+    dealer_quarter_trim = @> fords groupby([:model, :extra, :dealer_uid, :t]) combine(
+        nrow => :_sales
+    )
     dq_with_trim = @> dealer_quarter_trim begin
         groupby([:model, :extra])
         combine(nrow => :n_dealer_quarters_with_trim)
@@ -164,10 +166,21 @@ function (@main)(_)
         )
         png(p2, joinpath(outdir, "quantity_to_trims.png"))
 
+        p3 = tercile_panel(
+            dq,
+            :lag_median_markup_dr,
+            :unique_trims_resid,
+            xlabel = "Residualized Num. Trims",
+            ylabel = "Residualized Lag Price",
+        )
+        png(p3, joinpath(outdir, "price_to_trims.png"))
+
         @info "Writing trim-variation table"
         trim_table = trim_variation_table(fords)
         CSV.write(snakemake.output["trim_csv"], trim_table)
-        @info "  rows" nrow(trim_table) top_share = first(trim_table.share_dealer_quarters_with_trim, 5)
+        @info "  rows" nrow(trim_table) top_share = first(
+            trim_table.share_dealer_quarters_with_trim, 5
+        )
     end
     return nothing
 end
