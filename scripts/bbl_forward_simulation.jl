@@ -108,6 +108,26 @@ function (@main)(_)
             end
         end
 
+        # Every VK the simulator can sample must have a full complement of
+        # boosters (price mean + var, state transition intercept/own; cross is
+        # optional per state_transition_estimation.jl:127). Filter to that
+        # intersection so no runtime lookup can miss.
+        usable_vks = intersect(
+            Set(keys(price_mean_boosters)),
+            Set(keys(price_var_boosters)),
+            Set(keys(st_int_mean_boosters)),
+            Set(keys(st_own_mean_boosters)),
+            Set(keys(model.product_lookup.j)),
+        )
+        @info "Usable VehicleKey universe" n_usable = length(usable_vks) n_dropped = length(
+            model.product_lookup.j
+        ) - length(usable_vks)
+
+        for (_, vks) in group_to_vks
+            filter!(vk -> vk ∈ usable_vks, vks)
+        end
+        filter!(kv -> !isempty(kv.second), group_to_vks)
+
         # -----------------------------------------------------------------------------
         # Time loop scaffolding
         # -----------------------------------------------------------------------------
@@ -135,8 +155,9 @@ function (@main)(_)
         outputs = Dict{Tuple{QuarterKey, UUID}, NamedTuple}()
 
         # Seed period record: observed everything, no simulated draws yet.
+        # Filter obs to usable_vks so seed & simulated periods are apples-to-apples.
         for f in dealers
-            obs_assort = intermed[(t₀, f)]
+            obs_assort = VehicleKey[j for j in intermed[(t₀, f)] if j ∈ usable_vks]
             obs_prices = Float32[
                 model.product_info[model.product_lookup.tjf[(t₀, j, f)]].p for j in obs_assort
             ]
@@ -231,8 +252,6 @@ function (@main)(_)
                 state_exp_mat = fill(NaN32, J, J + 1)
                 dm_prev_row = XGBoost.DMatrix(reshape(s_prev, 1, :))
                 for vk in new_assortment
-                    haskey(st_int_mean_boosters, vk) ||
-                        error("We don't have a state booster for $vk")
                     j_idx = prod_index[vk]
                     μ_int = Float32(only(XGBoost.predict(st_int_mean_boosters[vk], dm_prev_row)))
                     v_int = Float32(only(XGBoost.predict(st_int_var_boosters[vk], dm_prev_row)))
@@ -240,7 +259,9 @@ function (@main)(_)
                     μ_own = Float32(only(XGBoost.predict(st_own_mean_boosters[vk], dm_prev_row)))
                     v_own = Float32(only(XGBoost.predict(st_own_var_boosters[vk], dm_prev_row)))
                     state_exp_mat[j_idx, j_idx + 1] = draw_normal(μ_own, v_own)
-                    @assert haskey(st_cross_mean_boosters, vk)
+                    # Cross booster is optional (empty in training for VKs that
+                    # never had a co-carried partner) — skip cross terms if missing.
+                    haskey(st_cross_mean_boosters, vk) || continue
                     partners = Int[prod_index[vk2] for vk2 in new_assortment if vk2 != vk]
                     isempty(partners) && continue
                     X_cross = Matrix{Float32}(undef, length(partners), ncols_state + 1)
@@ -265,7 +286,6 @@ function (@main)(_)
                 dm_price = XGBoost.DMatrix(reshape(x_price_common, 1, :))
                 drawn_prices = Vector{Float32}(undef, length(new_assortment))
                 for (i, vk) in enumerate(new_assortment)
-                    @assert haskey(price_mean_boosters, vk) "We need a price booster for $vk"
                     log_p_mean = only(XGBoost.predict(price_mean_boosters[vk], dm_price))
                     log_p_var = only(XGBoost.predict(price_var_boosters[vk], dm_price))
                     log_p_stddev = sqrt(max(Float32(log_p_var), 0.0f0))
@@ -281,7 +301,9 @@ function (@main)(_)
                 # aren't in training so the default hausman lookup would NaN
                 # out. Products present in obs get PriceChange; new products
                 # get ModelAdd(price=p); removed products get ModelDelete.
-                obs_at_t = get(intermed, (t, f), VehicleKey[])
+                obs_at_t = VehicleKey[
+                    vk for vk in get(intermed, (t, f), VehicleKey[]) if vk ∈ usable_vks
+                ]
                 obs_set = Set(obs_at_t)
                 for vk in setdiff(obs_at_t, new_assortment)
                     apply!(cf, Demand.ModelDelete(vehicle = vk, quarter = t, dealer_uid = f))

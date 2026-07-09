@@ -32,11 +32,26 @@ function seed!(cf::Counterfactual)
 end
 
 function residual_demand(
-    cf::Counterfactual, dealer_uid::UUID, quarter; return_draws::Bool = false
+    cf::Counterfactual, dealer_uid::UUID, quarter;
+    return_draws::Bool = false,
+    keep::Union{Nothing, Set{VehicleKey}} = nothing,
 )
     products = collect(keys(cf.model.product_lookup.j))
     out = fill(NaN32, (length(products), length(products) + 1))
     carried_products = tf_to_j_lookup(cf)[(quarter, dealer_uid)]
+
+    # When a `keep` filter is provided, remove non-kept products from the
+    # counterfactual state for this (t, f) so `expected_demand` returns a
+    # vector aligned with the reduced `carried_products`. Undone before return.
+    delete_handles = NamedTuple[]
+    if keep !== nothing
+        for j in carried_products
+            j ∈ keep && continue
+            h = apply!(cf, ModelDelete(vehicle = j, quarter = quarter, dealer_uid = dealer_uid))
+            ismissing(h) || push!(delete_handles, h)
+        end
+        carried_products = [j for j in carried_products if j ∈ keep]
+    end
     prices = zeros(SIM_SIZE, length(carried_products))
     demands = zeros(SIM_SIZE, length(carried_products))
     product_idxs = [findfirst(==(j), products) for j in carried_products]
@@ -70,6 +85,11 @@ function residual_demand(
         α = X \ view(demands, :, i)
         out[j, 1] = α[1]
         out[j, product_idxs .+ 1] .= α[2:end]
+    end
+
+    # Restore the ModelDeletes applied at entry (LIFO).
+    for h in Iterators.reverse(delete_handles)
+        undo!(cf, h)
     end
 
     return return_draws ? (out, raw_prices, raw_demands) : out

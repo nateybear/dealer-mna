@@ -996,6 +996,47 @@ rule plot_effect_on_closest:
             wildcards=wildcards,
         )
 
+rule data_kept_trims:
+    """
+    Ford (model, extra) rows whose share of dealer-quarters is above the
+    THRESHOLD_SHARE cutoff in scripts/kept_trims.jl. Rare-trim filter that
+    propagates through residual_demand and every supply-side booster so BBL
+    forward simulation never draws a VehicleKey without a fitted density.
+    """
+    input:
+        "scripts/kept_trims.jl",
+        fords="data/arrow/fords.arrow",
+    output:
+        kept_trims="data/kept_trims.arrow",
+    log:
+        "logs/kept_trims.log",
+    run:
+        julia("scripts/kept_trims.jl", input=input, output=output, log=log)
+
+
+rule data_residual_demand:
+    """
+    Per (t, f) residual-demand summary matrix: intercept + own/cross price
+    coefficients per carried product. Filtered through kept_trims so rare
+    Ford trims are excluded from the state features every downstream
+    booster conditions on.
+    """
+    input:
+        "scripts/residual_demands.jl",
+        model_frames="data/model_frames.jld2",
+        demand_estimates="data/demand_estimates.jld2",
+        price_table="data/price_table.arrow",
+        kept_trims="data/kept_trims.arrow",
+    output:
+        residual_demand="data/residual_demand.jld2",
+    log:
+        "logs/residual_demand.log",
+    run:
+        julia(
+            "scripts/residual_demands.jl", input=input, output=output, log=log
+        )
+
+
 rule data_compliance_estimation:
     """
     Cross-fit CEM (step 1) + full-data OOS-best-round refit (step 2), with the
@@ -1011,6 +1052,7 @@ rule data_compliance_estimation:
         dealer_demographics="data/dealer_demographics.arrow",
         model_frames="data/model_frames.jld2",
         residual_demand="data/residual_demand.jld2",
+        kept_trims="data/kept_trims.arrow",
     output:
         compliance="data/compliance.arrow",
         fits="data/compliance_fits.jld2",
@@ -1041,6 +1083,8 @@ rule data_price_density_estimation:
         residual_demand="data/residual_demand.jld2",
         sales_targets="data/sales_targets.jld2",
         compliance="data/compliance.arrow",
+        price_table="data/price_table.arrow",
+        kept_trims="data/kept_trims.arrow",
     output:
         price_densities="data/price_densities.jld2",
     log:
@@ -1065,6 +1109,8 @@ rule data_state_transition_estimation:
         "scripts/state_transition_estimation.jl",
         model_frames="data/model_frames.jld2",
         residual_demand="data/residual_demand.jld2",
+        price_table="data/price_table.arrow",
+        kept_trims="data/kept_trims.arrow",
     output:
         state_transition="data/state_transition.jld2",
     log:
@@ -1116,13 +1162,13 @@ rule data_bbl_simulations:
         expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 101))
 
 
-rule plot_assortment_probs:
+rule table_assortment_probs:
     input:
         "scripts/plot_assortment_probs.jl",
         fords = "data/arrow/fords.arrow",
         dealer_demographics = "data/dealer_demographics.arrow",
     output:
-        plots=directory("plots/assortment_probs_ford"),
+        reg_table="tables/markup_trim_regression.tex",
         trim_csv="tables/trim_variation_dealer_quarter.csv",
     log:
         "logs/plot_assortment_probs.log",

@@ -25,6 +25,26 @@ using Distributed
     J = length(products)
     prod_index = Dict(p => i for (i, p) in enumerate(products))
 
+    # Kept-trim filter: fit boosters only for VehicleKeys whose (model, extra)
+    # cleared the share cutoff, and only train cross-price predictions on
+    # partners that also cleared it. Same filter as price_density_estimation
+    # and residual_demands so BBL sees a consistent VK universe.
+    _kept_pairs = Set(
+        (row.model, row.extra) for
+        row in eachrow(read_arrow("data/kept_trims.arrow"))
+    )
+    _price_table = read_arrow("data/price_table.arrow")
+    _vk_to_extra = Dict{VehicleKey, String}()
+    for row in eachrow(_price_table)
+        _vk_to_extra[(row.make, row.model, row.model_year, Float32(row.trim_rank))] =
+            row.extra
+    end
+    kept_vks = Set(
+        j for j in keys(model.product_lookup.j) if
+        haskey(_vk_to_extra, j) && (j[2], _vk_to_extra[j]) ∈ _kept_pairs
+    )
+    kept_j_idxs = sort([prod_index[j] for j in kept_vks])
+
     # Column-major flat layout for the J × (J+1) residual_demand matrix per row:
     #   intercept for product j: column j
     #   coefficient with product k: column j + k*J
@@ -47,7 +67,10 @@ using Distributed
             haskey(state_lookup, (tlag, f)) || continue
             push!(rows_t, i_t)
             push!(rows_tlag, state_lookup[(tlag, f)])
-            push!(carried, [prod_index[k] for k in js_at_t])
+            # Restrict cross-price partners to kept VKs — BBL only ever
+            # samples kept assortments, so unfiltered partners would train
+            # on rows the sim can't produce.
+            push!(carried, [prod_index[k] for k in js_at_t if k ∈ kept_vks])
         end
         return rows_t, rows_tlag, carried
     end
@@ -170,7 +193,10 @@ using Distributed
 end
 
 function (@main)(_)
-    fitted = pmap(1:length(products)) do j_idx
+    @info "Fitting state transitions" n_kept = length(kept_j_idxs) n_dropped = length(
+        products
+    ) - length(kept_j_idxs)
+    fitted = pmap(kept_j_idxs) do j_idx
         try
             fit_product(j_idx)
         catch e
@@ -186,7 +212,7 @@ function (@main)(_)
             Vector{UInt8}, Vector{UInt8},  # cross:      mean, var
         },
     }()
-    for (j_idx, f) in enumerate(fitted)
+    for (j_idx, f) in zip(kept_j_idxs, fitted)
         f === nothing && continue
         out[products[j_idx]] = f
     end
