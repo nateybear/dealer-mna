@@ -265,6 +265,14 @@ function (@main)(_)
     φ̂_accum = zeros(Float64, n_agg)
     phi_booster_bytes = UInt8[]
 
+    # Full MCEM trace — recorded unconditionally every round (including
+    # burn-in), saved to data/compliance_mcem_trace.jld2 for the paper's
+    # burn-in / mixing diagnostics. gamma_trace columns align with the
+    # `compliance` row order; phi_hat_trace columns align with `agg_master`.
+    pi_trace = Vector{Float64}(undef, N_TOTAL)
+    gamma_trace = Matrix{Float32}(undef, N_TOTAL, nrow(compliance))
+    phi_hat_trace = Matrix{Float32}(undef, N_TOTAL, n_agg)
+
     for i in 1:N_TOTAL
         @info "Starting round $i"
         @everywhere GC.gc(true)
@@ -511,6 +519,11 @@ function (@main)(_)
         E_step.p_compliant = [r.p_compliant for r in E_results]
         log_e_step_diagnostics(E_results)
 
+        # Full trace — recorded every round so the paper can plot burn-in.
+        pi_trace[i] = π
+        gamma_trace[i, :] .= E_step.p_compliant
+        phi_hat_trace[i, :] .= φ_pred
+
         # Accumulate γ posterior mean after burn-in; also snapshot π's trace
         # and the φ̂ predictions across aggregate-panel rows.
         if i > BURN_IN
@@ -550,6 +563,24 @@ function (@main)(_)
             # sales_target_estimation.jl's output so downstream consumers
             # (price_density_estimation, bbl_forward_simulation) don't change.
             JLD2.save_object("data/sales_targets.jld2", (phi_booster_bytes, τ))
+            # Full MCEM trace for paper burn-in diagnostics. Row i of each
+            # trace is the sample at round i; columns of gamma_trace align
+            # with `dealer_uid`/`t`, and columns of phi_hat_trace align with
+            # `agg_dealer_uid`/`agg_t`.
+            JLD2.save_object(
+                "data/compliance_mcem_trace.jld2",
+                (;
+                    pi_trace,
+                    gamma_trace,
+                    phi_hat_trace,
+                    dealer_uid = compliance.dealer_uid,
+                    t = compliance.t,
+                    agg_dealer_uid = agg_master.dealer_uid,
+                    agg_t = agg_master.t,
+                    N_TOTAL,
+                    BURN_IN,
+                ),
+            )
 
             @info "Step 2: full-data refit with OOS early stopping"
             final_M_step =

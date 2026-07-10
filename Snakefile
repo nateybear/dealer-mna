@@ -1019,7 +1019,10 @@ rule data_residual_demand:
     Per (t, f) residual-demand summary matrix: intercept + own/cross price
     coefficients per carried product. Filtered through kept_trims so rare
     Ford trims are excluded from the state features every downstream
-    booster conditions on.
+    booster conditions on. Distributed via `-p N`; each worker holds its
+    own Counterfactual so the per-(t,f) ModelDelete/undo cycle inside
+    Supply.residual_demand can't collide. Hardcoded input paths; the rule
+    input declaration is for dependency tracking only.
     """
     input:
         "scripts/residual_demands.jl",
@@ -1033,7 +1036,11 @@ rule data_residual_demand:
         "logs/residual_demand.log",
     run:
         julia(
-            "scripts/residual_demands.jl", input=input, output=output, log=log
+            "scripts/residual_demands.jl",
+            input=input,
+            output=output,
+            log=log,
+            processes=config.get("processes", 1),
         )
 
 
@@ -1058,6 +1065,7 @@ rule data_compliance_estimation:
         fits="data/compliance_fits.jld2",
         fits_final="data/compliance_fits_final.jld2",
         sales_targets="data/sales_targets.jld2",
+        mcem_trace="data/compliance_mcem_trace.jld2",
     log:
         "logs/compliance_estimation.log",
     run:
