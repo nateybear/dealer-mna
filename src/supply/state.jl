@@ -7,21 +7,51 @@ using DataStructures
 const _PRICE_SEEDS = Ref{Matrix{Float32}}()
 const SIM_SIZE = 150
 
+"""
+    tf_to_j_lookup(model_or_cf) → OrderedDict{(QuarterKey, UUID), Vector{VehicleKey}}
+
+Live products per (quarter, dealer_uid), sorted within each (t, f) by
+`k_local` so the order matches `expected_demand` / `dealer_block_locals`.
+Only entries whose δ_idx is still in `model.tjf_to_block_k` are returned —
+ModelDelete drops products from the view, ModelAdd would grow it.
+
+Memoized on the `DemandModel`. Since ModelAdd/ModelDelete mutate the model
+in place, callers who mutate must invalidate the cache via
+`invalidate_tf_to_j_lookup!()` before the next query. `residual_demand`
+does this at entry and after undoing internal deletes.
+"""
 @memoize function tf_to_j_lookup(model::DemandModel)
-    out = OrderedDict{Tuple{QuarterKey, UUID}, Vector{VehicleKey}}()
     (; tjf) = model.product_lookup
-    for (t, j, f) in keys(tjf)
+    grouped = OrderedDict{Tuple{QuarterKey, UUID}, Vector{Tuple{Int, VehicleKey}}}()
+    for ((t, j, f), δ_idx) in tjf
+        loc = get(model.tjf_to_block_k, δ_idx, nothing)
+        loc === nothing && continue
+        _, k_local = loc
         key = (t, f)
-        if haskey(out, key)
-            push!(out[key], j)
+        if haskey(grouped, key)
+            push!(grouped[key], (Int(k_local), j))
         else
-            out[key] = [j]
+            grouped[key] = [(Int(k_local), j)]
         end
+    end
+    out = OrderedDict{Tuple{QuarterKey, UUID}, Vector{VehicleKey}}()
+    for (key, pairs_) in grouped
+        sort!(pairs_; by = first)
+        out[key] = [p[2] for p in pairs_]
     end
     return out
 end
 
 tf_to_j_lookup(cf::Counterfactual) = tf_to_j_lookup(cf.model)
+
+"""
+    invalidate_tf_to_j_lookup!()
+
+Empty the `tf_to_j_lookup` memoize cache so the next call rebuilds from the
+current model state. Call this after any ModelAdd / ModelDelete / undo that
+changed which products live in `model.tjf_to_block_k`.
+"""
+invalidate_tf_to_j_lookup!() = empty!(Memoize.memoize_cache(tf_to_j_lookup))
 
 function seed!(cf::Counterfactual)
     num_models = length(keys(cf.model.product_lookup.j))
@@ -32,25 +62,38 @@ function seed!(cf::Counterfactual)
 end
 
 """
-    residual_demand(cf, dealer_uid, quarter, carried_products; return_draws=false)
+    residual_demand(cf, dealer_uid, quarter; return_draws=false, keep=nothing)
 
-Compute the (J × (J+1)) residual-demand row for `(quarter, dealer_uid)` using
-exactly `carried_products` as the assortment to perturb. The caller is
-responsible for picking a VK set that reflects the *current* counterfactual
-state — `tf_to_j_lookup` is memoized on the model and does not track
-ModelAdd/ModelDelete tweaks, so relying on it silently gets stale.
+Perturbs SIM_SIZE prices for the dealer's assortment at `(quarter, dealer_uid)`
+and OLS-fits per-product intercept + own-/cross-price coefficients. Order is
+`tf_to_j_lookup`'s (k_local-sorted), so the internal PriceMultiply loop and
+`expected_demand` return aligned vectors.
 
-Each VK in `carried_products` must have a live (quarter, vk, dealer_uid)
-triple in `cf.model.tjf_to_block_k`; otherwise the internal PriceMultiply
-call returns `missing` and this function errors.
+Reads the assortment via `tf_to_j_lookup(cf)` after invalidating the memoize
+cache, so tweaks applied by the caller before the call are reflected. Pass
+`keep::Set{VehicleKey}` to restrict the perturbed assortment to those VKs;
+non-kept products are ModelDelete'd here and restored before returning.
 """
 function residual_demand(
-    cf::Counterfactual, dealer_uid::UUID, quarter,
-    carried_products::AbstractVector{VehicleKey};
+    cf::Counterfactual, dealer_uid::UUID, quarter;
     return_draws::Bool = false,
+    keep::Union{Nothing, Set{VehicleKey}} = nothing,
 )
+    invalidate_tf_to_j_lookup!()
     products = collect(keys(cf.model.product_lookup.j))
     out = fill(NaN32, (length(products), length(products) + 1))
+
+    delete_handles = NamedTuple[]
+    if keep !== nothing
+        for j in tf_to_j_lookup(cf)[(quarter, dealer_uid)]
+            j ∈ keep && continue
+            h = apply!(cf, ModelDelete(vehicle = j, quarter = quarter, dealer_uid = dealer_uid))
+            ismissing(h) || push!(delete_handles, h)
+        end
+        isempty(delete_handles) || invalidate_tf_to_j_lookup!()
+    end
+    carried_products = tf_to_j_lookup(cf)[(quarter, dealer_uid)]
+
     prices = zeros(SIM_SIZE, length(carried_products))
     demands = zeros(SIM_SIZE, length(carried_products))
     product_idxs = [findfirst(==(j), products) for j in carried_products]
@@ -85,6 +128,14 @@ function residual_demand(
         out[j, 1] = α[1]
         out[j, product_idxs .+ 1] .= α[2:end]
     end
+
+    # Restore internal ModelDeletes (LIFO) and re-invalidate so anyone
+    # querying tf_to_j_lookup next sees the restored state, not the
+    # filtered snapshot our earlier invalidation cached.
+    for h in Iterators.reverse(delete_handles)
+        undo!(cf, h)
+    end
+    isempty(delete_handles) || invalidate_tf_to_j_lookup!()
 
     return return_draws ? (out, raw_prices, raw_demands) : out
 end
