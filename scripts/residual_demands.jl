@@ -11,9 +11,10 @@ using Distributed
     params = JLD2.load_object("data/demand_estimates.jld2").minimizer
     cf = Counterfactual(model, params)
 
-    # Kept-VK set for Supply.residual_demand's `keep` filter — same
-    # (model, extra) → VehicleKey map that scripts/bbl_forward_simulation.jl
-    # builds from price_table.
+    # Kept-VK set — same (model, extra) → VehicleKey map that
+    # scripts/bbl_forward_simulation.jl builds from price_table. Intersected
+    # against each dealer-quarter's observed assortment below to form the
+    # `carried_products` argument to Supply.residual_demand.
     _kept_pairs = Set(
         (row.model, row.extra) for
         row in eachrow(read_arrow("data/kept_trims.arrow"))
@@ -36,11 +37,20 @@ using Distributed
             rand(rng, Float32, J, Supply.SIM_SIZE) .* 0.3f0 .+ 0.85f0
     end
 
-    tf_keys = collect(keys(Supply.tf_to_j_lookup(cf)))
+    tf_to_js = Supply.tf_to_j_lookup(cf)
+    tf_keys = collect(keys(tf_to_js))
+
+    # Per-(t, f) VK list = observed assortment ∩ keep. Precomputed once so each
+    # worker just indexes it — no tf_to_j_lookup memoization traps at call time.
+    carried_by_tf = Dict{eltype(tf_keys), Vector{VehicleKey}}(
+        tf => VehicleKey[j for j in js if j ∈ keep] for (tf, js) in tf_to_js
+    )
 
     function compute_row(i::Int)
         t, f = tf_keys[i]
-        return reshape(Supply.residual_demand(cf, f, t; keep = keep), :)
+        return reshape(
+            Supply.residual_demand(cf, f, t, carried_by_tf[(t, f)]), :
+        )
     end
 end
 

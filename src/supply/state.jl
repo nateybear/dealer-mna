@@ -31,27 +31,26 @@ function seed!(cf::Counterfactual)
     end
 end
 
+"""
+    residual_demand(cf, dealer_uid, quarter, carried_products; return_draws=false)
+
+Compute the (J × (J+1)) residual-demand row for `(quarter, dealer_uid)` using
+exactly `carried_products` as the assortment to perturb. The caller is
+responsible for picking a VK set that reflects the *current* counterfactual
+state — `tf_to_j_lookup` is memoized on the model and does not track
+ModelAdd/ModelDelete tweaks, so relying on it silently gets stale.
+
+Each VK in `carried_products` must have a live (quarter, vk, dealer_uid)
+triple in `cf.model.tjf_to_block_k`; otherwise the internal PriceMultiply
+call returns `missing` and this function errors.
+"""
 function residual_demand(
-    cf::Counterfactual, dealer_uid::UUID, quarter;
+    cf::Counterfactual, dealer_uid::UUID, quarter,
+    carried_products::AbstractVector{VehicleKey};
     return_draws::Bool = false,
-    keep::Union{Nothing, Set{VehicleKey}} = nothing,
 )
     products = collect(keys(cf.model.product_lookup.j))
     out = fill(NaN32, (length(products), length(products) + 1))
-    carried_products = tf_to_j_lookup(cf)[(quarter, dealer_uid)]
-
-    # When a `keep` filter is provided, remove non-kept products from the
-    # counterfactual state for this (t, f) so `expected_demand` returns a
-    # vector aligned with the reduced `carried_products`. Undone before return.
-    delete_handles = NamedTuple[]
-    if keep !== nothing
-        for j in carried_products
-            j ∈ keep && continue
-            h = apply!(cf, ModelDelete(vehicle = j, quarter = quarter, dealer_uid = dealer_uid))
-            ismissing(h) || push!(delete_handles, h)
-        end
-        carried_products = [j for j in carried_products if j ∈ keep]
-    end
     prices = zeros(SIM_SIZE, length(carried_products))
     demands = zeros(SIM_SIZE, length(carried_products))
     product_idxs = [findfirst(==(j), products) for j in carried_products]
@@ -85,11 +84,6 @@ function residual_demand(
         α = X \ view(demands, :, i)
         out[j, 1] = α[1]
         out[j, product_idxs .+ 1] .= α[2:end]
-    end
-
-    # Restore the ModelDeletes applied at entry (LIFO).
-    for h in Iterators.reverse(delete_handles)
-        undo!(cf, h)
     end
 
     return return_draws ? (out, raw_prices, raw_demands) : out

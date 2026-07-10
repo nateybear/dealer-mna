@@ -339,8 +339,12 @@ function (@main)(_)
                 p_iota = logistic((q_tot - φ_f) / τ_sales)
                 new_iota = rand(rng) < p_iota
 
+                # Summarize residual demand against the post-tweak assortment.
+                # `new_assortment` is what BBL just installed via
+                # ModelDelete/ModelAdd/PriceChange; passing it explicitly avoids
+                # tf_to_j_lookup's memoization staleness after tweaks.
                 s_actual, pert_prices, pert_demands = Supply.residual_demand(
-                    cf, f, t; return_draws = true
+                    cf, f, t, assortment_by_dealer[f]; return_draws = true
                 )
 
                 assort = assortment_by_dealer[f]
