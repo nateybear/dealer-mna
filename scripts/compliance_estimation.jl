@@ -138,6 +138,20 @@ A_PRIOR=10
 function (@main)(_)
     Dealers.load_from_disk!("data/dealers_init_filtered.jld2")
     fords = read_arrow("data/arrow/fords.arrow")
+
+    # Kept-trim filter — drop rows for (model, extra) below the share cutoff so
+    # the compliance panel, the aggregate q for the sales-target booster, and
+    # the E-step E_results all see the same universe BBL will simulate.
+    kept_pairs = Set(
+        (row.model, row.extra) for
+        row in eachrow(read_arrow("data/kept_trims.arrow"))
+    )
+    fords = subset(
+        fords,
+        [:model, :extra] => ByRow((m, e) -> (m, e) ∈ kept_pairs),
+    )
+    @info "Filtered fords" n_rows = nrow(fords) n_kept_trims = length(kept_pairs)
+
     dealer_demographics = semijoin(
         read_arrow("data/dealer_demographics.arrow"), fords, on = :uid => :dealer_uid
     )
@@ -171,11 +185,17 @@ function (@main)(_)
 
     n_agg = nrow(agg_master)
     ncols_state = size(state_matrix, 2)
-    X_agg_base = Matrix{Float32}(undef, n_agg, ncols_state)
+    # Layout: [state_matrix[t-1], quarter_of_year(t)]. The trailing column is a
+    # calendar signal so the φ booster can absorb the Q1/Q4 shift caused by
+    # two-model-year overlap (see filteryears in src/supply/panel.jl) rather
+    # than forcing that variation into the state-feature dimensions. ι_lag
+    # gets hcat'd on each M-step round below.
+    X_agg_base = Matrix{Float32}(undef, n_agg, ncols_state + 1)
     for (i, r) in enumerate(eachrow(agg_master))
         tlag = r.t - Quarter(1)
         quarter = (Dates.year(tlag), Dates.quarterofyear(tlag))
-        X_agg_base[i, :] .= @view state_matrix[state_lookup()[(quarter, r.dealer_uid)], :]
+        X_agg_base[i, 1:ncols_state] .= @view state_matrix[state_lookup()[(quarter, r.dealer_uid)], :]
+        X_agg_base[i, end] = Float32(Dates.quarterofyear(r.t))
     end
     q_agg = Float32.(agg_master.q)
 

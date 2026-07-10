@@ -83,7 +83,9 @@ function (@main)(_)
                 rho_boosters[key] = bootup(rho_bytes, ncols_state)
             end
         end
-        sales_booster = bootup(sales_bytes, ncols_state + 1)
+        # +2 = quarter_of_year(t) + ι_lag; must match X_agg column count in
+        # scripts/compliance_estimation.jl where the booster is trained.
+        sales_booster = bootup(sales_bytes, ncols_state + 2)
         price_mean_boosters = Dict{VehicleKey, XGBoost.Booster}()
         price_var_boosters = Dict{VehicleKey, XGBoost.Booster}()
         for (vk, (mean_bytes, var_bytes)) in price_densities
@@ -190,8 +192,9 @@ function (@main)(_)
                 s_prev = state_prev[f]
                 ι_prev_f32 = Float32(iota_prev[f])
 
-                # Sales target φ_t = f(state_{t-1}, ι_{t-1})
-                x_st = reshape(vcat(s_prev, ι_prev_f32), 1, :)
+                # Sales target φ_t = f(state_{t-1}, quarter_of_year(t), ι_{t-1}).
+                # Column order matches X_agg in compliance_estimation.jl.
+                x_st = reshape(vcat(s_prev, Float32(t[2]), ι_prev_f32), 1, :)
                 dm_st = XGBoost.DMatrix(x_st)
                 log_phi = only(XGBoost.predict(sales_booster, dm_st; margin = true))
                 finalize(dm_st)

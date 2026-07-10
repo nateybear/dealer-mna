@@ -47,13 +47,17 @@ using Distributed
 
         n = length(eligible)
         ncols_state = size(state_matrix, 2)
-        X = Matrix{Float32}(undef, n, ncols_state + 1)
+        # Layout: [state_matrix[t-1], quarter_of_year(t), ι_lag]. Same column
+        # order X_agg is built with in scripts/compliance_estimation.jl.
+        X = Matrix{Float32}(undef, n, ncols_state + 2)
         for r in 1:n
             tf, i_tlag, _ = eligible[r]
+            (t_year, t_q), _ = tf
             X[r, 1:ncols_state] .= @view state_matrix[i_tlag, :]
+            X[r, ncols_state + 1] = Float32(t_q)
             X[r, end] = ι_lag[tf]
         end
-        b = XGBoost.Booster(XGBoost.DMatrix(zeros(Float32, 1, ncols_state + 1)))
+        b = XGBoost.Booster(XGBoost.DMatrix(zeros(Float32, 1, ncols_state + 2)))
         XGBoost.load!(b, _sales_bytes)
         dm = XGBoost.DMatrix(X)
         logphi = XGBoost.predict(b, dm; margin = true)
