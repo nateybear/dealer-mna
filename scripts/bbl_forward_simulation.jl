@@ -37,6 +37,43 @@ function (@main)(_)
         price_table = read_arrow(snakemake.input["price_table"])
 
         # -----------------------------------------------------------------------------
+        # Evict products whose dealer_uid or vehicleid has no identifiable FE in
+        # regout. FixedEffectModels writes `missing` to fe_* for iteratively-
+        # dropped singleton groups, and pred_regout (src/demand/dense.jl:738-741)
+        # chokes on missing FE values. sweep_δ! iterates every product in the
+        # block, so filtering BBL-side inputs isn't enough — we have to remove
+        # them from the DemandModel. ModelDelete is persistent (no undo):
+        # cf.model keeps the filtered state for the whole sim.
+        # -----------------------------------------------------------------------------
+        fe_df = cf.regout.fe
+        identifiable_vehicleids = Set{String}(
+            row.vehicleid for row in eachrow(fe_df) if !ismissing(row.fe_vehicleid)
+        )
+        identifiable_dealers = Set{UUID}(
+            row.dealer_uid for row in eachrow(fe_df) if !ismissing(row.fe_dealer_uid)
+        )
+        vk_to_vehicleid(vk) = string(vk[2], "_", vk[3], "_", Float32(vk[4]))
+
+        n_evicted = 0
+        n_evicted_dealer = 0
+        n_evicted_vehicleid = 0
+        for (tjf_key, _) in collect(pairs(cf.model.product_lookup.tjf))
+            (t_key, j_key, f_key) = tjf_key
+            bad_dealer = f_key ∉ identifiable_dealers
+            bad_vk = vk_to_vehicleid(j_key) ∉ identifiable_vehicleids
+            (bad_dealer || bad_vk) || continue
+            h = apply!(
+                cf, Demand.ModelDelete(vehicle = j_key, quarter = t_key, dealer_uid = f_key)
+            )
+            ismissing(h) && continue
+            n_evicted += 1
+            bad_dealer && (n_evicted_dealer += 1)
+            bad_vk && (n_evicted_vehicleid += 1)
+        end
+        Supply.invalidate_tf_to_j_lookup!()
+        @info "Evicted singleton-FE tuples from DemandModel" n_evicted n_evicted_dealer n_evicted_vehicleid
+
+        # -----------------------------------------------------------------------------
         # Indices and lookups
         # -----------------------------------------------------------------------------
         intermed = Supply.tf_to_j_lookup(model)
