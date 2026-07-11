@@ -85,14 +85,17 @@ function residual_demand(
 
     delete_handles = NamedTuple[]
     if keep !== nothing
-        for j in tf_to_j_lookup(cf)[(quarter, dealer_uid)]
+        for j in get(tf_to_j_lookup(cf), (quarter, dealer_uid), VehicleKey[])
             j ∈ keep && continue
             h = apply!(cf, ModelDelete(vehicle = j, quarter = quarter, dealer_uid = dealer_uid))
             ismissing(h) || push!(delete_handles, h)
         end
         isempty(delete_handles) || invalidate_tf_to_j_lookup!()
     end
-    carried_products = tf_to_j_lookup(cf)[(quarter, dealer_uid)]
+    # If the (t, f) has no live products (empty original assortment, or all
+    # non-kept and just ModelDelete'd), the SIM_SIZE loop degenerates and `out`
+    # stays all-NaN. Callers should treat NaN as "dealer sat out."
+    carried_products = get(tf_to_j_lookup(cf), (quarter, dealer_uid), VehicleKey[])
 
     prices = zeros(SIM_SIZE, length(carried_products))
     demands = zeros(SIM_SIZE, length(carried_products))
