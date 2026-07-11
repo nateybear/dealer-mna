@@ -110,10 +110,23 @@ function (@main)(_)
             end
         end
 
+        # -----------------------------------------------------------------------------
+        # Time loop scaffolding — declared early so `max_model_year` below can
+        # cap the VK universe at the last simulated year.
+        # -----------------------------------------------------------------------------
+        T::Vector{QuarterKey} = [(y, q) for y in 2017:2019 for q in 1:4]
+        t₀ = T[1]
+        max_model_year = maximum(y for (y, _) in T)
+
         # Every VK the simulator can sample must have a full complement of
         # boosters (price mean + var, state transition intercept/own; cross is
         # optional per state_transition_estimation.jl:127). Filter to that
         # intersection so no runtime lookup can miss.
+        #
+        # Also cap model_year at the last simulated year — MY (max_year+1) VKs
+        # would be in-season at Q4 of the last year but their vehicleid isn't
+        # in regout.fe (2020 data is incomplete), so sweep_δ! → pred_regout
+        # would return `missing` and blow up on Float64 conversion.
         usable_vks = intersect(
             Set(keys(price_mean_boosters)),
             Set(keys(price_var_boosters)),
@@ -121,20 +134,15 @@ function (@main)(_)
             Set(keys(st_own_mean_boosters)),
             Set(keys(model.product_lookup.j)),
         )
+        filter!(vk -> vk[3] <= max_model_year, usable_vks)
         @info "Usable VehicleKey universe" n_usable = length(usable_vks) n_dropped = length(
             model.product_lookup.j
-        ) - length(usable_vks)
+        ) - length(usable_vks) max_model_year
 
         for (_, vks) in group_to_vks
             filter!(vk -> vk ∈ usable_vks, vks)
         end
         filter!(kv -> !isempty(kv.second), group_to_vks)
-
-        # -----------------------------------------------------------------------------
-        # Time loop scaffolding
-        # -----------------------------------------------------------------------------
-        T::Vector{QuarterKey} = [(y, q) for y in 2017:2019 for q in 1:4]
-        t₀ = T[1]
 
         dealers = sort(UUID[f for ((t, f), _) in state_lookup if t == t₀])
         @info "Seed period dealer set" n_dealers = length(dealers)
@@ -336,6 +344,26 @@ function (@main)(_)
 
             # Phase 2: q_t, ι_t, actual state
             for f in dealers
+                # Dealer drew an empty assortment (every compliance-group
+                # Bernoulli fired 0). Treat as "sat this quarter out": carry
+                # state_prev / iota_prev forward, record an empty-assortment
+                # row, don't call residual_demand (which would return NaN and
+                # poison next period's features).
+                if isempty(assortment_by_dealer[f])
+                    outputs[(t, f)] = (
+                        assortment = VehicleKey[],
+                        prices = Float32[],
+                        q = Float32[],
+                        phi = phi_by_dealer[f],
+                        iota = iota_prev[f],
+                        state_expected = state_expected_by_dealer[f],
+                        state_actual = state_prev[f],
+                        perturbation_prices = Matrix{Float32}(undef, 0, 0),
+                        perturbation_demands = Matrix{Float32}(undef, 0, 0),
+                    )
+                    continue
+                end
+
                 q_vec = Vector{Float32}(expected_demand(cf, f, t))
                 q_tot = sum(q_vec)
                 φ_f = phi_by_dealer[f]
