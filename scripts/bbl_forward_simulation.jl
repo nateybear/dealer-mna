@@ -181,6 +181,28 @@ function (@main)(_)
         end
         filter!(kv -> !isempty(kv.second), group_to_vks)
 
+        # Persistent eviction of non-usable products so cf.model's live universe
+        # matches the sim's sampling universe. Without this, unusable-but-FE-
+        # identifiable products (in `intermed` but not `usable_vks`) survive the
+        # tweak-application block below — the `obs_at_t` filter would skip them,
+        # so they'd never be ModelDelete'd. They then leak into
+        # `expected_demand`, `residual_demand`, and `sweep_δ!`, producing q /
+        # state_actual / perturbation_prices sized for the union rather than for
+        # `new_assortment` alone.
+        n_evicted_usable = 0
+        for (tjf_key, _) in collect(pairs(cf.model.product_lookup.tjf))
+            (t_key, j_key, f_key) = tjf_key
+            j_key ∈ usable_vks && continue
+            h = apply!(
+                cf, Demand.ModelDelete(vehicle = j_key, quarter = t_key, dealer_uid = f_key)
+            )
+            ismissing(h) && continue
+            n_evicted_usable += 1
+        end
+        Supply.invalidate_tf_to_j_lookup!()
+        intermed = Supply.tf_to_j_lookup(model)
+        @info "Evicted non-usable VKs from DemandModel" n_evicted_usable
+
         dealers = sort(UUID[f for ((t, f), _) in state_lookup if t == t₀])
         @info "Seed period dealer set" n_dealers = length(dealers)
 
