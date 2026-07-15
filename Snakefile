@@ -1170,6 +1170,34 @@ rule data_bbl_simulations:
         expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 101))
 
 
+rule data_bbl_matrix:
+    """
+    Aggregates the 100 BBL sim seeds into BBLMatrices — one (R, C) pair per
+    (FE type, scenario, seed) triple. Rebuilds the same eviction / usable_vks
+    pruning as bbl_forward_simulation so the BBLIndex's dealer + vehicle
+    columns align with the sim outputs 1:1.
+    """
+    input:
+        "scripts/bbl_matrix.jl",
+        model_frames="data/model_frames.jld2",
+        demand_estimates="data/demand_estimates.jld2",
+        delta_decomp="data/delta_decomposition_regout.jld2",
+        price_densities="data/price_densities.jld2",
+        state_transition="data/state_transition.jld2",
+        simulations=expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 101)),
+    output:
+        "data/bbl_matrix.jld2",
+    log:
+        "logs/bbl_matrix.log",
+    run:
+        julia(
+            "scripts/bbl_matrix.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 rule table_assortment_probs:
     input:
         "scripts/plot_assortment_probs.jl",
