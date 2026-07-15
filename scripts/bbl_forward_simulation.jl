@@ -172,9 +172,10 @@ function (@main)(_)
             Set(keys(model.product_lookup.j)),
         )
         filter!(vk -> vk[3] <= max_model_year, usable_vks)
-        @info "Usable VehicleKey universe" n_usable = length(usable_vks) n_dropped = length(
-            model.product_lookup.j
-        ) - length(usable_vks) max_model_year
+        @info "Usable VehicleKey universe" n_usable = length(usable_vks) n_dropped =
+            length(
+                model.product_lookup.j
+            ) - length(usable_vks) max_model_year
 
         for (_, vks) in group_to_vks
             filter!(vk -> vk ∈ usable_vks, vks)
@@ -433,11 +434,17 @@ function (@main)(_)
                     cf, f, t; return_draws = true
                 )
 
-                assort = assortment_by_dealer[f]
+                # `assortment_by_dealer[f]` and `prices_by_dealer[f]` are in
+                # `pbase_boosters`-iteration order; `q_vec` and the residual-
+                # demand outputs are in `tf_to_j_lookup(cf)` (k_local) order.
+                # Reorder the former to match the latter so all five arrays
+                # share one canonical column axis on disk.
+                canonical = get(Supply.tf_to_j_lookup(cf), (t, f), VehicleKey[])
+                perm = [findfirst(==(vk), assortment_by_dealer[f]) for vk in canonical]
 
                 outputs[(t, f)] = (
-                    assortment = assort,
-                    prices = prices_by_dealer[f],
+                    assortment = canonical,
+                    prices = prices_by_dealer[f][perm],
                     q = q_vec,
                     phi = φ_f,
                     iota = new_iota,

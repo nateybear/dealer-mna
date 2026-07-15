@@ -118,9 +118,19 @@ using Distributed
         Supply.fit_xgb_oos(
             X,
             y;
-            max_round = 1000,
-            patience = 5,
-            params = (subsample = 0.8, base_score = Float64(mean(y))),
+            max_round = 2000,
+            patience = 20,
+            params = merge(
+                Supply.XGB_DEFAULT_PARAMS,
+                (
+                    subsample = 0.8,
+                    base_score = Float64(mean(y)),
+                    max_depth = 8,
+                    min_child_weight = 5,
+                    eta = 0.05,
+                    lambda = 1.0,
+                ),
+            ),
         )
 
     function fit_prices(j)

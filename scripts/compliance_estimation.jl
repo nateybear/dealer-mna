@@ -53,7 +53,16 @@ using Distributed
     #     to the sparse training signal when it exists.
     RHO_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (base_score = -1.5, lambda = 5.0f-1),
+        (base_score = -1.5, lambda = 5.0f-1, max_depth = 4, eta = 0.1),
+    )
+
+    # Slight capacity bump over XGB_DEFAULT_PARAMS (max_depth 3→4, eta 0.15→0.1)
+    # so p_base can fit modest nonlinearity. Compliance-side; kept small because
+    # the per-group cross-fit training set is thin (~5 rows per group after the
+    # z=1 restriction bites) and the outer EM sampler amplifies overfitting.
+    PBASE_XGB_PARAMS = merge(
+        Supply.XGB_DEFAULT_PARAMS,
+        (max_depth = 4, eta = 0.1),
     )
 
     # Floor / cap on the Bernoulli sampling probability for z_dt. Even at
@@ -317,7 +326,8 @@ function (@main)(_)
                             ρ̃_prev = copy(ρ̃_tr)
 
                             booster_p = Supply.fit_xgb_custom(
-                                dm_tr; num_round = NUM_ROUND_STEP1
+                                dm_tr; num_round = NUM_ROUND_STEP1,
+                                params = PBASE_XGB_PARAMS,
                             ) do ŷ
                                 grad = Vector{Float32}(undef, n_tr)
                                 hess = Vector{Float32}(undef, n_tr)
@@ -638,6 +648,7 @@ function (@main)(_)
                                 y_all;
                                 max_round = 50,
                                 patience = 5,
+                                params = PBASE_XGB_PARAMS,
                             )
                             pbase_bytes = copy(
                                 XGBoost.save(booster_p, Vector{UInt8}; format = "ubj")

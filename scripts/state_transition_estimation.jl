@@ -120,10 +120,19 @@ using Distributed
 
         rng = MersenneTwister(hash(products[j_idx]) & 0xffffffff)
 
-        params_shared = (subsample = 0.8,)
+        params_shared = merge(
+            Supply.XGB_DEFAULT_PARAMS,
+            (
+                subsample = 0.8,
+                max_depth = 8,
+                min_child_weight = 5,
+                eta = 0.05,
+                lambda = 1.0,
+            ),
+        )
         fit_scalar(X, y) = Supply.fit_xgb_oos(
             X, y;
-            max_round = 500, patience = 5,
+            max_round = 2000, patience = 20,
             params = merge(params_shared, (base_score = Float64(mean(y)),)),
             rng = rng,
         )
