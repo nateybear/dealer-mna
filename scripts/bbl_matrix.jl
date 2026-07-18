@@ -92,16 +92,14 @@ function BBLMatrices(idx::BBLIndex, simulations)
             (outcome.perturbation_prices[n, i_j], outcome.perturbation_demands[n, i_j])
     end
 
-    function aggregator(sim, col_lookup, scenario_lookup)
-        return function (tup)
-            t, f, j = tup
-            row = idx.tf_row_index[(t, f)]
-            col = col_lookup(tup)
-            dealer_outcome = sim[(t, f)]
-            i_j = findfirst(==(j), dealer_outcome.assortment)
-            p, D = scenario_lookup(i_j, dealer_outcome)
-            return (; D, p, i = (row, col))
-        end
+    aggregator(col_lookup, scenario_lookup) = function (tup, sim)
+        t, f, j = tup
+        row = idx.tf_row_index[(t, f)]
+        col = col_lookup(tup)
+        dealer_outcome = sim[(t, f)]
+        i_j = findfirst(==(j), dealer_outcome.assortment)
+        p, D = scenario_lookup(i_j, dealer_outcome)
+        return (; D, p, i = (row, col))
     end
 
     R_f = newV()
@@ -119,13 +117,12 @@ function BBLMatrices(idx::BBLIndex, simulations)
 
     for (isim, simfile) in enumerate(simulations)
         sim = JLD2.load_object(simfile)
-        agg = aggregator$sim
         for tf in idx.tf_rows
             for (lookup, Rs, Cs) in containers_and_lookups
-                aggregate!(agg(lookup, policy_lookup), tf, sim, Rs[1, isim], Cs[1, isim])
+                aggregate!(aggregator(lookup, policy_lookup), tf, sim, Rs[1, isim], Cs[1, isim])
                 for iscen in 1:N_SCENARIOS
                     aggregate!(
-                        agg(lookup, cf_lookup(iscen)),
+                        aggregator(lookup, cf_lookup(iscen)),
                         tf,
                         sim,
                         Rs[iscen + 1, isim],
