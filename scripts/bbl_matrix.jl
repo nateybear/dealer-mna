@@ -89,7 +89,11 @@ function BBLMatrices(idx::BBLIndex, simulations)
     policy_lookup(i_j, outcome) = outcome.prices[i_j], outcome.q[i_j]
     function cf_lookup(n)
         return (i_j, outcome) ->
-            (outcome.perturbation_prices[n, i_j], outcome.perturbation_demands[n, i_j])
+            get.(
+                (outcome.perturbation_prices, outcome.perturbation_demands),
+                Ref((n, i_j)),
+                0.0,
+            )
     end
 
     aggregator(col_lookup, scenario_lookup) = function (tup, sim)
