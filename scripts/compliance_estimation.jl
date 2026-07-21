@@ -159,6 +159,12 @@ function (@main)(_)
         fords,
         [:model, :extra] => ByRow((m, e) -> (m, e) ∈ kept_pairs),
     )
+    # Cap model_year to match bbl_forward_simulation.jl's `max_model_year =
+    # maximum(y for (y, _) in T) = 2019` (T runs 2017-2019). Without this,
+    # q_{f,t} in the sales-target panel counts 2020-MY units sold in Q4 2019
+    # that the sim can never generate — φ ends up too large and p_iota in the
+    # sim sits systematically low.
+    fords = subset(fords, :model_year => ByRow(≤(2019)))
     @info "Filtered fords" n_rows = nrow(fords) n_kept_trims = length(kept_pairs)
 
     dealer_demographics = semijoin(
