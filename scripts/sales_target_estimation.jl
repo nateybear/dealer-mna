@@ -50,11 +50,15 @@ function (@main)(_)
 
         n = nrow(panel)
         ncols_state = size(state_matrix, 2)
-        X = Matrix{Float32}(undef, n, ncols_state + 1)
+        # Layout: [state_matrix[t-1], quarter_of_year(t), ι_lag]. Must stay in
+        # lockstep with compliance_estimation.jl's X_agg column order, since
+        # both this script and that one write the same data/sales_targets.jld2.
+        X = Matrix{Float32}(undef, n, ncols_state + 2)
         for (i, r) in enumerate(eachrow(panel))
             tlag = r.t - Quarter(1)
             quarter = (Dates.year(tlag), Dates.quarterofyear(tlag))
             X[i, 1:ncols_state] .= @view state_matrix[state_lookup[(quarter, r.dealer_uid)], :]
+            X[i, ncols_state + 1] = Float32(Dates.quarterofyear(r.t))
             X[i, end] = Float32(r.ι_lag)
         end
 
@@ -73,10 +77,10 @@ function (@main)(_)
             Supply.XGB_DEFAULT_PARAMS,
             (
                 base_score = Float64(log(mean(q))),
-                max_depth = 4,
-                min_child_weight = 1,
+                max_depth = 8,
+                min_child_weight = 5,
                 lambda = 1.0,
-                eta = 0.1,
+                eta = 0.05,
             ),
         )
 
@@ -130,8 +134,8 @@ function (@main)(_)
                     nll,
                     X,
                     y;
-                    max_round = 200,
-                    patience = 5,
+                    max_round = 1000,
+                    patience = 20,
                     params = params,
                     strata = ι_strata,
                     rng = MersenneTwister(85704),

@@ -247,6 +247,20 @@ function (@main)(_)
 
         idx = BBLIndex(dealers, usable_vks)
 
+        # Fail loud if the sim's dict is missing any (t, f) BBLIndex expects.
+        # `aggregate!` would eventually KeyError deep inside a nested loop;
+        # catch it here at the boundary with an actionable message. Most
+        # likely cause when this fires: sim files predate the first-eviction
+        # pass added in `b8b0f77`.
+        sim0 = JLD2.load_object(snakemake.input["simulations"][1])
+        missing_keys = [(t, f) for (t, f) in idx.tf_rows if !haskey(sim0, (t, f))]
+        if !isempty(missing_keys)
+            @error "BBLIndex has (t, f) not written by sim" n_missing = length(
+                missing_keys
+            ) example = missing_keys[1]
+            error("Regenerate sim files: snakemake -F data/bbl_simulation/seed_{1..100}.jld2")
+        end
+
         JLD2.save_object(snakemake.output[1], BBLMatrices(idx, snakemake.input["simulations"]))
     end
     return nothing

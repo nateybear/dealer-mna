@@ -182,6 +182,13 @@ function (@main)(_)
         end
         filter!(kv -> !isempty(kv.second), group_to_vks)
 
+        # Drop boosters whose group has no usable VKs: otherwise a Bernoulli
+        # fire in the assortment-draw loop hits `get(group_to_vks, group, [])`
+        # and adds nothing — a wasted fire that inflates the empty-assortment
+        # rate proportional to the fraction of dead groups.
+        filter!(kv -> haskey(group_to_vks, kv.first), pbase_boosters)
+        filter!(kv -> haskey(group_to_vks, kv.first), rho_boosters)
+
         # Persistent eviction of non-usable products so cf.model's live universe
         # matches the sim's sampling universe. Without this, unusable-but-FE-
         # identifiable products (in `intermed` but not `usable_vks`) survive the
@@ -462,6 +469,10 @@ function (@main)(_)
         # -----------------------------------------------------------------------------
         # Persist
         # -----------------------------------------------------------------------------
+        n_empty = count(o -> isempty(o.assortment), values(outputs))
+        @info "Empty-assortment dealer-quarters" n_empty n_total = length(outputs) frac =
+            n_empty / length(outputs)
+
         mkpath(dirname(snakemake.output["sim"]))
         JLD2.save_object(snakemake.output["sim"], outputs)
         @info "wrote" path = snakemake.output["sim"] n_records = length(outputs)
