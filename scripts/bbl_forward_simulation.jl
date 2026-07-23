@@ -296,13 +296,26 @@ function (@main)(_)
                         logistic(only(XGBoost.predict(pb_boost, dm_state; margin = true))),
                         1e-8, 1 - 1e-8,
                     )
-                    p_sale = if iota_prev[f] && haskey(rho_boosters, group)
-                        ρ̃ = clamp(
-                            logistic(
-                                only(XGBoost.predict(rho_boosters[group], dm_state; margin = true))
-                            ),
-                            2e-2, 1 - 1e-8,
-                        )
+                    # Match training: ρ̃ = RHO_MIN + (1 − RHO_MIN)·σ(g_r) via
+                    # Supply.rho_from_margin (src/supply/xgboost.jl:286). Plain
+                    # σ(g_r) + clamp diverges from the link the booster was
+                    # optimized under. Groups with no fitted rho_booster get
+                    # ρ̃ = RHO_MIN, mirroring compliance_estimation.jl:496.
+                    p_sale = if iota_prev[f]
+                        ρ̃ = if haskey(rho_boosters, group)
+                            clamp(
+                                Supply.rho_from_margin(
+                                    only(
+                                        XGBoost.predict(
+                                            rho_boosters[group], dm_state; margin = true
+                                        ),
+                                    ),
+                                ),
+                                Float32(Supply.RHO_MIN), 1 - 1.0f-8,
+                            )
+                        else
+                            Float32(Supply.RHO_MIN)
+                        end
                         p_base + (1 - p_base) * ρ̃
                     else
                         p_base
