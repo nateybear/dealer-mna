@@ -301,7 +301,7 @@ function (@main)(_)
                             logistic(
                                 only(XGBoost.predict(rho_boosters[group], dm_state; margin = true))
                             ),
-                            1e-8, 1 - 1e-8,
+                            2e-2, 1 - 1e-8,
                         )
                         p_base + (1 - p_base) * ρ̃
                     else
