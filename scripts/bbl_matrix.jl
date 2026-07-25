@@ -96,11 +96,11 @@ function BBLMatrices(idx::BBLIndex, simulations)
             )
     end
 
-    aggregator(col_lookup, scenario_lookup) = function (tup, sim)
-        t, f, j = tup
-        row = idx.tf_row_index[(t, f)]
+    aggregator(col_lookup, scenario_lookup) = function (tf, tup, sim)
+        future_t, f, j = tup
+        row = idx.tf_row_index[tf]
         col = col_lookup(tup)
-        dealer_outcome = sim[(t, f)]
+        dealer_outcome = sim[(future_t, f)]
         i_j = findfirst(==(j), dealer_outcome.assortment)
         p, D = scenario_lookup(i_j, dealer_outcome)
         return (; D, p, i = (row, col))
@@ -148,7 +148,7 @@ function aggregate!(fun, tf, sim, R::AbstractVector, C::SparseMatrixCSC)
     for (fwd, new_t) in enumerate(first(iterated(increment, t), 5))
         fwd -= 1 # number of periods ahead we are
         for j in sim[(new_t, f)].assortment
-            (; D, p, i) = fun((new_t, f, j), sim)
+            (; D, p, i) = fun(tf, (new_t, f, j), sim)
             R[i[1]] += (β^fwd) * D * p  # βᵗ D(p) * p
             C[i...] -= (β^fwd) * D # - βᵗ D(p) (and a slot for a component of mc_{jft})
         end
@@ -247,15 +247,18 @@ function (@main)(_)
 
         idx = BBLIndex(dealers, usable_vks)
 
-        # Fail loud if the sim's dict is missing any (t, f) BBLIndex expects.
-        # `aggregate!` would eventually KeyError deep inside a nested loop;
-        # catch it here at the boundary with an actionable message. Most
-        # likely cause when this fires: sim files predate the first-eviction
-        # pass added in `b8b0f77`.
+        # Fail loud if the sim is missing any (t, f) the forward walk in
+        # `aggregate!` will read. Check the union of walk_forward(tf, 5) —
+        # not just tf_rows — since aggregate! looks up sim[(new_t, f)] for
+        # new_t past T_START.
         sim0 = JLD2.load_object(snakemake.input["simulations"][1])
-        missing_keys = [(t, f) for (t, f) in idx.tf_rows if !haskey(sim0, (t, f))]
+        expected = Set(
+            (new_t, f) for (t, f) in idx.tf_rows for
+            new_t in first(iterated(increment, t), 5)
+        )
+        missing_keys = [k for k in expected if !haskey(sim0, k)]
         if !isempty(missing_keys)
-            @error "BBLIndex has (t, f) not written by sim" n_missing = length(
+            @error "sim missing (t, f) that aggregate! will read" n_missing = length(
                 missing_keys
             ) example = missing_keys[1]
             error("Regenerate sim files: snakemake -F data/bbl_simulation/seed_{1..100}.jld2")
