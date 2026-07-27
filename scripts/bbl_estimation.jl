@@ -47,6 +47,10 @@ function (@main)(_)
 
     model = Model(HiGHS.Optimizer)
     set_silent(model)
+    set_attribute(model, "parallel", "on")
+    # Half the bound LPs hit DUAL_INFEASIBLE by design (one-sided BBL moments);
+    # HiGHS's default ray-extraction on those is wasted work.
+    set_attribute(model, HiGHS.ComputeInfeasibilityCertificate(), false)
 
     @variable(model, w[1:n_j])
     @variable(model, f[1:n_f])
