@@ -70,7 +70,7 @@ function (@main)(_)
         return optimize(
             f,
             init,
-            LBFGS(alphaguess = LineSearches.InitialStatic(scaled = true)),
+            Newton(alphaguess = LineSearches.InitialStatic(scaled = true)),
             Optim.Options(show_trace = true),
             autodiff = ADTypes.AutoForwardDiff(chunksize = length(init)),
         ).minimizer
