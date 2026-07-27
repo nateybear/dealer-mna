@@ -9,6 +9,7 @@ using Memoize
 using Optim
 import ReverseDiff
 import ADTypes
+import LineSearches
 
 include("bbl_matrix.jl")
 
@@ -69,8 +70,8 @@ function (@main)(_)
         return optimize(
             f,
             init,
-            NewtonTrustRegion(),
-            Optim.Options(show_trace = true, show_every = 10),
+            LBFGS(alphaguess = LineSearches.InitialStatic(scaled = true)),
+            Optim.Options(show_trace = true),
             autodiff = ADTypes.AutoForwardDiff(chunksize = length(init)),
         ).minimizer
     end
