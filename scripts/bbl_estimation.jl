@@ -57,7 +57,7 @@ function (@main)(_)
         for k in 1:n
             lo, hi = extrema(view(C, :, k))
             skip_min[k] = hi <= 0        # column ≤ 0 → -e_k in recession cone
-            skip_max[k] =  lo >= 0        # column ≥ 0 → +e_k in recession cone
+            skip_max[k] = lo >= 0        # column ≥ 0 → +e_k in recession cone
         end
         return skip_min, skip_max
     end
@@ -73,9 +73,9 @@ function (@main)(_)
     # HiGHS's default ray-extraction on those is wasted work.
     set_attribute(model, HiGHS.ComputeInfeasibilityCertificate(), false)
 
-    @variable(model, w[1:n_j])
-    @variable(model, f[1:n_f])
-    @variable(model, t[1:n_t])
+    @variable(model, 0 <= w[1:n_j] <= 1000)
+    @variable(model, -1000 <= f[1:n_f] <= 1000)
+    @variable(model, -1000 <= t[1:n_t] <= 1000)
 
     # mc = w[j] + f[dealer] + t[quarter] has a 2D additive null space:
     # (w + c₁, f + c₂, t + c₃) with c₁+c₂+c₃ = 0 leaves every moment invariant.
