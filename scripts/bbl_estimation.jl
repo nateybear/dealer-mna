@@ -77,6 +77,13 @@ function (@main)(_)
     @variable(model, f[1:n_f])
     @variable(model, t[1:n_t])
 
+    # mc = w[j] + f[dealer] + t[quarter] has a 2D additive null space:
+    # (w + c₁, f + c₂, t + c₃) with c₁+c₂+c₃ = 0 leaves every moment invariant.
+    # Pin two coordinates to eliminate; every other coordinate is then a
+    # relative effect vs these reference categories.
+    @constraint(model, f[1] == 0)
+    @constraint(model, t[1] == 0)
+
     for i in 1:n_row
         s = 1 / σ[i]
         expr = AffExpr(R[i] * s)
