@@ -16,7 +16,7 @@ include("bbl_matrix.jl")
 @memoize mc_cached(T, dims...) = Array{T}(undef, dims)
 
 function moment_scaling(w, f, t; C_j_map, C_f_map, C_t_map, R_map)
-    mc = mc_cached(promote_type(eltype(w), eltype(f), eltype(t)), size(R_map))
+    mc = mc_cached(promote_type(eltype(w), eltype(f), eltype(t)), size(R_map)...)
     @tensor mc[i, j] = C_j_map[i, j, k] * w[k] + C_f_map[i, j, l] * f[l] + C_t_map[i, j, m] * t[m]
     W = R_map + mc
     return std(W, dims = 2)
