@@ -46,6 +46,25 @@ function (@main)(_)
     C_f_sp = sparse(C_f')
     C_t_sp = sparse(C_t')
 
+    # Recession-cone check for structurally-unbounded bound LPs. For the polytope
+    # {θ : Cθ ≥ -R}, the recession cone is {d : Cd ≥ 0} (independent of R). If
+    # column k of C is all ≤ 0, then d = -e_k satisfies Cd ≥ 0 → `min θ_k` is
+    # unbounded below. Symmetric for max. Skip those LPs without touching HiGHS.
+    function column_skip_flags(C)
+        n = size(C, 2)
+        skip_min = falses(n)
+        skip_max = falses(n)
+        for k in 1:n
+            lo, hi = extrema(view(C, :, k))
+            skip_min[k] = hi <= 0        # column ≤ 0 → -e_k in recession cone
+            skip_max[k] =  lo >= 0        # column ≥ 0 → +e_k in recession cone
+        end
+        return skip_min, skip_max
+    end
+    w_skip_min, w_skip_max = column_skip_flags(C_j)
+    f_skip_min, f_skip_max = column_skip_flags(C_f)
+    t_skip_min, t_skip_max = column_skip_flags(C_t)
+
     model = Model(HiGHS.Optimizer)
     set_silent(model)
     set_attribute(model, "parallel", "on")
@@ -86,25 +105,37 @@ function (@main)(_)
         return error("unexpected LP status: $s")
     end
 
-    function bounds_for(name, xs, n)
+    function bounds_for(name, xs, n, skip_min, skip_max)
         out = Vector{Tuple{Float64, Float64}}(undef, n)
         finite_lo = 0
         finite_hi = 0
+        n_skipped_min = 0
+        n_skipped_max = 0
         for k in 1:n
-            lo = solve_bound!(MIN_SENSE, xs[k])
-            hi = solve_bound!(MAX_SENSE, xs[k])
+            lo = if skip_min[k]
+                n_skipped_min += 1
+                -Inf
+            else
+                solve_bound!(MIN_SENSE, xs[k])
+            end
+            hi = if skip_max[k]
+                n_skipped_max += 1
+                Inf
+            else
+                solve_bound!(MAX_SENSE, xs[k])
+            end
             out[k] = (lo, hi)
             isfinite(lo) && (finite_lo += 1)
             isfinite(hi) && (finite_hi += 1)
             @info "$name[$k]" lo hi
         end
-        @info "$name bounds done" n finite_lo finite_hi
+        @info "$name bounds done" n finite_lo finite_hi n_skipped_min n_skipped_max
         return out
     end
 
-    w_bounds = bounds_for("w", w, n_j)
-    f_bounds = bounds_for("f", f, n_f)
-    t_bounds = bounds_for("t", t, n_t)
+    w_bounds = bounds_for("w", w, n_j, w_skip_min, w_skip_max)
+    f_bounds = bounds_for("f", f, n_f, f_skip_min, f_skip_max)
+    t_bounds = bounds_for("t", t, n_t, t_skip_min, t_skip_max)
 
     JLD2.write_object("data/bbl_estimates.jld2", (; w = w_bounds, f = f_bounds, t = t_bounds))
     return nothing
