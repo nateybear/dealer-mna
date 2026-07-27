@@ -3,6 +3,7 @@ using DealerMnA
 using Mmap
 using SparseArrays
 using Statistics
+using Base.Threads
 
 using JuMP
 using HiGHS
@@ -48,6 +49,7 @@ function (@main)(_)
     model = Model(HiGHS.Optimizer)
     set_silent(model)
     set_attribute(model, "parallel", "on")
+    set_attribute(model, "threads", nthreads())
     # Half the bound LPs hit DUAL_INFEASIBLE by design (one-sided BBL moments);
     # HiGHS's default ray-extraction on those is wasted work.
     set_attribute(model, HiGHS.ComputeInfeasibilityCertificate(), false)
@@ -81,7 +83,7 @@ function (@main)(_)
         # BBL moment inequalities are one-sided so unbounded directions are
         # expected: sending mc → -∞ trivially satisfies `R + Cθ ≥ 0`.
         s == DUAL_INFEASIBLE && return sense == MIN_SENSE ? -Inf : Inf
-        error("unexpected LP status: $s")
+        return error("unexpected LP status: $s")
     end
 
     function bounds_for(name, xs, n)
