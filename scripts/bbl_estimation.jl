@@ -1,33 +1,19 @@
 using DealerMnA
 
 using Mmap
-using StatsBase
-using LinearAlgebra
-using TensorOperations
-using Memoize
+using SparseArrays
+using Statistics
 
-using Optim
-import ReverseDiff
-import ADTypes
-import LineSearches
+using JuMP
+using HiGHS
 
-include("bbl_matrix.jl")
-
-# mc is hot; pre-allocate
-@memoize mc_cached(T, dims...) = Array{T}(undef, dims)
-
-function moment_scaling(w, f, t; C_j_map, C_f_map, C_t_map, R_map)
-    mc = mc_cached(promote_type(eltype(w), eltype(f), eltype(t)), size(R_map)...)
-    @tensor mc[i, j] = C_j_map[i, j, k] * w[k] + C_f_map[i, j, l] * f[l] + C_t_map[i, j, m] * t[m]
-    W = R_map + mc
-    return std(W, dims = 2)
-end
-
-function objective(w, f, t; C_j, C_t, C_f, R, scaling)
-    mc = mc_cached(promote_type(eltype(w), eltype(f), eltype(t)), size(R, 1))
-    mc .= C_j * w + C_f * f + C_t * t
-    g = (R + mc) ./ scaling
-    return norm(@. g * (g < 0))
+function add_sparse_row!(expr::AffExpr, C_sp::SparseMatrixCSC, i::Int, x, scale)
+    rows = rowvals(C_sp)
+    vals = nonzeros(C_sp)
+    for k in nzrange(C_sp, i)
+        add_to_expression!(expr, vals[k] * scale, x[rows[k]])
+    end
+    return nothing
 end
 
 function (@main)(_)
@@ -39,65 +25,65 @@ function (@main)(_)
     n_f = length(index.dealer_cols)
     n_t = 4
 
+    R_map = Mmap.mmap("data/bbl_R.map", Matrix{Float64}, (n_row, n_col))
     C_j_map = Mmap.mmap("data/bbl_C_j.map", Array{Float64, 3}, (n_row, n_col, n_j))
     C_f_map = Mmap.mmap("data/bbl_C_f.map", Array{Float64, 3}, (n_row, n_col, n_f))
     C_t_map = Mmap.mmap("data/bbl_C_t.map", Array{Float64, 3}, (n_row, n_col, n_t))
-    R_map = Mmap.mmap("data/bbl_R.map", Matrix{Float64}, (n_row, n_col))
 
+    R = dropdims(mean(R_map, dims = 2), dims = 2)
     C_j = dropdims(mean(C_j_map, dims = 2), dims = 2)
     C_f = dropdims(mean(C_f_map, dims = 2), dims = 2)
     C_t = dropdims(mean(C_t_map, dims = 2), dims = 2)
-    R = mean(R_map, dims = 2)
 
-    scaling = zeros(size(R))
+    # σ fixed at θ = 0 (mc contribution zero → std over sims of R alone).
+    σ = vec(std(R_map, dims = 2))
+    σ[σ .== 0] .= 1.0
 
-    w = ones(size(C_j, 2))
-    f = zeros(size(C_f, 2))
-    t = zeros(size(C_t, 2))
+    # SparseMatrixCSC is column-major; store the transpose so nzrange(_, i)
+    # walks the nonzeros of C's row i as column i of the transpose.
+    C_j_sp = sparse(C_j')
+    C_f_sp = sparse(C_f')
+    C_t_sp = sparse(C_t')
 
-    function rescale!()
-        scaling .= moment_scaling(w, f, t; C_j_map, C_f_map, C_t_map, R_map)
-        return nothing
+    model = Model(HiGHS.Optimizer)
+    set_silent(model)
+
+    @variable(model, w[1:n_j])
+    @variable(model, f[1:n_f])
+    @variable(model, t[1:n_t])
+
+    for i in 1:n_row
+        s = 1 / σ[i]
+        expr = AffExpr(R[i] * s)
+        add_sparse_row!(expr, C_j_sp, i, w, s)
+        add_sparse_row!(expr, C_f_sp, i, f, s)
+        add_sparse_row!(expr, C_t_sp, i, t, s)
+        @constraint(model, expr >= 0)
     end
 
-    closed_objective = objective$(; C_j, C_t, C_f, R, scaling)
+    @info "Solving feasibility LP" n_row n_j n_f n_t
+    set_objective_sense(model, FEASIBILITY_SENSE)
+    optimize!(model)
+    ts = termination_status(model)
+    ts in (OPTIMAL, LOCALLY_SOLVED) || error("BBL polytope infeasible: $ts")
+    @info "Feasibility OK; solving bounding-box LPs" n_bounds = 2 * (n_j + n_f + n_t)
 
-    w_objective = @$ closed_objective(_, f, t)
-    f_objective = @$ closed_objective(w, _, t)
-    t_objective = @$ closed_objective(w, f, _)
-
-    function solve(f, init)
-        return optimize(
-            f,
-            init,
-            LBFGS(alphaguess = LineSearches.InitialStatic(scaled = true)),
-            Optim.Options(show_trace = true),
-            autodiff = ADTypes.AutoForwardDiff(chunksize = length(init)),
-        ).minimizer
+    function solve_bound!(sense, obj)
+        set_objective_sense(model, sense)
+        set_objective_function(model, obj)
+        optimize!(model)
+        s = termination_status(model)
+        s == OPTIMAL || error("bound LP status: $s")
+        return objective_value(model)
     end
 
-    supnorm = maximum$abs
+    w_bounds = [(solve_bound!(MIN_SENSE, w[k]), solve_bound!(MAX_SENSE, w[k])) for k in 1:n_j]
+    @info "w bounds solved"
+    f_bounds = [(solve_bound!(MIN_SENSE, f[k]), solve_bound!(MAX_SENSE, f[k])) for k in 1:n_f]
+    @info "f bounds solved"
+    t_bounds = [(solve_bound!(MIN_SENSE, t[k]), solve_bound!(MAX_SENSE, t[k])) for k in 1:n_t]
+    @info "t bounds solved"
 
-    i = 1
-    tol = 1e-4
-    while true
-        @info "Round $i"
-
-        rescale!()
-        w_new = solve(w_objective, w)
-        f_new = solve(f_objective, f)
-        t_new = solve(t_objective, t)
-
-        if supnorm(w - w_new) < tol && supnorm(f - f_new) < tol && supnorm(t - t_new) < tol
-            @info "Convergence achieved; exiting"
-            break
-        end
-
-        w .= w_new
-        f .= f_new
-        t .= t_new
-    end
-
-    JLD2.write_object("data/bbl_estimates.jld2", (; w, f, t))
+    JLD2.write_object("data/bbl_estimates.jld2", (; w = w_bounds, f = f_bounds, t = t_bounds))
     return nothing
 end
