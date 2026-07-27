@@ -73,16 +73,32 @@ function (@main)(_)
         set_objective_function(model, obj)
         optimize!(model)
         s = termination_status(model)
-        s == OPTIMAL || error("bound LP status: $s")
-        return objective_value(model)
+        s == OPTIMAL && return objective_value(model)
+        # BBL moment inequalities are one-sided so unbounded directions are
+        # expected: sending mc → -∞ trivially satisfies `R + Cθ ≥ 0`.
+        s == DUAL_INFEASIBLE && return sense == MIN_SENSE ? -Inf : Inf
+        error("unexpected LP status: $s")
     end
 
-    w_bounds = [(solve_bound!(MIN_SENSE, w[k]), solve_bound!(MAX_SENSE, w[k])) for k in 1:n_j]
-    @info "w bounds solved"
-    f_bounds = [(solve_bound!(MIN_SENSE, f[k]), solve_bound!(MAX_SENSE, f[k])) for k in 1:n_f]
-    @info "f bounds solved"
-    t_bounds = [(solve_bound!(MIN_SENSE, t[k]), solve_bound!(MAX_SENSE, t[k])) for k in 1:n_t]
-    @info "t bounds solved"
+    function bounds_for(name, xs, n)
+        out = Vector{Tuple{Float64, Float64}}(undef, n)
+        finite_lo = 0
+        finite_hi = 0
+        for k in 1:n
+            lo = solve_bound!(MIN_SENSE, xs[k])
+            hi = solve_bound!(MAX_SENSE, xs[k])
+            out[k] = (lo, hi)
+            isfinite(lo) && (finite_lo += 1)
+            isfinite(hi) && (finite_hi += 1)
+            @info "$name[$k]" lo hi
+        end
+        @info "$name bounds done" n finite_lo finite_hi
+        return out
+    end
+
+    w_bounds = bounds_for("w", w, n_j)
+    f_bounds = bounds_for("f", f, n_f)
+    t_bounds = bounds_for("t", t, n_t)
 
     JLD2.write_object("data/bbl_estimates.jld2", (; w = w_bounds, f = f_bounds, t = t_bounds))
     return nothing
