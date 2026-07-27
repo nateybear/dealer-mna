@@ -59,9 +59,11 @@ function (@main)(_)
         return nothing
     end
 
-    w_objective = @$ objective(_, f, t; C_j, C_t, C_f, R, scaling)
-    f_objective = @$ objective(w, _, t; C_j, C_t, C_f, R, scaling)
-    t_objective = @$ objective(w, f, _; C_j, C_t, C_f, R, scaling)
+    closed_objective = objective$(; C_j, C_t, C_f, R, scaling)
+
+    w_objective = @$ closed_objective(_, f, t)
+    f_objective = @$ closed_objective(w, _, t)
+    t_objective = @$ closed_objective(w, f, _)
 
     function solve(f, init)
         return optimize(
