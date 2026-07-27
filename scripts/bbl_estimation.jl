@@ -17,6 +17,19 @@ function add_sparse_row!(expr::AffExpr, C_sp::SparseMatrixCSC, i::Int, x, scale)
     return nothing
 end
 
+# Accumulate a per-sim source slice into `dest`, permuting scenarios within each
+# tf according to `perms[tf_idx]`. Scenario-outer layout: rank-k row for tf_idx
+# lives at `tf_idx + (k-1)*n_tf`; its raw source is at
+# `tf_idx + (perms[tf_idx][k]-1)*n_tf`.
+function accumulate_ranked!(dest, src_slice, perms, n_tf)
+    for tf_idx in 1:n_tf, k in 1:150
+        canonical_row = tf_idx + (k - 1) * n_tf
+        raw_row = tf_idx + (perms[tf_idx][k] - 1) * n_tf
+        dest[canonical_row] += src_slice[raw_row]
+    end
+    return nothing
+end
+
 function (@main)(_)
     (; index) = JLD2.load_object("data/bbl_matrix.jld2")
 
@@ -31,10 +44,43 @@ function (@main)(_)
     C_f_map = Mmap.mmap("data/bbl_C_f.map", Array{Float64, 3}, (n_row, n_col, n_f))
     C_t_map = Mmap.mmap("data/bbl_C_t.map", Array{Float64, 3}, (n_row, n_col, n_t))
 
-    R = dropdims(mean(R_map, dims = 2), dims = 2)
-    C_j = dropdims(mean(C_j_map, dims = 2), dims = 2)
-    C_f = dropdims(mean(C_f_map, dims = 2), dims = 2)
-    C_t = dropdims(mean(C_t_map, dims = 2), dims = 2)
+    # Rank-order scenarios within each (sim, tf) by R value before averaging
+    # over sims. Because `_PRICE_SEEDS` in src/supply/state.jl uses Julia's
+    # default RNG, scenario index k means a different perturbation in each sim,
+    # so simple averaging over sims for row (k, tf) mixes unrelated policies —
+    # the symmetric noise cancels out, leaving R̄, C̄ ≈ 0 for most rows and a
+    # polytope that's degenerate in almost every direction. Sorting scenarios
+    # by R per (sim, tf) makes row k in the averaged matrix represent "the
+    # k-th ranked scenario by revenue diff", which has a consistent non-zero
+    # expectation across sims and provides real identifying constraints.
+    n_tf = length(index.tf_rows)
+    R = zeros(Float64, n_row)
+    C_j = zeros(Float64, n_row, n_j)
+    C_f = zeros(Float64, n_row, n_f)
+    C_t = zeros(Float64, n_row, n_t)
+
+    @info "Rank-ordering scenarios per sim and accumulating averaged moments" n_col n_tf
+    for s in 1:n_col
+        R_slice = R_map[:, s]                                     # contiguous
+        perms = [
+            sortperm(@view R_slice[tf_idx .+ (0:149) .* n_tf]) for tf_idx in 1:n_tf
+        ]
+
+        accumulate_ranked!(R, R_slice, perms, n_tf)
+        for j in 1:n_j
+            accumulate_ranked!(@view(C_j[:, j]), C_j_map[:, s, j], perms, n_tf)
+        end
+        for j in 1:n_f
+            accumulate_ranked!(@view(C_f[:, j]), C_f_map[:, s, j], perms, n_tf)
+        end
+        for j in 1:n_t
+            accumulate_ranked!(@view(C_t[:, j]), C_t_map[:, s, j], perms, n_tf)
+        end
+    end
+    R ./= n_col
+    C_j ./= n_col
+    C_f ./= n_col
+    C_t ./= n_col
 
     # σ fixed at θ = 0 (mc contribution zero → std over sims of R alone).
     σ = vec(std(R_map, dims = 2))
