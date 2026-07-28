@@ -11,6 +11,11 @@ const T_START = QuarterKey[(y, q) for y in 2017:2018 for q in 1:4]
 
 const N_SCENARIOS = Supply.SIM_SIZE
 
+# Must match `COORDINATED_SHIFTS` in scripts/bbl_forward_simulation.jl.
+# Kept as a plain const rather than an include! to avoid pulling that script's
+# top-level `using` into this module. Update both if you change one.
+const N_SHIFTS = 8
+
 increment((y, q)) =
     let new_q = (q % 4) + 1
         y_inc = q ÷ 4
@@ -69,7 +74,10 @@ end
 
 function BBLMatrices(idx::BBLIndex, simulations)
     ### construction helpers
-    outerM = N_SCENARIOS + 1
+    # Row 1        = observed policy
+    # Rows 2..1+N_SCENARIOS       = per-product independent local perturbations (residual demand seeds)
+    # Rows 2+N_SCENARIOS..end     = coordinated uniform shifts (COORDINATED_SHIFTS)
+    outerM = N_SCENARIOS + N_SHIFTS + 1
     outerN = length(simulations)
     filled(T, closure) =
         let out = Array{T}(undef, outerM, outerN)
@@ -91,6 +99,16 @@ function BBLMatrices(idx::BBLIndex, simulations)
         return (i_j, outcome) ->
             get.(
                 (outcome.perturbation_prices, outcome.perturbation_demands),
+                Ref((n, i_j)),
+                0.0,
+            )
+    end
+    # Coordinated uniform shifts share the same (n, i_j) lookup shape as the
+    # per-product perturbations but read from a distinct pair of matrices.
+    function coord_lookup(n)
+        return (i_j, outcome) ->
+            get.(
+                (outcome.coordinated_prices, outcome.coordinated_demands),
                 Ref((n, i_j)),
                 0.0,
             )
@@ -129,8 +147,17 @@ function BBLMatrices(idx::BBLIndex, simulations)
                         aggregator(lookup, cf_lookup(iscen)),
                         tf,
                         sim,
-                        Rs[iscen + 1, isim],
-                        Cs[iscen + 1, isim],
+                        view(Rs, iscen + 1, isim),
+                        view(Cs, iscen + 1, isim),
+                    )
+                end
+                for ishift in 1:N_SHIFTS
+                    aggregate!(
+                        aggregator(lookup, coord_lookup(ishift)),
+                        tf,
+                        sim,
+                        view(Rs, N_SCENARIOS + 1 + ishift, isim),
+                        view(Cs, N_SCENARIOS + 1 + ishift, isim),
                     )
                 end
             end

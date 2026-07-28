@@ -11,6 +11,12 @@ import Base: size  # disambiguate against Cleaner.size (re-exported via DealerMn
 
 BLAS.set_num_threads(1)
 
+# Coordinated uniform price multipliers applied to a dealer's whole assortment,
+# separate from the per-product `_PRICE_SEEDS` used to fit residual demand.
+# These shift ALL prices together → probes substitution to the outside good,
+# which per-product independent wiggles absorb into within-dealer cross-substitution.
+const COORDINATED_SHIFTS = Float32[0.5, 0.75, 0.9, 0.95, 1.05, 1.1, 1.25, 1.5]
+
 function (@main)(_)
     snakemake!()
     with_logging() do
@@ -440,6 +446,9 @@ function (@main)(_)
                         state_actual = state_prev[f],
                         perturbation_prices = Matrix{Float32}(undef, 0, 0),
                         perturbation_demands = Matrix{Float32}(undef, 0, 0),
+                        coordinated_shifts = COORDINATED_SHIFTS,
+                        coordinated_prices = Matrix{Float32}(undef, 0, 0),
+                        coordinated_demands = Matrix{Float32}(undef, 0, 0),
                     )
                     continue
                 end
@@ -461,10 +470,26 @@ function (@main)(_)
                 # share one canonical column axis on disk.
                 canonical = get(Supply.tf_to_j_lookup(cf), (t, f), VehicleKey[])
                 perm = [findfirst(==(vk), assortment_by_dealer[f]) for vk in canonical]
+                obs_prices = prices_by_dealer[f][perm]
+
+                # Coordinated wide shifts: scale ALL prices for this (dealer,
+                # quarter) by α, read structural expected_demand under the shift.
+                # `expected_demand` returns in `tf_to_j_lookup(cf)` order, matching
+                # `canonical` / `obs_prices`.
+                coord_prices = Matrix{Float32}(undef, length(COORDINATED_SHIFTS), length(canonical))
+                coord_demands = Matrix{Float32}(
+                    undef, length(COORDINATED_SHIFTS), length(canonical)
+                )
+                for (i_shift, α) in enumerate(COORDINATED_SHIFTS)
+                    h = apply!(cf, Demand.PriceMultiply(; dealer_uid = f, quarter = t, by = α))
+                    coord_demands[i_shift, :] .= expected_demand(cf, f, t)
+                    coord_prices[i_shift, :] .= α .* obs_prices
+                    undo!(cf, h)
+                end
 
                 outputs[(t, f)] = (
                     assortment = canonical,
-                    prices = prices_by_dealer[f][perm],
+                    prices = obs_prices,
                     q = q_vec,
                     phi = φ_f,
                     iota = new_iota,
@@ -472,6 +497,9 @@ function (@main)(_)
                     state_actual = reshape(s_actual, :),
                     perturbation_prices = pert_prices,
                     perturbation_demands = pert_demands,
+                    coordinated_shifts = COORDINATED_SHIFTS,
+                    coordinated_prices = coord_prices,
+                    coordinated_demands = coord_demands,
                 )
 
                 state_prev[f] = reshape(s_actual, :)

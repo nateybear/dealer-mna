@@ -1167,12 +1167,12 @@ rule data_bbl_simulation:
 
 rule data_bbl_simulations:
     input:
-        expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 101))
+        expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 301))
 
 
 rule data_bbl_matrix:
     """
-    Aggregates the 100 BBL sim seeds into BBLMatrices — one (R, C) pair per
+    Aggregates the BBL sim seeds into BBLMatrices — one (R, C) pair per
     (FE type, scenario, seed) triple. Rebuilds the same eviction / usable_vks
     pruning as bbl_forward_simulation so the BBLIndex's dealer + vehicle
     columns align with the sim outputs 1:1.
@@ -1184,7 +1184,7 @@ rule data_bbl_matrix:
         delta_decomp="data/delta_decomposition_regout.jld2",
         price_densities="data/price_densities.jld2",
         state_transition="data/state_transition.jld2",
-        simulations=expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 101)),
+        simulations=expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 301)),
     output:
         "data/bbl_matrix.jld2",
     log:
@@ -1192,6 +1192,56 @@ rule data_bbl_matrix:
     run:
         julia(
             "scripts/bbl_matrix.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule data_bbl_matrix_maps:
+    """
+    Flatten BBLMatrices into memory-mapped Float64 arrays holding
+    (observed − perturbation) diffs, one row per (scenario, tf), one column per
+    sim. bbl_estimation.jl reads these via `Mmap.mmap` and hardcoded paths.
+    """
+    input:
+        "scripts/bbl_matrix_to_map.jl",
+        bbl_matrix="data/bbl_matrix.jld2",
+    output:
+        R="data/bbl_R.map",
+        C_j="data/bbl_C_j.map",
+        C_f="data/bbl_C_f.map",
+        C_t="data/bbl_C_t.map",
+    log:
+        "logs/bbl_matrix_to_map.log",
+    run:
+        julia(
+            "scripts/bbl_matrix_to_map.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule data_bbl_estimation:
+    """
+    Solve the moment-inequality LP for identified sets on (w, f, t). Consumes
+    the flat .map files produced by data_bbl_matrix_maps.
+    """
+    input:
+        "scripts/bbl_estimation.jl",
+        bbl_matrix="data/bbl_matrix.jld2",
+        R="data/bbl_R.map",
+        C_j="data/bbl_C_j.map",
+        C_f="data/bbl_C_f.map",
+        C_t="data/bbl_C_t.map",
+    output:
+        "data/bbl_estimates.jld2",
+    log:
+        "logs/bbl_estimation.log",
+    run:
+        julia(
+            "scripts/bbl_estimation.jl",
             input=input,
             output=output,
             log=log,
