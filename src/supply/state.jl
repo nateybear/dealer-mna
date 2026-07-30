@@ -5,7 +5,7 @@ using DataFrames
 using DataStructures
 
 const _PRICE_SEEDS = Ref{Matrix{Float32}}()
-const SIM_SIZE = 150
+const SIM_SIZE = 50
 
 """
     tf_to_j_lookup(model_or_cf) → OrderedDict{(QuarterKey, UUID), Vector{VehicleKey}}
