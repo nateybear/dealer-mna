@@ -147,8 +147,8 @@ function BBLMatrices(idx::BBLIndex, simulations)
                         aggregator(lookup, cf_lookup(iscen)),
                         tf,
                         sim,
-                        view(Rs, iscen + 1, isim),
-                        view(Cs, iscen + 1, isim),
+                        Rs[iscen + 1, isim],
+                        Cs[iscen + 1, isim],
                     )
                 end
                 for ishift in 1:N_SHIFTS
@@ -156,8 +156,8 @@ function BBLMatrices(idx::BBLIndex, simulations)
                         aggregator(lookup, coord_lookup(ishift)),
                         tf,
                         sim,
-                        view(Rs, N_SCENARIOS + 1 + ishift, isim),
-                        view(Cs, N_SCENARIOS + 1 + ishift, isim),
+                        Rs[N_SCENARIOS + 1 + ishift, isim],
+                        Cs[N_SCENARIOS + 1 + ishift, isim],
                     )
                 end
             end
