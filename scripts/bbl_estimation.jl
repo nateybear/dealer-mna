@@ -39,7 +39,7 @@ using Distributed
     # then N_SHIFTS coordinated uniform shifts. Both blocks share the same
     # (rank, tf_idx) row indexing pattern used by accumulate_ranked!.
     const N_LOCAL = Supply.SIM_SIZE
-    const N_SHIFTS = 6                          # must match COORDINATED_SHIFTS in bbl_forward_simulation.jl
+    const N_SHIFTS = 8                          # must match COORDINATED_SHIFTS in bbl_forward_simulation.jl
     const N_TOTAL = N_LOCAL + N_SHIFTS
 
     n_tf = length(index.tf_rows)

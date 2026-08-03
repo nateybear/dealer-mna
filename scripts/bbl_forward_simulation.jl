@@ -239,21 +239,34 @@ function (@main)(_)
 
         # Seed period record: observed everything, no simulated draws yet.
         # Filter obs to usable_vks so seed & simulated periods are apples-to-apples.
+        # Perturbation / coordinated matrices are filled with observed values
+        # broadcast across the scenario dim: BBL perturbations only apply for
+        # fwd≥1, so at fwd=0 the perturbed lookup must return the same p,q as
+        # the observed lookup — otherwise obs−pert leaves a spurious
+        # "shutdown-at-seed" moment (β·q·(p−mc)) contaminating every scenario.
         for f in dealers
             obs_assort = VehicleKey[j for j in intermed[(t₀, f)] if j ∈ usable_vks]
             obs_prices = Float32[
                 model.product_info[model.product_lookup.tjf[(t₀, j, f)]].p for j in obs_assort
             ]
+            obs_q = Vector{Float32}(expected_demand(cf, f, t₀))
             outputs[(t₀, f)] = (
                 assortment = obs_assort,
                 prices = obs_prices,
-                q = Vector{Float32}(expected_demand(cf, f, t₀)),
+                q = obs_q,
                 phi = NaN32,
                 iota = iota_prev[f],
                 state_expected = Float32[],
                 state_actual = state_prev[f],
-                perturbation_prices = Matrix{Float32}(undef, 0, 0),
-                perturbation_demands = Matrix{Float32}(undef, 0, 0),
+                perturbation_prices = repeat(reshape(obs_prices, 1, :), Supply.SIM_SIZE, 1),
+                perturbation_demands = repeat(reshape(obs_q, 1, :), Supply.SIM_SIZE, 1),
+                coordinated_shifts = COORDINATED_SHIFTS,
+                coordinated_prices = repeat(
+                    reshape(obs_prices, 1, :), length(COORDINATED_SHIFTS), 1
+                ),
+                coordinated_demands = repeat(
+                    reshape(obs_q, 1, :), length(COORDINATED_SHIFTS), 1
+                ),
             )
         end
 
