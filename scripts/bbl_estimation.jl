@@ -1,4 +1,5 @@
 using Distributed
+@everywhere using JuMP #load macros first b/c of eval order
 
 @everywhere begin
     using DealerMnA
