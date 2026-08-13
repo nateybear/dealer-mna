@@ -98,7 +98,8 @@ using Distributed
         X = Matrix{Float32}(undef, nrows, ncols)
         lookup = state_lookup()
         for (i, c) in enumerate(eachrow(cars))
-            quarter = (Dates.year(c.t), Dates.quarterofyear(c.t))
+            tlag = c.t - Quarter(1)
+            quarter = (Dates.year(tlag), Dates.quarterofyear(tlag))
             X[i, :] .= @view state_matrix[lookup[(quarter, c.dealer_uid)], :]
         end
         return X
@@ -175,6 +176,20 @@ function (@main)(_)
     panel = Supply.make_panel(fords, dealer_demographics)
     select!(panel, :dealer_uid, :t, :model, :model_year, :extra, :is_sold)
     subset!(panel, :t => ByRow(≥(Date(2017))))
+
+    # Drop rows whose lagged (dealer, quarter) state row is missing — X_matrix
+    # indexes state_matrix at t−1 to match the sim's `s_prev`-based inference
+    # in bbl_forward_simulation.jl:299 (feature-timestep symmetry). Mirrors
+    # the same guard applied to agg_master below.
+    subset!(
+        panel,
+        [:t, :dealer_uid] => ByRow(
+            (t, f) -> haskey(
+                state_lookup(),
+                ((Dates.year(t - Quarter(1)), Dates.quarterofyear(t - Quarter(1))), f),
+            ),
+        ),
+    )
 
     compliance = selectunique(panel, [:dealer_uid, :t])
 

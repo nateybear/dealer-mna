@@ -150,7 +150,26 @@ using Distributed
         # (clipped-nonneg) prediction to recover σ. More principled than the
         # abs-residual proxy: E[(y − ŷ)²|X] = Var(y|X) under an unbiased ŷ.
         u = (y .- y_hat) .^ 2
-        variance_booster, variance_round = regress(X, u)
+        # base_score = mean(u) so the variance booster starts at the marginal
+        # residual variance; without this, `regress` inherits base_score =
+        # mean(y) ≈ log(price) (order 9-11), and MSE-with-early-stopping can
+        # shrink toward that irrelevant anchor, under-dispersing draws.
+        variance_booster, variance_round = Supply.fit_xgb_oos(
+            X, u;
+            max_round = 2000,
+            patience = 20,
+            params = merge(
+                Supply.XGB_DEFAULT_PARAMS,
+                (
+                    subsample = 0.8,
+                    base_score = Float64(mean(u)),
+                    max_depth = 8,
+                    min_child_weight = 5,
+                    eta = 0.05,
+                    lambda = 1.0,
+                ),
+            ),
+        )
         @info "  best rounds" j mean_round variance_round
         # `XGBoost.save` returns an unsafe_wrap over libxgboost-owned memory;
         # copy so the bytes survive booster GC once fit_prices returns.

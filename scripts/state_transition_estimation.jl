@@ -141,11 +141,24 @@ using Distributed
         # variance booster (squared-residual target). BBL draws the transition
         # as Normal(mean, sqrt(clip(var, 0))). Same 2-step density pattern as
         # price_density_estimation.
+        #
+        # The variance sub-fit overrides base_score = mean(u); otherwise it
+        # inherits base_score = mean(y) from fit_scalar, which is the WRONG
+        # anchor (state-coefficient scale, not residual-variance scale), and
+        # MSE-with-early-stopping can shrink toward it and under-disperse the
+        # sim's state draws. Kept as a local Supply.fit_xgb_oos call rather
+        # than generalizing fit_scalar.
+        fit_var(X, u) = Supply.fit_xgb_oos(
+            X, u;
+            max_round = 2000, patience = 20,
+            params = merge(params_shared, (base_score = Float64(mean(u)),)),
+            rng = rng,
+        )
         function fit_pair(X, y)
             b_mean, br_mean = fit_scalar(X, y)
             ŷ = XGBoost.predict(b_mean, X)
             u = (y .- ŷ) .^ 2
-            b_var, br_var = fit_scalar(X, u)
+            b_var, br_var = fit_var(X, u)
             return b_mean, br_mean, b_var, br_var
         end
 

@@ -339,7 +339,6 @@ function (@main)(_)
                     else
                         p_base
                     end
-                    @show group p_sale
                     if rand(rng) < p_sale
                         for vk in get(group_to_vks, group, VehicleKey[])
                             push!(new_assortment, vk)
