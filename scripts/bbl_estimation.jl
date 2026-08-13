@@ -66,15 +66,15 @@ using Distributed
 
     block_specs = (
         (:local_sorted, N_LOCAL, local_map_lo, local_map_hi, true),
-        (:local_raw,    N_LOCAL, local_map_lo, local_map_hi, false),
+        (:local_raw, N_LOCAL, local_map_lo, local_map_hi, false),
         (:coord_sorted, N_SHIFTS, coord_map_lo, coord_map_hi, true),
-        (:coord_raw,    N_SHIFTS, coord_map_lo, coord_map_hi, false),
+        (:coord_raw, N_SHIFTS, coord_map_lo, coord_map_hi, false),
     )
 
-    R_blocks  = [zeros(Float64, n_tf * spec[2])       for spec in block_specs]
-    Cj_blocks = [zeros(Float64, n_tf * spec[2], n_j)  for spec in block_specs]
-    Cf_blocks = [zeros(Float64, n_tf * spec[2], n_f)  for spec in block_specs]
-    Ct_blocks = [zeros(Float64, n_tf * spec[2], n_t)  for spec in block_specs]
+    R_blocks = [zeros(Float64, n_tf * spec[2]) for spec in block_specs]
+    Cj_blocks = [zeros(Float64, n_tf * spec[2], n_j) for spec in block_specs]
+    Cf_blocks = [zeros(Float64, n_tf * spec[2], n_f) for spec in block_specs]
+    Ct_blocks = [zeros(Float64, n_tf * spec[2], n_t) for spec in block_specs]
 
     @info "Accumulating 4 moment blocks" n_col n_tf N_LOCAL N_SHIFTS
     for s in 1:n_col
@@ -88,18 +88,24 @@ using Distributed
             end
             accumulate_ranked!(R_blocks[bi], R_block, perms, n_tf, n_scen)
             for j in 1:n_j
-                accumulate_ranked!(@view(Cj_blocks[bi][:, j]), @view(C_j_map[lo:hi, s, j]), perms, n_tf, n_scen)
+                accumulate_ranked!(
+                    @view(Cj_blocks[bi][:, j]), @view(C_j_map[lo:hi, s, j]), perms, n_tf, n_scen
+                )
             end
             for j in 1:n_f
-                accumulate_ranked!(@view(Cf_blocks[bi][:, j]), @view(C_f_map[lo:hi, s, j]), perms, n_tf, n_scen)
+                accumulate_ranked!(
+                    @view(Cf_blocks[bi][:, j]), @view(C_f_map[lo:hi, s, j]), perms, n_tf, n_scen
+                )
             end
             for j in 1:n_t
-                accumulate_ranked!(@view(Ct_blocks[bi][:, j]), @view(C_t_map[lo:hi, s, j]), perms, n_tf, n_scen)
+                accumulate_ranked!(
+                    @view(Ct_blocks[bi][:, j]), @view(C_t_map[lo:hi, s, j]), perms, n_tf, n_scen
+                )
             end
         end
     end
     for bi in eachindex(block_specs)
-        R_blocks[bi]  ./= n_col
+        R_blocks[bi] ./= n_col
         Cj_blocks[bi] ./= n_col
         Cf_blocks[bi] ./= n_col
         Ct_blocks[bi] ./= n_col
@@ -179,18 +185,18 @@ using Distributed
             @constraint(model, expr >= 0)
         end
     end
-end
 
-function solve_bound!(sense, obj)
-    set_objective_sense(model, sense)
-    set_objective_function(model, obj)
-    optimize!(model)
-    s = termination_status(model)
-    s == OPTIMAL && return objective_value(model)
-    # BBL moment inequalities are one-sided so unbounded directions are
-    # expected: sending mc → -∞ trivially satisfies `R + Cθ ≥ 0`.
-    s == DUAL_INFEASIBLE && return sense == MIN_SENSE ? -Inf : Inf
-    return error("unexpected LP status: $s")
+    function solve_bound!(sense, obj)
+        set_objective_sense(model, sense)
+        set_objective_function(model, obj)
+        optimize!(model)
+        s = termination_status(model)
+        s == OPTIMAL && return objective_value(model)
+        # BBL moment inequalities are one-sided so unbounded directions are
+        # expected: sending mc → -∞ trivially satisfies `R + Cθ ≥ 0`.
+        s == DUAL_INFEASIBLE && return sense == MIN_SENSE ? -Inf : Inf
+        return error("unexpected LP status: $s")
+    end
 end
 
 function (@main)(_)
@@ -201,7 +207,8 @@ function (@main)(_)
     ts in (OPTIMAL, LOCALLY_SOLVED) || error("BBL polytope infeasible: $ts")
     @info "Feasibility OK; solving bounding-box LPs" n_bounds = 2 * (n_j + n_f + n_t)
 
-    bounds_for(name, xs, n, skip_min, skip_max) = pmap(1:n) do k
+    bounds_for(name, xs, n, skip_min, skip_max) =
+        pmap(1:n) do k
             lo = if skip_min[k]
                 -Inf
             else
