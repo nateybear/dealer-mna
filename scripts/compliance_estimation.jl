@@ -53,7 +53,7 @@ using Distributed
     #     to the sparse training signal when it exists.
     RHO_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (base_score = -1.5, lambda = 5.0f-1, max_depth = 4, eta = 0.1),
+        (base_score = -3.0, lambda = 5.0f-1, max_depth = 4, eta = 0.1),
     )
 
     # Slight capacity bump over XGB_DEFAULT_PARAMS (max_depth 3→4, eta 0.15→0.1)

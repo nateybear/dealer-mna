@@ -1167,7 +1167,7 @@ rule data_bbl_simulation:
 
 rule data_bbl_simulations:
     input:
-        expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 301))
+        expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 201))
 
 
 rule data_bbl_matrix:
@@ -1184,7 +1184,7 @@ rule data_bbl_matrix:
         delta_decomp="data/delta_decomposition_regout.jld2",
         price_densities="data/price_densities.jld2",
         state_transition="data/state_transition.jld2",
-        simulations=expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 301)),
+        simulations=expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 201)),
     output:
         "data/bbl_matrix.jld2",
     log:

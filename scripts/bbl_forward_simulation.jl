@@ -15,7 +15,7 @@ BLAS.set_num_threads(1)
 # separate from the per-product `_PRICE_SEEDS` used to fit residual demand.
 # These shift ALL prices together → probes substitution to the outside good,
 # which per-product independent wiggles absorb into within-dealer cross-substitution.
-const COORDINATED_SHIFTS = Float32[0.5, 0.75, 0.9, 0.95, 1.05, 1.1, 1.25, 1.5]
+const COORDINATED_SHIFTS = Float32[0.75, 0.9, 0.95, 0.98, 0.99, 1.01, 1.02, 1.05, 1.1, 1.25]
 
 function (@main)(_)
     snakemake!()
