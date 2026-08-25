@@ -153,7 +153,6 @@ using Distributed
 
     model = Model(KNITRO.Optimizer)
     #set_silent(model)
-    #set_attribute(model, "parallel", "on")
     #set_attribute(model, "threads", nthreads())
     # Half the bound LPs hit DUAL_INFEASIBLE by design (one-sided BBL moments);
     # HiGHS's default ray-extraction on those is wasted work.
@@ -162,15 +161,14 @@ using Distributed
     @variable(model, 0 <= w[1:n_j] <= 1000)
     @variable(model, -1000 <= f[1:n_f] <= 1000)
     @variable(model, -1000 <= t[1:n_t] <= 1000)
+    # treat f and t as nuisance FEs, sum-to-zero constraint
+    # identifies the levels of wholesale price
+    @constraint(model, sum(f) == 0)
+    @constraint(model, sum(t) == 0)
+
     n_moments = sum(length(R_blocks[bi]) for bi in eachindex(block_specs))
     @variable(model, ϵ[1:n_moments] ≥ 0)
 
-    # mc = w[j] + f[dealer] + t[quarter] has a 2D additive null space:
-    # (w + c₁, f + c₂, t + c₃) with c₁+c₂+c₃ = 0 leaves every moment invariant.
-    # Pin two coordinates to eliminate; every other coordinate is then a
-    # relative effect vs these reference categories.
-    @constraint(model, f[1] == 0)
-    @constraint(model, t[1] == 0)
 
     total_constraints = sum(length(R) for R in R_blocks)
     @info "Adding LP constraints" total_constraints per_block = [length(R) for R in R_blocks]
@@ -196,13 +194,12 @@ using Distributed
     function solve_bound!(sense, obj)
         set_objective_sense(model, sense)
         set_objective_function(model, obj)
-        optimize!(model)
-        s = termination_status(model)
-        s in (OPTIMAL, LOCALLY_SOLVED) && return objective_value(model)
-        # BBL moment inequalities are one-sided so unbounded directions are
-        # expected: sending mc → -∞ trivially satisfies `R + Cθ ≥ 0`.
-        s == DUAL_INFEASIBLE && return sense == MIN_SENSE ? -Inf : Inf
-        return error("unexpected LP status: $s")
+	model_copy = copy(model)
+	JuMP.set_optimizer(model_copy, KNITRO.Optimizer)
+        set_attribute(model_copy, "linsolver", 7)
+        optimize!(model_copy)
+	assert_is_solved_and_feasible(model_copy)
+	return model_copy
     end
 
     add_sse_constraint!(c) = @constraint(model, sum(ϵ .^ 2) ≤ c)
@@ -210,23 +207,28 @@ end
 
 function (@main)(_)
     @info "Solving Initial Bound" total_constraints n_j n_f n_t
-    c = solve_bound!(MIN_SENSE, sum(ϵ .^ 2))
-    ts = termination_status(model)
+    initial_bound = solve_bound!(MIN_SENSE, sum(ϵ .^ 2))
+    c = objective_value(initial_bound)
     @info "Feasibility OK; solving bounding-box LPs" n_bounds = 2 * (n_j + n_f + n_t) c
 
-    @everywhere add_sse_constraint!(c)
+    for (ivar, var) in enumerate(all_variables(initial_bound))
+        val = value(var)
+	@everywhere set_start_value(all_variables(model)[$ivar], $val)
+    end
+
+    @everywhere add_sse_constraint!($c)
 
     bounds_for(name, xs, n, skip_min, skip_max) =
         pmap(1:n) do k
             lo = if skip_min[k]
                 -Inf
             else
-                solve_bound!(MIN_SENSE, xs[k])
+                objective_value(solve_bound!(MIN_SENSE, xs[k]))
             end
             hi = if skip_max[k]
                 Inf
             else
-                solve_bound!(MAX_SENSE, xs[k])
+                objective_value(solve_bound!(MAX_SENSE, xs[k]))
             end
             @info "$name[$k]" lo hi
             return (lo, hi)
