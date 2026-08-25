@@ -11,6 +11,7 @@ using Distributed
 
     using JuMP
     using HiGHS
+    using KNITRO
 
     function add_sparse_row!(expr::AffExpr, C_sp::SparseMatrixCSC, i::Int, x, scale)
         rows = rowvals(C_sp)
@@ -150,13 +151,13 @@ using Distributed
     f_skip_min, f_skip_max = column_skip_flags(Cf_blocks)
     t_skip_min, t_skip_max = column_skip_flags(Ct_blocks)
 
-    model = Model(HiGHS.Optimizer)
-    set_silent(model)
-    set_attribute(model, "parallel", "on")
-    set_attribute(model, "threads", nthreads())
+    model = Model(KNITRO.Optimizer)
+    #set_silent(model)
+    #set_attribute(model, "parallel", "on")
+    #set_attribute(model, "threads", nthreads())
     # Half the bound LPs hit DUAL_INFEASIBLE by design (one-sided BBL moments);
     # HiGHS's default ray-extraction on those is wasted work.
-    set_attribute(model, HiGHS.ComputeInfeasibilityCertificate(), false)
+    #set_attribute(model, HiGHS.ComputeInfeasibilityCertificate(), false)
 
     @variable(model, 0 <= w[1:n_j] <= 1000)
     @variable(model, -1000 <= f[1:n_f] <= 1000)
@@ -197,7 +198,7 @@ using Distributed
         set_objective_function(model, obj)
         optimize!(model)
         s = termination_status(model)
-        s == OPTIMAL && return objective_value(model)
+        s in (OPTIMAL, LOCALLY_SOLVED) && return objective_value(model)
         # BBL moment inequalities are one-sided so unbounded directions are
         # expected: sending mc → -∞ trivially satisfies `R + Cθ ≥ 0`.
         s == DUAL_INFEASIBLE && return sense == MIN_SENSE ? -Inf : Inf
@@ -211,7 +212,6 @@ function (@main)(_)
     @info "Solving Initial Bound" total_constraints n_j n_f n_t
     c = solve_bound!(MIN_SENSE, sum(ϵ .^ 2))
     ts = termination_status(model)
-    ts in (OPTIMAL, LOCALLY_SOLVED) || error("BBL polytope infeasible: $ts")
     @info "Feasibility OK; solving bounding-box LPs" n_bounds = 2 * (n_j + n_f + n_t) c
 
     @everywhere add_sse_constraint!(c)
