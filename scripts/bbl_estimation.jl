@@ -181,6 +181,7 @@ using Distributed
         Cf_sp = Cf_sps[bi]
         Ct_sp = Ct_sps[bi]
         for i in 1:length(R_b)
+            global ϵ_rest
             ϵ_i, ϵ_rest = Iterators.peel(ϵ_rest)
             s = 1.0
             expr = AffExpr(R_b[i] * s)
