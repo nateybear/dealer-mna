@@ -161,6 +161,8 @@ using Distributed
     @variable(model, 0 <= w[1:n_j] <= 1000)
     @variable(model, -1000 <= f[1:n_f] <= 1000)
     @variable(model, -1000 <= t[1:n_t] <= 1000)
+    n_moments = sum(length(R_blocks[bi]) for bi in eachindex(block_specs))
+    @variable(model, ϵ[1:n_moments] ≥ 0)
 
     # mc = w[j] + f[dealer] + t[quarter] has a 2D additive null space:
     # (w + c₁, f + c₂, t + c₃) with c₁+c₂+c₃ = 0 leaves every moment invariant.
@@ -171,6 +173,7 @@ using Distributed
 
     total_constraints = sum(length(R) for R in R_blocks)
     @info "Adding LP constraints" total_constraints per_block = [length(R) for R in R_blocks]
+    ϵ_rest = ϵ
     for bi in eachindex(block_specs)
         R_b = R_blocks[bi]
         σ_b = σ_blocks[bi]
@@ -178,12 +181,13 @@ using Distributed
         Cf_sp = Cf_sps[bi]
         Ct_sp = Ct_sps[bi]
         for i in 1:length(R_b)
-            s = 1 / σ_b[i]
+            ϵ_i, ϵ_rest = Iterators.peel(ϵ_rest)
+            s = 1.0
             expr = AffExpr(R_b[i] * s)
             add_sparse_row!(expr, Cj_sp, i, w, s)
             add_sparse_row!(expr, Cf_sp, i, f, s)
             add_sparse_row!(expr, Ct_sp, i, t, s)
-            @constraint(model, expr >= 0)
+            @constraint(model, expr + ϵ_i ≥ 0)
         end
     end
 
@@ -198,15 +202,18 @@ using Distributed
         s == DUAL_INFEASIBLE && return sense == MIN_SENSE ? -Inf : Inf
         return error("unexpected LP status: $s")
     end
+
+    add_sse_constraint!(c) = @constraint(model, sum(ϵ .^ 2) ≤ c)
 end
 
 function (@main)(_)
-    @info "Solving feasibility LP" total_constraints n_j n_f n_t
-    set_objective_sense(model, FEASIBILITY_SENSE)
-    optimize!(model)
+    @info "Solving Initial Bound" total_constraints n_j n_f n_t
+    c = solve_bound!(MIN_SENSE, sum(ϵ .^ 2))
     ts = termination_status(model)
     ts in (OPTIMAL, LOCALLY_SOLVED) || error("BBL polytope infeasible: $ts")
-    @info "Feasibility OK; solving bounding-box LPs" n_bounds = 2 * (n_j + n_f + n_t)
+    @info "Feasibility OK; solving bounding-box LPs" n_bounds = 2 * (n_j + n_f + n_t) c
+
+    @everywhere add_sse_constraint!(c)
 
     bounds_for(name, xs, n, skip_min, skip_max) =
         pmap(1:n) do k
