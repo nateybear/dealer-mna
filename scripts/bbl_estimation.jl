@@ -1,9 +1,16 @@
 using Distributed
 @everywhere using JuMP #load macros first b/c of eval order
+@everywhere using DealerMnA
 
-@everywhere begin
-    using DealerMnA
+# used in main
+macro fetchinit(args...)
+    exprs = [:($(esc(a)) = @fetch $(esc(a))) for a in args]
+    quote
+        $(exprs...)
+    end
+end
 
+@everywhere workers() begin
     using Mmap
     using SparseArrays
     using Statistics
@@ -113,15 +120,6 @@ using Distributed
         Ct_blocks[bi] ./= n_col
     end
 
-    # Per-map-row std across sims. Sorted blocks reuse the raw-row σ at the
-    # matching canonical position: it's a scale conditioner, not a statistical
-    # estimand of the accumulated cell, and using the same σ for both orderings
-    # keeps the LP conditioning consistent across the block pair.
-    σ_map = vec(std(R_map, dims = 2))
-    σ_map[σ_map .== 0] .= 1.0
-
-    σ_blocks = [σ_map[spec[3]:spec[4]] for spec in block_specs]
-
     # SparseMatrixCSC is column-major; store the transpose so nzrange(_, i)
     # walks the nonzeros of C's row i as column i of the transpose.
     Cj_sps = [sparse(C') for C in Cj_blocks]
@@ -152,7 +150,7 @@ using Distributed
     t_skip_min, t_skip_max = column_skip_flags(Ct_blocks)
 
     model = Model(KNITRO.Optimizer)
-    #set_silent(model)
+    set_silent(model)
     #set_attribute(model, "threads", nthreads())
     # Half the bound LPs hit DUAL_INFEASIBLE by design (one-sided BBL moments);
     # HiGHS's default ray-extraction on those is wasted work.
@@ -169,13 +167,11 @@ using Distributed
     n_moments = sum(length(R_blocks[bi]) for bi in eachindex(block_specs))
     @variable(model, ϵ[1:n_moments] ≥ 0)
 
-
     total_constraints = sum(length(R) for R in R_blocks)
     @info "Adding LP constraints" total_constraints per_block = [length(R) for R in R_blocks]
     ϵ_rest = ϵ
     for bi in eachindex(block_specs)
         R_b = R_blocks[bi]
-        σ_b = σ_blocks[bi]
         Cj_sp = Cj_sps[bi]
         Cf_sp = Cf_sps[bi]
         Ct_sp = Ct_sps[bi]
@@ -194,49 +190,56 @@ using Distributed
     function solve_bound!(sense, obj)
         set_objective_sense(model, sense)
         set_objective_function(model, obj)
-	model_copy = copy(model)
-	JuMP.set_optimizer(model_copy, KNITRO.Optimizer)
+        model_copy = copy(model)
+        JuMP.set_optimizer(model_copy, KNITRO.Optimizer)
         set_attribute(model_copy, "linsolver", 7)
+	set_silent(model_copy)
         optimize!(model_copy)
-	assert_is_solved_and_feasible(model_copy)
-	return model_copy
+        assert_is_solved_and_feasible(model_copy)
+        return objective_value(model_copy), value.(all_variables(model_copy))
     end
 
     add_sse_constraint!(c) = @constraint(model, sum(ϵ .^ 2) ≤ c)
+
+    set_start_values!(v) = set_start_value.(all_variables(model), v)
 end
+
+@fetchinit n_j w_skip_min w_skip_max n_f f_skip_min f_skip_max n_t t_skip_min t_skip_max total_constraints
 
 function (@main)(_)
     @info "Solving Initial Bound" total_constraints n_j n_f n_t
-    initial_bound = solve_bound!(MIN_SENSE, sum(ϵ .^ 2))
-    c = objective_value(initial_bound)
+    c, start_vals = @fetch solve_bound!(MIN_SENSE, sum(ϵ .^ 2))
     @info "Feasibility OK; solving bounding-box LPs" n_bounds = 2 * (n_j + n_f + n_t) c
 
-    for (ivar, var) in enumerate(all_variables(initial_bound))
-        val = value(var)
-	@everywhere set_start_value(all_variables(model)[$ivar], $val)
-    end
+    @everywhere workers() set_start_values!($start_vals)
+    @everywhere workers() add_sse_constraint!($c)
 
-    @everywhere add_sse_constraint!($c)
-
-    bounds_for(name, xs, n, skip_min, skip_max) =
+    function bounds_for(name, xs, n, skip_min, skip_max)
         pmap(1:n) do k
+            x = model[xs][k]
             lo = if skip_min[k]
                 -Inf
             else
-                objective_value(solve_bound!(MIN_SENSE, xs[k]))
+                solve_bound!(MIN_SENSE, x)[1]
             end
             hi = if skip_max[k]
                 Inf
             else
-                objective_value(solve_bound!(MAX_SENSE, xs[k]))
+                solve_bound!(MAX_SENSE, x)[1]
             end
-            @info "$name[$k]" lo hi
+	    extra = if xs == :w
+	        " $(index.vehicle_cols[k])"
+	    else
+	        ""
+	    end
+            @info "$name[$k]$extra" lo hi
             return (lo, hi)
         end
+    end
 
-    w_bounds = bounds_for("w", w, n_j, w_skip_min, w_skip_max)
-    f_bounds = bounds_for("f", f, n_f, f_skip_min, f_skip_max)
-    t_bounds = bounds_for("t", t, n_t, t_skip_min, t_skip_max)
+    w_bounds = bounds_for("w", :w, n_j, w_skip_min, w_skip_max)
+    f_bounds = bounds_for("f", :f, n_f, f_skip_min, f_skip_max)
+    t_bounds = bounds_for("t", :t, n_t, t_skip_min, t_skip_max)
 
     JLD2.write_object("data/bbl_estimates.jld2", (; w = w_bounds, f = f_bounds, t = t_bounds))
     return nothing
