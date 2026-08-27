@@ -241,6 +241,6 @@ function (@main)(_)
     f_bounds = bounds_for("f", :f, n_f, f_skip_min, f_skip_max)
     t_bounds = bounds_for("t", :t, n_t, t_skip_min, t_skip_max)
 
-    JLD2.write_object("data/bbl_estimates.jld2", (; w = w_bounds, f = f_bounds, t = t_bounds))
+    JLD2.write_object("data/bbl_estimates.jld2", (; w = w_bounds, f = f_bounds, t = t_bounds, c))
     return nothing
 end
