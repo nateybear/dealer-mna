@@ -75,6 +75,20 @@ function _stratified_split(strata::AbstractVector, val_frac::Float64, rng::Abstr
     return tr_idx, val_idx
 end
 
+# Per-stratum K-fold assignment. Rows within each stratum are shuffled and
+# round-robin'd into folds so every fold sees the stratum's class distribution.
+function _stratified_kfold(strata::AbstractVector, K::Int, rng::AbstractRNG)
+    folds = Vector{Int}(undef, length(strata))
+    for s in unique(strata)
+        rows = findall(==(s), strata)
+        perm = randperm(rng, length(rows))
+        for (i, p) in enumerate(perm)
+            folds[rows[p]] = ((i - 1) % K) + 1
+        end
+    end
+    return folds
+end
+
 """
     fit_xgb_custom_oos(make_gh, make_nll, X, y; ...) -> (booster, best_round, best_val)
 

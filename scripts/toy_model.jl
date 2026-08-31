@@ -12,6 +12,7 @@ using LogExpFunctions
 using Memoize
 using JuMP
 import Ipopt
+using Optim
 
 using Plots
 using LaTeXStrings
@@ -102,6 +103,9 @@ function make_ipopt_model(; silent = true)
     set_attribute(m, "hessian_approximation", "limited-memory")
     set_attribute(m, "max_iter", 10_000)
     set_attribute(m, "tol", 1e-6)
+    set_attribute(m, "residual_ratio_singular", 1e-8)
+    set_attribute(m, "ma27_ignore_singularity", "yes")
+    set_attribute(m, "perturb_always_cd", "yes")
     return m
 end
 
@@ -689,40 +693,10 @@ function _compliance_manufacturer_callbacks(C, vL, vH, β, σ)
     return Π_M_val, ∇Π_M!
 end
 
-function _compliance_manufacturer_at(; C, vL, vH, β, σ, q_cap, w_init, φ_init)
-    m = make_ipopt_model()
-    w_max = 3 * max(vL, vH)
-    @variable(m, W_MIN <= w[i = 1:2] <= w_max, start = clamp(w_init[i], W_MIN, w_max))
-    @variable(m, 0 <= φ <= q_cap, start = clamp(φ_init, 0.0, q_cap))
-    Π_M_fn, ∇Π_M! = _compliance_manufacturer_callbacks(C, vL, vH, β, σ)
-    op = add_nonlinear_operator(m, 3, Π_M_fn, ∇Π_M!; name = :Π_M)
-    @objective(m, Max, op(w[1], w[2], φ))
-    optimize!(m)
-    _check_status(m, "compliance manufacturer")
-
-    w_star = SVector{2}(value(w[1]), value(w[2]))
-    φ_star = value(φ)
-    sol = solve_compliance_retailer(;
-        C, vL, vH, wL = w_star[1], wH = w_star[2], φ = φ_star, β, σ
-    )
-    p, Pr_c = sol.p, sol.Pr_comply
-    bonus, base = sol.bonus, sol.base
-    q1 = D(p[1], p[2]; vL, vH)
-    Π_M_t1 = w_star[1] * q1[1] + w_star[2] * q1[2] - C(q1)
-    Π_manufacturer = Π_M_t1 + β * (Pr_c * bonus.Π_M + (1 - Pr_c) * base.Π_M)
-    Π_R_t1 = (p[1] - w_star[1]) * q1[1] + (p[2] - w_star[2]) * q1[2]
-    Π_retailer = Π_R_t1 + β * (Pr_c * bonus.π_R + (1 - Pr_c) * base.π_R)
-    CS_t1 = CS(p[1], p[2]; vL, vH)
-    CS_expected = CS_t1 + β * (Pr_c * bonus.CS_val + (1 - Pr_c) * base.CS_val)
-    return (;
-        w = w_star, φ = φ_star, p, Pr_comply = Pr_c, q1, bonus, base,
-        Π_manufacturer, Π_retailer, CS = CS_expected,
-    )
-end
-
 # Manufacturer's problem at a fixed φ (optimizes only over (wL, wH)). Used by
 # the tracing sweep in main to plot how the optimal wholesale prices respond to
-# the target.
+# the target, and by compliance_manufacturer to concentrate out (wL, wH) so
+# the outer problem is 1-D in φ.
 function compliance_manufacturer_fixed_phi(;
     C, vL, vH, β, σ, φ, w_init = SA[max(W_MIN, vL / 4), max(W_MIN, vH / 4)]
 )
@@ -747,17 +721,11 @@ function compliance_manufacturer_fixed_phi(;
     return SVector{2}(value(w[1]), value(w[2]))
 end
 
-# Multi-start over qualitatively different (w, φ) regions and pick the best
-# converged candidate. With full t=1 assortment, (dm.w, φ = 0) reproduces two-
-# period DM exactly, so we anchor with that value and only accept Ipopt
-# candidates that beat it — no crash if every start fails or hits a bad
-# corner (compliance mechanism inactive at these parameters is a valid result).
-
 # DM anchor: (w = dm.w, φ = 0) — retailer plays DM in both periods (Pr_c ≡ 1
 # since Σq_dm > 0 > φ). Constructed by hand rather than via Ipopt so it can't
 # fail. Guarantees compliance_manufacturer always returns at least the two-
-# period DM outcome, so downstream heatmaps don't crash on inactive-mechanism
-# parameters.
+# period DM outcome when the univariate search can't beat it (compliance
+# mechanism inactive at these parameters is a valid result).
 function _dm_anchor(dm, β, C, vL, vH)
     bonus = _period2_bonus(dm.w, C, vL, vH)
     base = _period2_base(dm.w[1], C, vL)
@@ -772,54 +740,64 @@ function _dm_anchor(dm, β, C, vL, vH)
     )
 end
 
+# Evaluate the manufacturer's expected profit at a fixed φ, concentrating out
+# (wL, wH) via compliance_manufacturer_fixed_phi. Returns (Π_M, w) or nothing
+# if the inner solve failed.
+function _compliance_profit_at_phi(C, vL, vH, β, σ, φ)
+    w = try
+        compliance_manufacturer_fixed_phi(; C, vL, vH, β, σ, φ)
+    catch e
+        @debug "compliance inner solve failed" φ exception = e
+        return nothing
+    end
+    sol = solve_compliance_retailer(; C, vL, vH, wL = w[1], wH = w[2], φ, β, σ)
+    q1 = D(sol.p[1], sol.p[2]; vL, vH)
+    Π_M_t1 = w[1] * q1[1] + w[2] * q1[2] - C(q1)
+    Π_M = Π_M_t1 + β * (sol.Pr_comply * sol.bonus.Π_M +
+                        (1 - sol.Pr_comply) * sol.base.Π_M)
+    return (; Π_M, w, sol, q1)
+end
+
+# Outer univariate over φ ∈ [0, q_cap] using Brent's method; inner (wL, wH)
+# concentrated out by compliance_manufacturer_fixed_phi. Joint optimization
+# over (wL, wH, φ) is numerically fragile — the outer gradient in φ passes
+# through pdf(N(0,σ), φ − Σq) which is tiny except in a narrow band, so Ipopt
+# often can't leave the φ ≈ 0 corner and reports failed starts. The 1-D
+# concentrated objective is smooth and bracket-searchable.
 function compliance_manufacturer(; C, vL, vH, β, σ)
     dm = simple_manufacturer(; C, vL, vH)
-    vi = vertically_integrated(; C, vL, vH)
     q_cap = 0.99 * _q_total_max(vL, vH)
     two_period_dm = (1 + β) * dm.Π_manufacturer
 
-    # Anchor: (dm.w, φ = 0). Always feasible, always returns exactly (1+β)·dm.Π_M.
     dm_anchor = _dm_anchor(dm, β, C, vL, vH)
     @info "compliance dm_anchor" Π_M = dm_anchor.Π_manufacturer two_period_dm
 
-    # Compliance-active start: φ set so retailer's DM equilibrium sits at
-    # Pr_c ≈ 0.5, giving n_val a meaningful magnitude for the outer gradient.
-    Σq_dm = dm.q[1] + dm.q[2]
-    φ_active = clamp(Σq_dm, 1.0e-4, q_cap)
-    starts = [
-        (label = "DM_no_target", w = dm.w, φ = 1.0e-4),
-        (label = "comply_active", w = dm.w, φ = φ_active),
-        (label = "VI_halved",
-            w = SA[max(W_MIN, vi.p[1] / 2), max(W_MIN, vi.p[2] / 2)],
-            φ = 0.3 * q_cap),
-        (label = "aggressive_wL",
-            w = SA[max(W_MIN, dm.w[1] / 4), dm.w[2]],
-            φ = 0.5 * q_cap),
-        (label = "midpoint",
-            w = SA[max(W_MIN, vL / 4), max(W_MIN, vH / 4)],
-            φ = 0.5 * q_cap),
-    ]
-
-    best = dm_anchor
-    best_label = "dm_anchor"
-    for s in starts
-        candidate = try
-            _compliance_manufacturer_at(;
-                C, vL, vH, β, σ, q_cap, w_init = s.w, φ_init = s.φ
-            )
-        catch e
-            @info "compliance start failed" start = s.label exception = e
-            continue
-        end
-        @info "compliance start converged" start = s.label Π_M = candidate.Π_manufacturer φ =
-            candidate.φ wL = candidate.w[1] wH = candidate.w[2] Pr_c = candidate.Pr_comply
-        if candidate.Π_manufacturer > best.Π_manufacturer
-            best = candidate
-            best_label = s.label
-        end
+    res = optimize(0.0, q_cap) do φ
+        r = _compliance_profit_at_phi(C, vL, vH, β, σ, φ)
+        return isnothing(r) ? Inf : -r.Π_M
     end
-    @info "compliance best" start = best_label Π_M = best.Π_manufacturer bound = two_period_dm
-    return best
+    φ_star = Optim.minimizer(res)
+    Π_M_star = -Optim.minimum(res)
+    @info "compliance univariate" φ = φ_star Π_M = Π_M_star bound = two_period_dm
+
+    if !isfinite(Π_M_star) || Π_M_star <= dm_anchor.Π_manufacturer
+        @info "compliance falls back to dm_anchor" Π_M_star Π_M_anchor =
+            dm_anchor.Π_manufacturer
+        return dm_anchor
+    end
+
+    r = _compliance_profit_at_phi(C, vL, vH, β, σ, φ_star)
+    w_star, sol, q1 = r.w, r.sol, r.q1
+    p, Pr_c = sol.p, sol.Pr_comply
+    bonus, base = sol.bonus, sol.base
+    Π_R_t1 = (p[1] - w_star[1]) * q1[1] + (p[2] - w_star[2]) * q1[2]
+    Π_retailer = Π_R_t1 + β * (Pr_c * bonus.π_R + (1 - Pr_c) * base.π_R)
+    CS_t1 = CS(p[1], p[2]; vL, vH)
+    CS_expected = CS_t1 + β * (Pr_c * bonus.CS_val + (1 - Pr_c) * base.CS_val)
+    return (;
+        w = w_star, φ = φ_star, p, Pr_comply = Pr_c, q1, bonus, base,
+        Π_manufacturer = r.Π_M, Π_retailer, CS = CS_expected,
+    )
 end
 
 recovered_surplus(d::Dict) = recovered_surplus(d["c_L"], d["c_H"], d["v_L"], d["v_H"])

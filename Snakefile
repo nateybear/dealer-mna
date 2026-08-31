@@ -1350,6 +1350,275 @@ rule plot_mcem_trace:
         )
 
 
+# ============================================================================
+# STRATIFIED-FOLD PARALLEL PIPELINE
+# ----------------------------------------------------------------------------
+# Mirrors compliance → price densities → BBL sim → matrix → maps → estimation
+# and every downstream compliance/BBL plot/table, all under `_stratified`
+# suffixed sibling paths. Lets the current pipeline stay live while the
+# stratified re-estimation cooks; swap in with `mv` when validated.
+# See plans/compliance_stratified_folds.md for the design + swap procedure.
+# ============================================================================
+
+
+rule data_compliance_estimation_stratified:
+    """
+    Parallel-track compliance estimation with per-trim K-fold splits stratified
+    on is_sold. Same script structure as data_compliance_estimation; outputs
+    are written under _stratified sibling paths so both estimates coexist.
+    """
+    input:
+        "scripts/compliance_estimation_stratified.jl",
+        dealers_init="data/dealers_init_filtered.jld2",
+        fords="data/arrow/fords.arrow",
+        dealer_demographics="data/dealer_demographics.arrow",
+        model_frames="data/model_frames.jld2",
+        residual_demand="data/residual_demand.jld2",
+        kept_trims="data/kept_trims.arrow",
+    output:
+        compliance="data/compliance_stratified.arrow",
+        fits="data/compliance_fits_stratified.jld2",
+        fits_final="data/compliance_fits_final_stratified.jld2",
+        sales_targets="data/sales_targets_stratified.jld2",
+        mcem_trace="data/compliance_mcem_trace_stratified.jld2",
+    log:
+        "logs/compliance_estimation_stratified.log",
+    run:
+        julia(
+            "scripts/compliance_estimation_stratified.jl",
+            input=input,
+            output=output,
+            log=log,
+            processes=config.get("processes", 1),
+        )
+
+
+rule data_price_density_estimation_stratified:
+    input:
+        "scripts/price_density_estimation_stratified.jl",
+        model_frames="data/model_frames.jld2",
+        residual_demand="data/residual_demand.jld2",
+        sales_targets="data/sales_targets_stratified.jld2",
+        compliance="data/compliance_stratified.arrow",
+        price_table="data/price_table.arrow",
+        kept_trims="data/kept_trims.arrow",
+    output:
+        price_densities="data/price_densities_stratified.jld2",
+    log:
+        "logs/price_density_estimation_stratified.log",
+    run:
+        julia(
+            "scripts/price_density_estimation_stratified.jl",
+            input=input,
+            output=output,
+            log=log,
+            processes=config.get("processes", 1),
+        )
+
+
+rule data_bbl_simulation_stratified:
+    """
+    Reuses scripts/bbl_forward_simulation.jl (pure snakemake I/O). Points at
+    the stratified compliance/sales_targets/price_densities inputs and writes
+    sims to data/bbl_simulation_stratified/seed_{seed}.jld2.
+    """
+    input:
+        "scripts/bbl_forward_simulation.jl",
+        model_frames="data/model_frames.jld2",
+        demand_estimates="data/demand_estimates.jld2",
+        delta_decomp="data/delta_decomposition_regout.jld2",
+        compliance_fits="data/compliance_fits_final_stratified.jld2",
+        sales_targets="data/sales_targets_stratified.jld2",
+        price_densities="data/price_densities_stratified.jld2",
+        state_transition="data/state_transition.jld2",
+        compliance="data/compliance_stratified.arrow",
+        residual_demand="data/residual_demand.jld2",
+        price_table="data/price_table.arrow",
+    output:
+        sim="data/bbl_simulation_stratified/seed_{seed}.jld2",
+    log:
+        "logs/bbl_forward_simulation_stratified_seed_{seed}.log",
+    run:
+        julia(
+            "scripts/bbl_forward_simulation.jl",
+            input=input,
+            output=output,
+            wildcards=wildcards,
+            log=log,
+        )
+
+
+rule data_bbl_simulations_stratified:
+    input:
+        expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=range(1, 201))
+
+
+rule data_bbl_matrix_stratified:
+    input:
+        "scripts/bbl_matrix.jl",
+        model_frames="data/model_frames.jld2",
+        demand_estimates="data/demand_estimates.jld2",
+        delta_decomp="data/delta_decomposition_regout.jld2",
+        price_densities="data/price_densities_stratified.jld2",
+        state_transition="data/state_transition.jld2",
+        simulations=expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=range(1, 201)),
+    output:
+        "data/bbl_matrix_stratified.jld2",
+    log:
+        "logs/bbl_matrix_stratified.log",
+    run:
+        julia(
+            "scripts/bbl_matrix.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule data_bbl_matrix_maps_stratified:
+    input:
+        "scripts/bbl_matrix_to_map.jl",
+        bbl_matrix="data/bbl_matrix_stratified.jld2",
+    output:
+        R="data/bbl_R_stratified.map",
+        C_j="data/bbl_C_j_stratified.map",
+        C_f="data/bbl_C_f_stratified.map",
+        C_t="data/bbl_C_t_stratified.map",
+    log:
+        "logs/bbl_matrix_to_map_stratified.log",
+    run:
+        julia(
+            "scripts/bbl_matrix_to_map.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule data_bbl_estimation_stratified:
+    """
+    bbl_estimation_stratified.jl hardcodes the _stratified matrix + map paths
+    (mirrors bbl_estimation.jl's hardcoded reads via Mmap.mmap).
+    """
+    input:
+        "scripts/bbl_estimation_stratified.jl",
+        bbl_matrix="data/bbl_matrix_stratified.jld2",
+        R="data/bbl_R_stratified.map",
+        C_j="data/bbl_C_j_stratified.map",
+        C_f="data/bbl_C_f_stratified.map",
+        C_t="data/bbl_C_t_stratified.map",
+    output:
+        "data/bbl_estimates_stratified.jld2",
+    log:
+        "logs/bbl_estimation_stratified.log",
+    run:
+        julia(
+            "scripts/bbl_estimation_stratified.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule plot_sales_targets_scatter_stratified:
+    input:
+        "scripts/plot_sales_targets_scatter.jl",
+        model_frames="data/model_frames.jld2",
+        state_matrix="data/residual_demand.jld2",
+        compliance="data/compliance_stratified.arrow",
+        sales_targets="data/sales_targets_stratified.jld2",
+        fords="data/arrow/fords.arrow",
+        kept_trims="data/kept_trims.arrow",
+    output:
+        plot="plots/sales_targets_scatter_stratified.png",
+    log:
+        "logs/plot_sales_targets_scatter_stratified.log",
+    run:
+        julia(
+            "scripts/plot_sales_targets_scatter.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule plot_trim_probabilities_stratified:
+    input:
+        "scripts/plot_trim_probabilities.jl",
+        state_matrix="data/residual_demand.jld2",
+        fits="data/compliance_fits_final_stratified.jld2",
+        fords="data/arrow/fords.arrow",
+        kept_trims="data/kept_trims.arrow",
+    output:
+        plot="plots/trim_probabilities_featured_stratified.png",
+    log:
+        "logs/plot_trim_probabilities_stratified.log",
+    run:
+        julia(
+            "scripts/plot_trim_probabilities.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule table_trim_probabilities_stratified:
+    input:
+        "scripts/table_trim_probabilities.jl",
+        state_matrix="data/residual_demand.jld2",
+        fits="data/compliance_fits_final_stratified.jld2",
+        fords="data/arrow/fords.arrow",
+        kept_trims="data/kept_trims.arrow",
+    output:
+        tex="tables/trim_probabilities_stratified.tex",
+        csv="tables/trim_probabilities_stratified.csv",
+    log:
+        "logs/table_trim_probabilities_stratified.log",
+    run:
+        julia(
+            "scripts/table_trim_probabilities.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule plot_mcem_trace_stratified:
+    input:
+        "scripts/plot_mcem_trace.jl",
+        mcem_trace="data/compliance_mcem_trace_stratified.jld2",
+    output:
+        plot="plots/mcem_trace_stratified.png",
+        summary="data/mcem_trace_summary_stratified.jld2",
+    log:
+        "logs/plot_mcem_trace_stratified.log",
+    run:
+        julia(
+            "scripts/plot_mcem_trace.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule all_stratified:
+    """
+    Convenience aggregator: builds every terminal artifact in the stratified
+    parallel pipeline. Use `snakemake --config processes=<N> all_stratified`
+    to kick off end-to-end. Nothing in the un-suffixed pipeline is touched.
+    """
+    input:
+        "data/compliance_stratified.arrow",
+        "data/compliance_fits_final_stratified.jld2",
+        "data/sales_targets_stratified.jld2",
+        "data/price_densities_stratified.jld2",
+        "data/bbl_estimates_stratified.jld2",
+        "plots/sales_targets_scatter_stratified.png",
+        "plots/trim_probabilities_featured_stratified.png",
+        "tables/trim_probabilities_stratified.tex",
+        "plots/mcem_trace_stratified.png",
+
+
 rule plot_wtp_distance:
     input:
         "scripts/plot_wtp_distance.jl",
