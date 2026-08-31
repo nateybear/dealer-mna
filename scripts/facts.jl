@@ -103,6 +103,13 @@ with_logging() do
     push!(facts, "avgdisttravelers" => round(mean(travelers.actual_distance), digits = 2))
     push!(facts, "fartravelers" => round(100mean(travelers.actual_distance .> 100), digits = 2))
 
+    # DEMAND-MODEL SCALARS — read from small jld2 files produced by their own rules
+    wtp = JLD2.load_object(snakemake.input["wtp_distance"])
+    push!(facts, "wtpdistancemedian" => format(round(Int, wtp.median_dollars_per_mile), commas = true))
+
+    mcem = JLD2.load_object(snakemake.input["mcem_trace_summary"])
+    push!(facts, "piposteriormean" => round(mcem.pi_posterior_mean, digits = 3))
+
     open(snakemake.output[1], "w") do io
         print(io, process_facts(facts))
     end

@@ -706,6 +706,8 @@ rule data_facts:
         transaction_uids="data/transaction_uids.csv",
         transactions_for_analysis="data/transactions_for_analysis.jld2",
         dealer_demographics="data/dealer_demographics.arrow",
+        wtp_distance="data/wtp_distance.jld2",
+        mcem_trace_summary="data/mcem_trace_summary.jld2",
     output:
         "facts.tex",
     log:
@@ -1266,6 +1268,108 @@ rule table_assortment_probs:
             log=log,
         )
 
+
+rule plot_sales_targets_scatter:
+    input:
+        "scripts/plot_sales_targets_scatter.jl",
+        model_frames="data/model_frames.jld2",
+        state_matrix="data/residual_demand.jld2",
+        compliance="data/compliance.arrow",
+        sales_targets="data/sales_targets.jld2",
+        fords="data/arrow/fords.arrow",
+        kept_trims="data/kept_trims.arrow",
+    output:
+        plot="plots/sales_targets_scatter.png",
+    log:
+        "logs/plot_sales_targets_scatter.log",
+    run:
+        julia(
+            "scripts/plot_sales_targets_scatter.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule plot_trim_probabilities:
+    input:
+        "scripts/plot_trim_probabilities.jl",
+        state_matrix="data/residual_demand.jld2",
+        fits="data/compliance_fits_final.jld2",
+        fords="data/arrow/fords.arrow",
+        kept_trims="data/kept_trims.arrow",
+    output:
+        plot="plots/trim_probabilities_featured.png",
+    log:
+        "logs/plot_trim_probabilities.log",
+    run:
+        julia(
+            "scripts/plot_trim_probabilities.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule table_trim_probabilities:
+    input:
+        "scripts/table_trim_probabilities.jl",
+        state_matrix="data/residual_demand.jld2",
+        fits="data/compliance_fits_final.jld2",
+        fords="data/arrow/fords.arrow",
+        kept_trims="data/kept_trims.arrow",
+    output:
+        tex="tables/trim_probabilities.tex",
+        csv="tables/trim_probabilities.csv",
+    log:
+        "logs/table_trim_probabilities.log",
+    run:
+        julia(
+            "scripts/table_trim_probabilities.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule plot_mcem_trace:
+    input:
+        "scripts/plot_mcem_trace.jl",
+        mcem_trace="data/compliance_mcem_trace.jld2",
+    output:
+        plot="plots/mcem_trace.png",
+        summary="data/mcem_trace_summary.jld2",
+    log:
+        "logs/plot_mcem_trace.log",
+    run:
+        julia(
+            "scripts/plot_mcem_trace.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule plot_wtp_distance:
+    input:
+        "scripts/plot_wtp_distance.jl",
+        model_frames="data/model_frames.jld2",
+        demand_estimates="data/demand_estimates.jld2",
+        delta_decomp="data/delta_decomposition_regout.jld2",
+        fords="data/arrow/fords.arrow",
+    output:
+        plot="plots/wtp_distance.png",
+        summary="data/wtp_distance.jld2",
+    log:
+        "logs/plot_wtp_distance.log",
+    run:
+        julia(
+            "scripts/plot_wtp_distance.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
 rule toy_model:
     input:
         "scripts/toy_model.jl",
@@ -1283,6 +1387,14 @@ rule toy_model:
         piR_plot="plots/toy_model_piR.png",
         qH_plot="plots/toy_model_qH.png",
         wH_plot="plots/toy_model_wH.png",
+        # png_compliance_c_L_c_H="plots/toy_model_compliance_c_L_c_H.png",
+        # png_compliance_v_L_v_H="plots/toy_model_compliance_v_L_v_H.png",
+        # png_compliance_c_L_v_L="plots/toy_model_compliance_c_L_v_L.png",
+        # png_compliance_c_H_v_H="plots/toy_model_compliance_c_H_v_H.png",
+        compliance_wL_plot="plots/toy_model_compliance_wL.png",
+        compliance_wH_plot="plots/toy_model_compliance_wH.png",
+        compliance_prcomply_plot="plots/toy_model_compliance_prcomply.png",
+        compliance_phi_plot="plots/toy_model_compliance_phi.png",
 
     log:
         "logs/toy_model.log",
@@ -1478,6 +1590,12 @@ rule all:
         "data/compliance_fits_final.jld2",
         "data/price_densities.jld2",
         "data/sales_targets.jld2",
+        # Results-section artifacts
+        "plots/sales_targets_scatter.png",
+        "plots/trim_probabilities_featured.png",
+        "tables/trim_probabilities.tex",
+        "plots/mcem_trace.png",
+        "plots/wtp_distance.png",
         # Facts
         "facts.tex",
         # # Demand model things
