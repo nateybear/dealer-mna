@@ -253,6 +253,154 @@ function fit_xgb_oos(
     return b_final, best_round
 end
 
+#### Pinball loss + quantile-grid sampling (stratified-branch nonparametric densities)
+####
+#### Fit K conditional-quantile boosters per target, then sample by inverse-CDF
+#### with linear interpolation between adjacent quantile knots. Winsorized at
+#### the outer knots (draws below QUANTILE_LEVELS[1] or above QUANTILE_LEVELS[end]
+#### clip to the boundary quantile).
+####
+#### Consumers: price_density_estimation_stratified.jl, state_transition_estimation_stratified.jl,
+#### bbl_forward_simulation_stratified.jl.
+
+# 9 quantiles: octile grid interior + 0.025/0.975 tails.
+const QUANTILE_LEVELS = Float32[
+    0.025, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 0.975
+]
+
+# Pinball loss gradient/Hessian for quantile τ:
+#   L(y, ŷ) = τ·max(y − ŷ, 0) + (1 − τ)·max(ŷ − y, 0)
+# Gradient wrt ŷ is piecewise-constant: (1−τ) when ŷ ≥ y, else −τ. Second
+# derivative is zero, but XGBoost needs h > 0 for splits; use unit Hessian
+# (same trick as XGBoost's stock reg:quantileerror).
+@inline function pinball_grad_hess(ŷ::Float32, y::Float32, τ::Float32)
+    g = ŷ ≥ y ? (1.0f0 - τ) : -τ
+    return g, 1.0f0
+end
+
+@inline function pinball_nll(ŷ::Float32, y::Float32, τ::Float32)
+    d = y - ŷ
+    return d ≥ 0 ? τ * d : (τ - 1.0f0) * d
+end
+
+"""
+    fit_quantile_grid(X, y; τs = QUANTILE_LEVELS, params, max_round, patience, strata, rng)
+        -> Vector{Vector{UInt8}}
+
+Fit one XGBoost booster per quantile in `τs` via `fit_xgb_custom_oos` with
+pinball loss. Returns saved booster bytes (ubj format) — one per quantile,
+in the same order as `τs`. Empty bytes if a fit's `best_round == 0`
+(vanishing signal); callers should check.
+
+`strata` is passed through to `fit_xgb_custom_oos`'s val split so val-set
+class balance is preserved (mirrors compliance-side usage).
+"""
+function fit_quantile_grid(
+    X::AbstractMatrix,
+    y::AbstractVector;
+    τs::AbstractVector{Float32} = QUANTILE_LEVELS,
+    params = XGB_DEFAULT_PARAMS,
+    max_round::Int = 500,
+    patience::Int = 20,
+    strata::Union{Nothing, AbstractVector} = nothing,
+    rng::AbstractRNG = Random.default_rng(),
+)
+    y_f = Float32.(y)
+    out = Vector{Vector{UInt8}}(undef, length(τs))
+    for (qi, τ) in enumerate(τs)
+        # Warm the booster's base_score to the marginal quantile so early
+        # rounds don't waste climbing to the right level from f = 0.
+        base = Float64(_marginal_quantile(y_f, τ))
+        τ_c = Float32(τ)
+        b, br, _ = fit_xgb_custom_oos(
+            idxs ->
+                let m = length(idxs), y_s = y_f[idxs]
+                    ŷ -> begin
+                        grad = Vector{Float32}(undef, m)
+                        hess = Vector{Float32}(undef, m)
+                        @inbounds for j in 1:m
+                            grad[j], hess[j] = pinball_grad_hess(ŷ[j], y_s[j], τ_c)
+                        end
+                        return grad, hess
+                    end
+                end,
+            idxs ->
+                let m = length(idxs), y_s = y_f[idxs]
+                    ŷ -> begin
+                        nll = 0.0
+                        @inbounds for j in 1:m
+                            nll += pinball_nll(ŷ[j], y_s[j], τ_c)
+                        end
+                        return nll / m
+                    end
+                end,
+            X,
+            y_f;
+            max_round = max_round,
+            patience = patience,
+            strata = strata,
+            rng = rng,
+            params = merge(params, (base_score = base,)),
+        )
+        out[qi] = br == 0 ? UInt8[] : copy(XGBoost.save(b, Vector{UInt8}; format = "ubj"))
+        finalize(b)
+    end
+    return out
+end
+
+# Marginal empirical quantile (linear interpolation); used to seed base_score.
+function _marginal_quantile(y::AbstractVector{Float32}, τ::Float32)
+    n = length(y)
+    n == 0 && return 0.0f0
+    ys = sort(y)
+    h = 1 + (n - 1) * τ
+    lo = clamp(floor(Int, h), 1, n)
+    hi = clamp(lo + 1, 1, n)
+    w = Float32(h - lo)
+    return ys[lo] * (1 - w) + ys[hi] * w
+end
+
+"""
+    sample_from_quantile_grid(rng, quantiles; τs = QUANTILE_LEVELS)
+
+Inverse-CDF sample from the piecewise-linear CDF implied by `quantiles`
+(one value per level in `τs`, in the same order). Draws U ∼ Uniform(0,1);
+if U ≤ τs[1] or U ≥ τs[end], winsorizes to the corresponding boundary
+quantile. Otherwise linearly interpolates between the two neighboring
+quantile knots.
+
+`quantiles` should be sorted (fix quantile crossing via `sort!` before
+calling); this function does not re-sort.
+"""
+@inline function sample_from_quantile_grid(
+    rng::AbstractRNG,
+    quantiles::AbstractVector{<:Real};
+    τs::AbstractVector{Float32} = QUANTILE_LEVELS,
+)
+    u = Float32(rand(rng))
+    return interp_quantile_grid(u, quantiles; τs = τs)
+end
+
+# The pure-function core of `sample_from_quantile_grid`, exposed for tests /
+# non-random inversion.
+@inline function interp_quantile_grid(
+    u::Real, quantiles::AbstractVector{<:Real};
+    τs::AbstractVector{Float32} = QUANTILE_LEVELS,
+)
+    K = length(τs)
+    @assert length(quantiles) == K "quantile vector length $(length(quantiles)) ≠ τs length $K"
+    u ≤ τs[1] && return Float32(quantiles[1])
+    u ≥ τs[end] && return Float32(quantiles[end])
+    # Locate bracket via linear scan — K is small (9) so log-search isn't worth it.
+    @inbounds for i in 1:(K - 1)
+        if u ≤ τs[i + 1]
+            w = Float32((u - τs[i]) / (τs[i + 1] - τs[i]))
+            return Float32(quantiles[i] * (1 - w) + quantiles[i + 1] * w)
+        end
+    end
+    return Float32(quantiles[end])  # unreachable given the τs[end] guard
+end
+
 #### Custom mixture-likelihood gradients / Hessians / NLLs
 ####
 #### All three families: σ-linked raw output, per-row Fisher-information Hessians

@@ -1394,6 +1394,13 @@ rule data_compliance_estimation_stratified:
 
 
 rule data_price_density_estimation_stratified:
+    """
+    Nonparametric conditional log-price density via quantile-regression grid
+    (Supply.QUANTILE_LEVELS). Output is Dict{VehicleKey, Vector{Vector{UInt8}}}
+    — one saved booster per quantile per VK. BBL sim samples via
+    Supply.sample_from_quantile_grid (inverse-CDF with linear interpolation).
+    Replaces the mean+var Normal density on the un-suffixed rule.
+    """
     input:
         "scripts/price_density_estimation_stratified.jl",
         model_frames="data/model_frames.jld2",
@@ -1416,21 +1423,52 @@ rule data_price_density_estimation_stratified:
         )
 
 
-rule data_bbl_simulation_stratified:
+rule data_state_transition_estimation_stratified:
     """
-    Reuses scripts/bbl_forward_simulation.jl (pure snakemake I/O). Points at
-    the stratified compliance/sales_targets/price_densities inputs and writes
-    sims to data/bbl_simulation_stratified/seed_{seed}.jld2.
+    Quantile-regression grid variant of data_state_transition_estimation.
+    Fits one booster per level in Supply.QUANTILE_LEVELS for each of the
+    intercept, own, and cross transition targets. Same input universe as the
+    un-suffixed rule (no compliance dependency) but a distinct output file
+    because the format is different (Vector{Vector{UInt8}}³ vs the 6-booster
+    mean/var tuple).
     """
     input:
-        "scripts/bbl_forward_simulation.jl",
+        "scripts/state_transition_estimation_stratified.jl",
+        model_frames="data/model_frames.jld2",
+        residual_demand="data/residual_demand.jld2",
+        price_table="data/price_table.arrow",
+        kept_trims="data/kept_trims.arrow",
+    output:
+        state_transition="data/state_transition_stratified.jld2",
+    log:
+        "logs/state_transition_estimation_stratified.log",
+    run:
+        julia(
+            "scripts/state_transition_estimation_stratified.jl",
+            input=input,
+            output=output,
+            log=log,
+            processes=config.get("processes", 1),
+        )
+
+
+rule data_bbl_simulation_stratified:
+    """
+    Stratified-branch BBL forward simulation. Uses the copied
+    bbl_forward_simulation_stratified.jl (not the un-suffixed script) because
+    the price + state-transition density formats differ (quantile grid vs
+    mean+var). Also reads the _stratified compliance/sales_targets/
+    price_densities/state_transition inputs.
+    """
+    input:
+        "scripts/bbl_forward_simulation_stratified.jl",
         model_frames="data/model_frames.jld2",
         demand_estimates="data/demand_estimates.jld2",
         delta_decomp="data/delta_decomposition_regout.jld2",
         compliance_fits="data/compliance_fits_final_stratified.jld2",
         sales_targets="data/sales_targets_stratified.jld2",
         price_densities="data/price_densities_stratified.jld2",
-        state_transition="data/state_transition.jld2",
+        state_transition="data/state_transition_stratified.jld2",
         compliance="data/compliance_stratified.arrow",
         residual_demand="data/residual_demand.jld2",
         price_table="data/price_table.arrow",
@@ -1440,7 +1478,7 @@ rule data_bbl_simulation_stratified:
         "logs/bbl_forward_simulation_stratified_seed_{seed}.log",
     run:
         julia(
-            "scripts/bbl_forward_simulation.jl",
+            "scripts/bbl_forward_simulation_stratified.jl",
             input=input,
             output=output,
             wildcards=wildcards,
@@ -1454,13 +1492,19 @@ rule data_bbl_simulations_stratified:
 
 
 rule data_bbl_matrix_stratified:
+    """
+    Reuses scripts/bbl_matrix.jl unchanged: it only reads the KEYS of
+    price_densities and state_transition (for eviction / usable_vks), never
+    the value format, so it works with both the quantile-grid stratified
+    outputs and the un-suffixed mean+var outputs.
+    """
     input:
         "scripts/bbl_matrix.jl",
         model_frames="data/model_frames.jld2",
         demand_estimates="data/demand_estimates.jld2",
         delta_decomp="data/delta_decomposition_regout.jld2",
         price_densities="data/price_densities_stratified.jld2",
-        state_transition="data/state_transition.jld2",
+        state_transition="data/state_transition_stratified.jld2",
         simulations=expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=range(1, 201)),
     output:
         "data/bbl_matrix_stratified.jld2",
@@ -1612,6 +1656,7 @@ rule all_stratified:
         "data/compliance_fits_final_stratified.jld2",
         "data/sales_targets_stratified.jld2",
         "data/price_densities_stratified.jld2",
+        "data/state_transition_stratified.jld2",
         "data/bbl_estimates_stratified.jld2",
         "plots/sales_targets_scatter_stratified.png",
         "plots/trim_probabilities_featured_stratified.png",

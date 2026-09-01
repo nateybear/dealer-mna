@@ -109,29 +109,22 @@ using Distributed
             return log(model.product_info[idx].p)
         end
 
-    # OOS-best-round + full-data refit. Identity link via reg:squarederror; mean
-    # NLL is MSE which Supply.fit_xgb_oos uses as the default val_loss. Set
-    # base_score = mean(y) so the booster starts at the right scale (log-prices
-    # are ~9–11, abs residuals ~0.1–0.3); the C default of 0.5 wastes early
-    # rounds climbing to the mean.
-    regress(X, y) =
-        Supply.fit_xgb_oos(
-            X,
-            y;
-            max_round = 2000,
-            patience = 20,
-            params = merge(
-                Supply.XGB_DEFAULT_PARAMS,
-                (
-                    subsample = 0.8,
-                    base_score = Float64(mean(y)),
-                    max_depth = 8,
-                    min_child_weight = 5,
-                    eta = 0.05,
-                    lambda = 1.0,
-                ),
-            ),
-        )
+    # Nonparametric conditional density via quantile-regression grid. Fits one
+    # XGBoost booster per level in Supply.QUANTILE_LEVELS with pinball loss.
+    # BBL draws log-prices by inverse-CDF sampling with linear interpolation
+    # between adjacent quantile knots (winsorized at the outer tails). Each
+    # booster's base_score is seeded to the marginal empirical quantile by
+    # fit_quantile_grid so early rounds don't waste climbing to the right level.
+    QUANTILE_PARAMS = merge(
+        Supply.XGB_DEFAULT_PARAMS,
+        (
+            subsample = 0.8,
+            max_depth = 8,
+            min_child_weight = 5,
+            eta = 0.05,
+            lambda = 1.0,
+        ),
+    )
 
     function fit_prices(j)
         @info "Fitting" j
@@ -144,37 +137,15 @@ using Distributed
             return nothing
         end
         X, y = X_matrix(j), log_prices(j)
-        mean_booster, mean_round = regress(X, y)
-        y_hat = XGBoost.predict(mean_booster, X)
-        # Squared residuals → variance estimate. Draw time takes sqrt of the
-        # (clipped-nonneg) prediction to recover σ. More principled than the
-        # abs-residual proxy: E[(y − ŷ)²|X] = Var(y|X) under an unbiased ŷ.
-        u = (y .- y_hat) .^ 2
-        # base_score = mean(u) so the variance booster starts at the marginal
-        # residual variance; without this, `regress` inherits base_score =
-        # mean(y) ≈ log(price) (order 9-11), and MSE-with-early-stopping can
-        # shrink toward that irrelevant anchor, under-dispersing draws.
-        variance_booster, variance_round = Supply.fit_xgb_oos(
-            X, u;
+        quantile_bytes = Supply.fit_quantile_grid(
+            X, y;
             max_round = 2000,
             patience = 20,
-            params = merge(
-                Supply.XGB_DEFAULT_PARAMS,
-                (
-                    subsample = 0.8,
-                    base_score = Float64(mean(u)),
-                    max_depth = 8,
-                    min_child_weight = 5,
-                    eta = 0.05,
-                    lambda = 1.0,
-                ),
-            ),
+            params = QUANTILE_PARAMS,
         )
-        @info "  best rounds" j mean_round variance_round
-        # `XGBoost.save` returns an unsafe_wrap over libxgboost-owned memory;
-        # copy so the bytes survive booster GC once fit_prices returns.
-        return copy(XGBoost.save(mean_booster, Vector{UInt8}; format = "ubj")),
-        copy(XGBoost.save(variance_booster, Vector{UInt8}; format = "ubj"))
+        n_active = count(!isempty, quantile_bytes)
+        @info "  fitted quantile grid" j n_quantiles = length(quantile_bytes) n_active
+        return quantile_bytes
     end
 end
 
@@ -202,12 +173,16 @@ function (@main)(_)
     )
 
     fitted = pmap(fit_prices, js)
-    out = Dict{VehicleKey, Tuple{Vector{UInt8}, Vector{UInt8}}}()
+    # Layout per VK: one Vector{UInt8} per quantile level in Supply.QUANTILE_LEVELS,
+    # in the same order. BBL sampler reads via Supply.sample_from_quantile_grid.
+    out = Dict{VehicleKey, Vector{Vector{UInt8}}}()
     for (j, f) in zip(js, fitted)
         f === nothing && continue
         out[j] = f
     end
-    @info "Fit price densities" n_kept = length(out) n_skipped = length(js) - length(out)
+    @info "Fit price densities" n_kept = length(out) n_skipped = length(js) - length(out) n_quantiles = length(
+        Supply.QUANTILE_LEVELS
+    )
     JLD2.save_object("data/price_densities_stratified.jld2", out)
     return nothing
 end
