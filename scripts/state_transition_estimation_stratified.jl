@@ -136,16 +136,23 @@ using Distributed
         # (intercept, own, cross). BBL samples the transition by inverse-CDF
         # with linear interpolation between adjacent quantile knots. Replaces
         # the 2-step mean+variance Normal-draw pattern.
-        fit_grid(X, y) = Supply.fit_quantile_grid(
+        fit_grid(X, y; strata = nothing) = Supply.fit_quantile_grid(
             X, y;
             max_round = 2000, patience = 20,
             params = params_shared,
+            strata = strata,
             rng = rng,
         )
 
         int_bytes = fit_grid(X_common, y_int)
         own_bytes = fit_grid(X_common, y_own)
-        cross_bytes = n_cross >= 20 ? fit_grid(X_cross, cross_y) :
+        # Stratify the cross-fit val split on partner identity so every
+        # partner k with ≥2 training rows contributes to both train and val.
+        # Without this, the random 80/20 split can put entire k-subsets on
+        # one side — the booster then never gets to fit some partners' cross
+        # effect, or the val loss never sees them, giving an over-optimistic
+        # best_round. Mirrors the compliance-side is_sold stratification.
+        cross_bytes = n_cross >= 20 ? fit_grid(X_cross, cross_y; strata = cross_k) :
                       [UInt8[] for _ in Supply.QUANTILE_LEVELS]
 
         # Held-out R² on the median booster only — cheap sanity check that the
