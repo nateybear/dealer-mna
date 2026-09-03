@@ -15,6 +15,7 @@ export DemandWork, Counterfactual,
 
 using FixedEffectModels
 using LoopVectorization: @turbo
+using Polyester: @batch
 import ..pluck
 
 # -------------------------------------------------------------------------------------------------
@@ -98,31 +99,47 @@ end
 # fast index). `@turbo` from LoopVectorization vectorizes them with SLEEFPirates'
 # SIMD exp — critical on aarch64 (Apple libSystem has no libmvec, so `@simd
 # @fastmath exp` stays scalar there). The branchy `v > u_max && (u_max = v)` is
-# rewritten as a branchless `max` so `@turbo` accepts the reduction.
+# rewritten as a branchless `max` so `@turbo` accepts the reduction. `threaded=true`
+# parallelizes the outer z-loop (single-block CF hot path).
 @inline function softmax_block!(
-    U::AbstractMatrix{Float32}, inside_sum_row::AbstractVector{Float32}
+    U::AbstractMatrix{Float32}, inside_sum_row::AbstractVector{Float32};
+    threaded::Bool = false,
 )
     N_t, Z = size(U)
-    @inbounds for z in 1:Z
-        u_max = 0.0f0
-        @turbo for k in 1:N_t
-            u_max = max(u_max, U[k, z])
+    if threaded
+        @batch for z in 1:Z
+            _softmax_col!(U, inside_sum_row, N_t, z)
         end
-        outside = @fastmath exp(-u_max)
-        denom = outside
-        @turbo for k in 1:N_t
-            e = exp(U[k, z] - u_max)
-            U[k, z] = e
-            denom += e
+    else
+        @inbounds for z in 1:Z
+            _softmax_col!(U, inside_sum_row, N_t, z)
         end
-        inv_denom = 1.0f0 / denom
-        sm_sum = 0.0f0
-        @turbo for k in 1:N_t
-            U[k, z] *= inv_denom
-            sm_sum += U[k, z]
-        end
-        inside_sum_row[z] = sm_sum
     end
+end
+
+@inline function _softmax_col!(
+    U::AbstractMatrix{Float32}, inside_sum_row::AbstractVector{Float32},
+    N_t::Int, z::Int,
+)
+    u_max = 0.0f0
+    @turbo for k in 1:N_t
+        u_max = max(u_max, U[k, z])
+    end
+    outside = @fastmath exp(-u_max)
+    denom = outside
+    @turbo for k in 1:N_t
+        e = exp(U[k, z] - u_max)
+        U[k, z] = e
+        denom += e
+    end
+    inv_denom = 1.0f0 / denom
+    sm_sum = 0.0f0
+    @turbo for k in 1:N_t
+        U[k, z] *= inv_denom
+        sm_sum += U[k, z]
+    end
+    inside_sum_row[z] = sm_sum
+    return nothing
 end
 
 # Build Π'·D matrix (K+1 × Z) where Π = [Πᵦ | Πp]. Top K rows = Πᵦ'·D; last row = Πp'·D.
@@ -176,32 +193,67 @@ function forward_pass!(
     ΠtD = Matrix{Float32}(undef, model.K + 1, model.Z)
     compute_ΠtD!(ΠtD, Πᵦ, Πp, model.D_dense)
 
-    @threads :static for bi in blocks
-        U_bi = work.U_blocks[bi]
-        E_bi = work.E_blocks[bi]
-        X_bi = model.X_blocks[bi]
-        dist_bi = model.dist_blocks[bi]
-        param_idxs = model.block_param_idxs[bi]
-        N_bi = size(U_bi, 1)
-
-        mul!(U_bi, X_bi', ΠtD)
-        # Gather δ into a contiguous per-block vector so the inner k-loop below
-        # can SIMD-vectorize; `δ[param_idxs[k]]` is otherwise a gather that
-        # inhibits vectorization. `@turbo` (SLEEFPirates) is what actually
-        # vectorizes the exp — this loop is the dominant CF hot-loop cost.
-        δ_bi = Vector{Float32}(undef, N_bi)
-        @inbounds for k in 1:N_bi
-            δ_bi[k] = δ[param_idxs[k]]
+    # The CF hot path (`refresh!`) usually has exactly one dirty block. Thread
+    # across z within that block — otherwise a single-block refresh burns only
+    # 1 core. Multi-block calls (estimation, or a rare multi-block refresh)
+    # thread across blocks as before, keeping z sequential per thread so the
+    # nested-threading fights don't degenerate.
+    if length(blocks) == 1
+        _forward_pass_block!(
+            work, model, only(blocks), δ, ΠtD, η1, η2; threaded_z = true,
+        )
+    else
+        @batch for bi in blocks
+            _forward_pass_block!(
+                work, model, bi, δ, ΠtD, η1, η2; threaded_z = false,
+            )
         end
-        @inbounds for z in 1:(model.Z)
+    end
+    return nothing
+end
+
+# Per-block forward-pass body. `threaded_z=true` parallelizes the outer z-loop
+# (and softmax) via Polyester's low-overhead @batch — used only when the caller
+# has just one block to compute and can dedicate all threads to it.
+@inline function _forward_pass_block!(
+    work::DemandWork, model::DemandModel, bi::Integer,
+    δ::AbstractVector{Float32}, ΠtD::AbstractMatrix{Float32},
+    η1::Float32, η2::Float32; threaded_z::Bool,
+)
+    U_bi = work.U_blocks[bi]
+    E_bi = work.E_blocks[bi]
+    X_bi = model.X_blocks[bi]
+    dist_bi = model.dist_blocks[bi]
+    param_idxs = model.block_param_idxs[bi]
+    N_bi = size(U_bi, 1)
+    Z = model.Z
+
+    mul!(U_bi, X_bi', ΠtD)
+    # Gather δ into a contiguous per-block vector so the inner k-loop below can
+    # SIMD-vectorize; `δ[param_idxs[k]]` is otherwise a gather that inhibits
+    # vectorization. `@turbo` (SLEEFPirates) is what actually vectorizes the exp.
+    δ_bi = Vector{Float32}(undef, N_bi)
+    @inbounds for k in 1:N_bi
+        δ_bi[k] = δ[param_idxs[k]]
+    end
+    if threaded_z
+        @batch for z in 1:Z
             @turbo for k in 1:N_bi
                 e = exp(η1 + η2 * dist_bi[k, z])
                 E_bi[k, z] = e
                 U_bi[k, z] += δ_bi[k] - e
             end
         end
-        softmax_block!(U_bi, view(work.inside_sum, bi, :))
+    else
+        @inbounds for z in 1:Z
+            @turbo for k in 1:N_bi
+                e = exp(η1 + η2 * dist_bi[k, z])
+                E_bi[k, z] = e
+                U_bi[k, z] += δ_bi[k] - e
+            end
+        end
     end
+    softmax_block!(U_bi, view(work.inside_sum, bi, :); threaded = threaded_z)
     return nothing
 end
 

@@ -25,6 +25,21 @@ _rng = MersenneTwister(78735)
 const TRANSITION_GID = uuid4(_rng)
 const SINGLE_OPERATOR_GID = uuid4(_rng)
 
+# Pin Julia's worker threads to physical cores at package load. Without this the
+# OS is free to migrate threads across cores, which shows up as jitter in the
+# @turbo / @batch hot loops (softmax, forward_pass, residual_demand) — stable
+# affinity makes per-thread cache and BLAS behavior reproducible. Wrapped in a
+# try/catch so package load doesn't fail on platforms where affinity isn't
+# available (e.g. macOS just emits a warning).
+using ThreadPinning
+function __init__()
+    try
+        pinthreads(:cores)
+    catch e
+        @warn "ThreadPinning.pinthreads(:cores) failed — continuing unpinned" exception = e
+    end
+end
+
 include("utils.jl")
 include("geometry/Geometry.jl")
 include("registrations/Registrations.jl")
