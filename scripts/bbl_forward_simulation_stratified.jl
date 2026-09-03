@@ -445,10 +445,13 @@ function (@main)(_)
                             ),
                         )
                     else
+                        # `predict_delta=false` skips pred_regout — sweep_δ!
+                        # below overwrites the sentinel with the real δ̂.
                         apply!(
                             cf,
                             Demand.ModelAdd(
-                                vehicle = vk, quarter = t, dealer_uid = f, price = p
+                                vehicle = vk, quarter = t, dealer_uid = f,
+                                price = p, predict_delta = false,
                             ),
                         )
                     end

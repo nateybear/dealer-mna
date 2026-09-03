@@ -777,6 +777,14 @@ end
     quarter::QuarterKey
     dealer_uid::UUID
     price::Union{Float32, Nothing} = nothing
+    # When true (default), `apply!` predicts δ̂ for the new (t,j,f) via
+    # `pred_regout(regout, ...)`. When false, `apply!` pushes 0.0f0 onto δ as a
+    # sentinel and skips the regression call — safe iff the caller runs
+    # `sweep_δ!` before any accessor reads the block's CCPs, since sweep_δ!
+    # overwrites δ for every live product in the block. Used by the BBL
+    # simulator, which always calls sweep_δ! right after the diff loop and thus
+    # discards the ModelAdd-time δ̂ anyway.
+    predict_delta::Bool = true
 end
 
 @kwdef struct ModelDelete <: AbstractTweak
@@ -1201,23 +1209,30 @@ function apply!(
         tweak.price
     end
 
-    # regout's structural regressor is price; price_hausman is the IV. FixedEffectModels.predict
-    # may read all formula RHS columns, so include both even when price was given directly.
-    row_df = DataFrame(;
-        price = [Float64(p_hat)],
-        price_hausman = [Float64(p_hat)],
-        J = [J_t],
-        vehicleid = [vehicleid],
-        dealer_uid = [tweak.dealer_uid],
-        year = [year_val],
-        quarter = [quarter_val],
-    )
-    δ_hat_raw = pred_regout(regout, row_df)
-    if ismissing(δ_hat_raw) || ismissing(first(δ_hat_raw))
-        @warn "ModelAdd: regout predict returned missing for $tjf_key; no-op"
-        return missing
+    # δ prediction: skipped when the caller (BBL) will run `sweep_δ!` right
+    # after and overwrite this value — see the `predict_delta` field docstring.
+    # Sentinel is 0.0f0 (not `_MASK_DELETE_δ`) because forward_pass may still
+    # touch this slot before sweep_δ! runs (e.g. during intermediate diffs) and
+    # we don't want to accidentally zero out its CCP contribution.
+    δ_hat::Float32 = if tweak.predict_delta
+        row_df = DataFrame(;
+            price = [Float64(p_hat)],
+            price_hausman = [Float64(p_hat)],
+            J = [J_t],
+            vehicleid = [vehicleid],
+            dealer_uid = [tweak.dealer_uid],
+            year = [year_val],
+            quarter = [quarter_val],
+        )
+        δ_hat_raw = pred_regout(regout, row_df)
+        if ismissing(δ_hat_raw) || ismissing(first(δ_hat_raw))
+            @warn "ModelAdd: regout predict returned missing for $tjf_key; no-op"
+            return missing
+        end
+        Float32(first(δ_hat_raw))
+    else
+        0.0f0
     end
-    δ_hat = Float32(first(δ_hat_raw))
 
     bi = _block_index_for_quarter(model, tweak.quarter)
     K = model.K
