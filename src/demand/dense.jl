@@ -873,6 +873,12 @@ end
 
 # ---- apply!(::PriceMultiply, ...) ----
 
+# Fast path when all three filters are set (single product): returns a tuple-backed
+# handle so no heap allocation is needed. The multi-index path falls through and
+# uses vectors from resolve_indices directly (no `collect` copy). Neither path
+# refreshes `product_info[idx].p` any more — callers wanting the live price should
+# read `X_blocks[bi][K+1, k_local]` directly. This eliminated 4-5 allocations per
+# call in the residual_demand SIM_SIZE hot loop.
 """
 apply!(tweak::PriceMultiply, model, δ; β_price) → undo handle (or `missing` if no match)
 
@@ -882,15 +888,38 @@ Multiplies the standardized price in `model.X_blocks[bi][end, k]` by `tweak.by` 
 function apply!(
     tweak::PriceMultiply, model::DemandModel, δ::AbstractVector{Float32}; β_price::Float32
 )
+    K = model.K
+    by = tweak.by
+    if !isnothing(tweak.dealer_uid) && !isnothing(tweak.vehicle) && !isnothing(tweak.quarter)
+        tjf_key = (tweak.quarter, tweak.vehicle, tweak.dealer_uid)
+        δ_idx = get(model.product_lookup.tjf, tjf_key, Int32(0))
+        δ_idx == Int32(0) && return missing
+        loc = get(model.tjf_to_block_k, δ_idx, nothing)
+        loc === nothing && return missing
+        bi = Int32(loc[1])
+        k_local = Int32(loc[2])
+        old_p = model.X_blocks[bi][K + 1, k_local]
+        new_p = old_p * by
+        model.X_blocks[bi][K + 1, k_local] = new_p
+        offset = β_price * old_p * (by - 1.0f0)
+        δ[δ_idx] += offset
+        return (;
+            kind = :price_multiply,
+            dense_indices = ((bi, k_local),),
+            δ_indices = (δ_idx,),
+            δ_offsets = (offset,),
+            old_prices = (old_p,),
+            by,
+        )
+    end
     resolved = resolve_indices(model, tweak)
     ismissing(resolved) && return missing
     dense_indices, δ_idxs = resolved
-    K = model.K
-    by = tweak.by
     n = length(dense_indices)
     δ_offsets = Vector{Float32}(undef, n)
     old_prices = Vector{Float32}(undef, n)
-    @inbounds for (i, (bi, k_local)) in enumerate(dense_indices)
+    @inbounds for (i, loc) in enumerate(dense_indices)
+        bi, k_local = loc
         old_p = model.X_blocks[bi][K + 1, k_local]
         old_prices[i] = old_p
         new_p = old_p * by
@@ -898,12 +927,11 @@ function apply!(
         offset = β_price * old_p * (by - 1.0f0)
         δ_offsets[i] = offset
         δ[δ_idxs[i]] += offset
-        model.product_info[δ_idxs[i]] = merge(model.product_info[δ_idxs[i]], (; p = new_p))
     end
     return (;
         kind = :price_multiply,
-        dense_indices = collect(dense_indices),
-        δ_indices = collect(δ_idxs),
+        dense_indices,
+        δ_indices = δ_idxs,
         δ_offsets,
         old_prices,
         by,
@@ -922,27 +950,48 @@ every (t, j, f) matching the tweak's filters, and shifts `δ[δ_idx]` by
 function apply!(
     tweak::PriceChange, model::DemandModel, δ::AbstractVector{Float32}; β_price::Float32
 )
+    K = model.K
+    new_p = tweak.price
+    if !isnothing(tweak.dealer_uid) && !isnothing(tweak.vehicle) && !isnothing(tweak.quarter)
+        tjf_key = (tweak.quarter, tweak.vehicle, tweak.dealer_uid)
+        δ_idx = get(model.product_lookup.tjf, tjf_key, Int32(0))
+        δ_idx == Int32(0) && return missing
+        loc = get(model.tjf_to_block_k, δ_idx, nothing)
+        loc === nothing && return missing
+        bi = Int32(loc[1])
+        k_local = Int32(loc[2])
+        old_p = model.X_blocks[bi][K + 1, k_local]
+        model.X_blocks[bi][K + 1, k_local] = new_p
+        offset = β_price * (new_p - old_p)
+        δ[δ_idx] += offset
+        return (;
+            kind = :price_change,
+            dense_indices = ((bi, k_local),),
+            δ_indices = (δ_idx,),
+            δ_offsets = (offset,),
+            old_prices = (old_p,),
+            new_price = new_p,
+        )
+    end
     resolved = resolve_indices(model, tweak)
     ismissing(resolved) && return missing
     dense_indices, δ_idxs = resolved
-    K = model.K
-    new_p = tweak.price
     n = length(dense_indices)
     δ_offsets = Vector{Float32}(undef, n)
     old_prices = Vector{Float32}(undef, n)
-    @inbounds for (i, (bi, k_local)) in enumerate(dense_indices)
+    @inbounds for (i, loc) in enumerate(dense_indices)
+        bi, k_local = loc
         old_p = model.X_blocks[bi][K + 1, k_local]
         old_prices[i] = old_p
         model.X_blocks[bi][K + 1, k_local] = new_p
         offset = β_price * (new_p - old_p)
         δ_offsets[i] = offset
         δ[δ_idxs[i]] += offset
-        model.product_info[δ_idxs[i]] = merge(model.product_info[δ_idxs[i]], (; p = new_p))
     end
     return (;
         kind = :price_change,
-        dense_indices = collect(dense_indices),
-        δ_indices = collect(δ_idxs),
+        dense_indices,
+        δ_indices = δ_idxs,
         δ_offsets,
         old_prices,
         new_price = new_p,
@@ -951,13 +1000,25 @@ end
 
 # ---- apply!(::ModelDelete, ...) ----
 
+# Sentinel utility written into δ for mask-deleted products: softmax_block! computes
+# exp(U[k,z] - u_max) and any Float32 utility below about -87 underflows to 0.0f0.
+# -1f10 gives ample margin against any realistic X'·Π + E contribution flipping the sign.
+const _MASK_DELETE_δ = -1.0f10
+
 """
 apply!(tweak::ModelDelete, model, work, δ) → undo handle (or `missing` if not found)
 
-Removes the (t, j, f) product from its time block, drops its X column / dist row /
-counts row, decrements t_obs by the dropped counts, and removes its entry from
-block_param_idxs, tjf_to_block_k, and product_lookup.{t, j, f, make}. The δ entry is
-left orphaned in `δ` (use the 6-arg forward_pass!).
+Mask-based delete: the product's physical slot in `X_blocks[bi]` / `dist_blocks[bi]` /
+`counts_blocks[bi]` is left in place. Instead, `δ[δ_idx]` is set to a very negative
+sentinel so `softmax_block!` produces zero CCP for the row, and the entry is removed
+from `tjf_to_block_k` and `product_lookup.{t, j, f, make}` so downstream lookups filter
+it out. The physical slot is pushed onto `model.free_slots[bi]` for potential reuse by a
+subsequent `ModelAdd`. Neither X/dist/counts nor the DemandWork buffers are reshaped.
+
+Because `counts_blocks[bi]` and `t_obs[bi, :]` are left untouched, `eval_ll!` results
+are invalid after any `ModelDelete` — CF hot loops don't call `eval_ll!` so this is fine
+in practice; estimation code never issues tweaks. The `work` argument is unused but kept
+for API symmetry with `ModelAdd`.
 """
 function apply!(
     tweak::ModelDelete, model::DemandModel, work::DemandWork, δ::AbstractVector{Float32}
@@ -972,31 +1033,17 @@ function apply!(
     bi_t, k_local_t = model.tjf_to_block_k[δ_idx_raw]
     bi = Int(bi_t)
     k_local = Int(k_local_t)
-    Z = model.Z
-    N_bi = length(model.block_param_idxs[bi])
 
+    # Save enough for undo: δ value, X column, dist row, product_info row and its
+    # positions in the product_lookup vectors. X_col/dist_col matter only if a
+    # subsequent ModelAdd reuses this slot and overwrites the block's raw data —
+    # undoing the delete would otherwise leave the wrong X/dist for the restored
+    # product. Copies are (K+1)- and Z-length, both small.
     X_col = model.X_blocks[bi][:, k_local] |> copy
     dist_col = model.dist_blocks[bi][k_local, :] |> copy
-    counts_col_pairs = _extract_sparse_row(model.counts_blocks[bi], k_local)
     δ_value = δ[δ_idx]
     product_info_row = model.product_info[δ_idx_raw]
 
-    keep_cols = [c for c in 1:N_bi if c != k_local]
-    model.X_blocks[bi] = model.X_blocks[bi][:, keep_cols]
-    model.dist_blocks[bi] = model.dist_blocks[bi][keep_cols, :]
-    @inbounds for (col_t, val_t) in counts_col_pairs
-        model.t_obs[bi, Int(col_t)] -= Int32(val_t)
-    end
-    model.counts_blocks[bi] = _drop_sparse_row(model.counts_blocks[bi], k_local)
-    deleteat!(model.block_param_idxs[bi], k_local)
-    delete!(model.tjf_to_block_k, δ_idx_raw)
-    for (key, (b_t, k_t)) in pairs(model.tjf_to_block_k)
-        if Int(b_t) == bi && Int(k_t) > k_local
-            model.tjf_to_block_k[key] = (b_t, k_t - Int32(1))
-        end
-    end
-
-    # Remove δ_idx from product_lookup.{t, j, f, make} (record positions for undo)
     t_pos = findfirst(==(δ_idx_raw), model.product_lookup.t[tweak.quarter])
     j_pos = findfirst(==(δ_idx_raw), model.product_lookup.j[tweak.vehicle])
     f_pos = findfirst(==(δ_idx_raw), model.product_lookup.f[tweak.dealer_uid])
@@ -1008,7 +1055,10 @@ function apply!(
     deleteat!(model.product_lookup.make[make_key], make_pos)
     delete!(model.product_info, δ_idx_raw)
 
-    _resize_block_buffers!(work, model, bi, N_bi - 1)
+    δ[δ_idx] = _MASK_DELETE_δ
+    delete!(model.tjf_to_block_k, δ_idx_raw)
+    push!(model.free_slots[bi], k_local)
+
     return (;
         kind = :model_delete,
         bi,
@@ -1017,7 +1067,6 @@ function apply!(
         δ_value,
         X_col,
         dist_col,
-        counts_col_pairs,
         tjf_key,
         t_pos, j_pos, f_pos, make_pos,
         product_info_row,
@@ -1106,7 +1155,6 @@ function apply!(
     bi = _block_index_for_quarter(model, tweak.quarter)
     K = model.K
     Z = model.Z
-    N_bi = length(model.block_param_idxs[bi])
     is_coupe, is_suv, is_pickup, is_sedan = _body_flags_for_vehicle(model, tweak.vehicle)
 
     new_X_col = Vector{Float32}(undef, K + 1)
@@ -1131,10 +1179,8 @@ function apply!(
         new_dist_row[zi] = Float32(model.distances[z, tweak.dealer_uid])
     end
 
-    model.X_blocks[bi] = hcat(model.X_blocks[bi], new_X_col)
-    model.dist_blocks[bi] = vcat(model.dist_blocks[bi], reshape(new_dist_row, 1, Z))
-    model.counts_blocks[bi] = _append_empty_sparse_row(model.counts_blocks[bi])
-
+    push!(δ, δ_hat)
+    new_δ_idx = Int32(length(δ))
     new_info = (;
         is_coupe,
         is_suv,
@@ -1145,13 +1191,39 @@ function apply!(
         n = Int16(0),
         g = UUID(UInt128(0)),
     )
-
-    push!(δ, δ_hat)
-    new_δ_idx = Int32(length(δ))
     model.product_info[new_δ_idx] = new_info
-    push!(model.block_param_idxs[bi], new_δ_idx)
-    k_new_local = Int32(N_bi + 1)
-    model.tjf_to_block_k[new_δ_idx] = (Int32(bi), k_new_local)
+
+    # Slot allocation: reuse a slot freed by a prior ModelDelete when available.
+    # Reuse overwrites the freed slot's X column / dist row in place (O(K+Z)) and
+    # keeps the physical dimensions of X_blocks / dist_blocks / counts_blocks /
+    # work buffers unchanged. If no free slot, grow all block-level arrays by one
+    # column/row (hcat / vcat) and grow the work buffers.
+    was_reuse::Bool
+    prev_δ_idx::Int32
+    k_local::Int
+    if !isempty(model.free_slots[bi])
+        was_reuse = true
+        k_local = pop!(model.free_slots[bi])
+        prev_δ_idx = model.block_param_idxs[bi][k_local]
+        @inbounds for i in 1:(K + 1)
+            model.X_blocks[bi][i, k_local] = new_X_col[i]
+        end
+        @inbounds for z in 1:Z
+            model.dist_blocks[bi][k_local, z] = new_dist_row[z]
+        end
+        model.block_param_idxs[bi][k_local] = new_δ_idx
+    else
+        was_reuse = false
+        prev_δ_idx = Int32(0)
+        N_bi = length(model.block_param_idxs[bi])
+        model.X_blocks[bi] = hcat(model.X_blocks[bi], new_X_col)
+        model.dist_blocks[bi] = vcat(model.dist_blocks[bi], reshape(new_dist_row, 1, Z))
+        model.counts_blocks[bi] = _append_empty_sparse_row(model.counts_blocks[bi])
+        push!(model.block_param_idxs[bi], new_δ_idx)
+        k_local = N_bi + 1
+        _resize_block_buffers!(work, model, bi, N_bi + 1)
+    end
+    model.tjf_to_block_k[new_δ_idx] = (Int32(bi), Int32(k_local))
 
     # Register in product_lookup
     push!(get!(model.product_lookup.t, tweak.quarter, Int32[]), new_δ_idx)
@@ -1162,15 +1234,16 @@ function apply!(
     prev_tjf_value = existing
     model.product_lookup.tjf[tjf_key] = new_δ_idx
 
-    _resize_block_buffers!(work, model, bi, N_bi + 1)
     return (;
         kind = :model_add,
         bi,
-        k_local = Int(k_new_local),
+        k_local,
         δ_idx = new_δ_idx,
         tjf_key,
         tjf_was_present,
         prev_tjf_value,
+        was_reuse,
+        prev_δ_idx,
     )
 end
 
@@ -1189,11 +1262,10 @@ function undo!(handle::NamedTuple, model::DemandModel, δ::AbstractVector{Float3
             "undo!(handle, model, δ): only supports :price_multiply / :price_change; got $(handle.kind)"
         )
     K = model.K
-    @inbounds for (i, (bi, k_local)) in enumerate(handle.dense_indices)
+    @inbounds for (i, loc) in enumerate(handle.dense_indices)
+        bi, k_local = loc
         model.X_blocks[bi][K + 1, k_local] = handle.old_prices[i]
         δ[handle.δ_indices[i]] -= handle.δ_offsets[i]
-        model.product_info[handle.δ_indices[i]] =
-            merge(model.product_info[handle.δ_indices[i]], (; p = handle.old_prices[i]))
     end
     return nothing
 end
@@ -1204,27 +1276,31 @@ function undo!(
     if handle.kind == :model_delete
         bi = handle.bi
         k_local = handle.k_local
-        N_bi_now = length(model.block_param_idxs[bi])
-        Xb = model.X_blocks[bi]
-        before = view(Xb, :, 1:(k_local - 1))
-        after = view(Xb, :, k_local:N_bi_now)
-        model.X_blocks[bi] = hcat(before, reshape(handle.X_col, :, 1), after)
-        Db = model.dist_blocks[bi]
-        before_r = view(Db, 1:(k_local - 1), :)
-        after_r = view(Db, k_local:N_bi_now, :)
-        model.dist_blocks[bi] = vcat(before_r, reshape(handle.dist_col, 1, :), after_r)
-        model.counts_blocks[bi] = _insert_sparse_row(
-            model.counts_blocks[bi], k_local, handle.counts_col_pairs
+        # If a subsequent ModelAdd reused this slot, block_param_idxs[bi][k_local]
+        # no longer points to our δ_idx and the physical X/dist have been
+        # overwritten. Undoing then would corrupt the reused product's data.
+        model.block_param_idxs[bi][k_local] == handle.δ_idx || error(
+            "undo!(:model_delete): slot ($(bi), $(k_local)) was reused by a subsequent " *
+            "ModelAdd (block_param_idxs=$(model.block_param_idxs[bi][k_local]), " *
+            "expected $(handle.δ_idx)); its ModelAdd handle must be undone first.",
         )
-        @inbounds for (col_t, val_t) in handle.counts_col_pairs
-            model.t_obs[bi, Int(col_t)] += Int32(val_t)
+        # Remove k_local from the free list (LIFO undo hits the top). Fall back to
+        # a linear scan if a nested ModelDelete pushed a different slot on top.
+        fs = model.free_slots[bi]
+        pos = findlast(==(k_local), fs)
+        pos === nothing && error(
+            "undo!(:model_delete): slot $(k_local) missing from free_slots[$(bi)] — " *
+            "state has been corrupted.",
+        )
+        deleteat!(fs, pos)
+        # Restore X column and dist row in case they were overwritten by a
+        # ModelAdd(reuse) that has since been undone (leaving the slot free again).
+        @inbounds for i in 1:(model.K + 1)
+            model.X_blocks[bi][i, k_local] = handle.X_col[i]
         end
-        for (key, (b_t, k_t)) in pairs(model.tjf_to_block_k)
-            if Int(b_t) == bi && Int(k_t) >= k_local
-                model.tjf_to_block_k[key] = (b_t, k_t + Int32(1))
-            end
+        @inbounds for z in 1:(model.Z)
+            model.dist_blocks[bi][k_local, z] = handle.dist_col[z]
         end
-        insert!(model.block_param_idxs[bi], k_local, handle.δ_idx)
         model.tjf_to_block_k[handle.δ_idx] = (Int32(bi), Int32(k_local))
         δ[handle.δ_idx] = handle.δ_value
         # Restore product_lookup entries
@@ -1235,22 +1311,18 @@ function undo!(
         insert!(model.product_lookup.f[tdealer], handle.f_pos, handle.δ_idx)
         insert!(model.product_lookup.make[make_key], handle.make_pos, handle.δ_idx)
         model.product_info[handle.δ_idx] = handle.product_info_row
-        _resize_block_buffers!(work, model, bi, N_bi_now + 1)
         return nothing
     elseif handle.kind == :model_add
         bi = handle.bi
         k_local = handle.k_local
-        N_bi_now = length(model.block_param_idxs[bi])
-        k_local == N_bi_now ||
-            error("undo!(:model_add): block_param_idxs unexpectedly modified")
-        model.X_blocks[bi] = model.X_blocks[bi][:, 1:(N_bi_now - 1)]
-        model.dist_blocks[bi] = model.dist_blocks[bi][1:(N_bi_now - 1), :]
-        model.counts_blocks[bi] = _pop_last_sparse_row(model.counts_blocks[bi])
-        pop!(model.block_param_idxs[bi])
-        delete!(model.tjf_to_block_k, handle.δ_idx)
+        model.block_param_idxs[bi][k_local] == handle.δ_idx || error(
+            "undo!(:model_add): block_param_idxs[$(bi)][$(k_local)] is " *
+            "$(model.block_param_idxs[bi][k_local]), expected $(handle.δ_idx); state modified since apply.",
+        )
         Int(handle.δ_idx) == length(δ) ||
             error("undo!(:model_add): δ has been modified since apply")
         pop!(δ)
+        delete!(model.tjf_to_block_k, handle.δ_idx)
         delete!(model.product_info, handle.δ_idx)
         # Reverse product_lookup pushes
         tquarter, tvehicle, tdealer = handle.tjf_key
@@ -1264,7 +1336,24 @@ function undo!(
         else
             delete!(model.product_lookup.tjf, handle.tjf_key)
         end
-        _resize_block_buffers!(work, model, bi, N_bi_now - 1)
+        if handle.was_reuse
+            # Slot returns to the free pool. Restore the previous occupant marker
+            # so any subsequent undo(delete) for prev_δ_idx can validate the slot.
+            # X_blocks[bi][:, k_local] retains this ModelAdd's data — the previous
+            # delete's undo (if invoked) will overwrite it from its saved X_col.
+            model.block_param_idxs[bi][k_local] = handle.prev_δ_idx
+            push!(model.free_slots[bi], k_local)
+        else
+            # Grow path: truncate the trailing slot from every block-level array.
+            N_bi_now = length(model.block_param_idxs[bi])
+            k_local == N_bi_now ||
+                error("undo!(:model_add, was_reuse=false): grown slot must be the trailing column")
+            model.X_blocks[bi] = model.X_blocks[bi][:, 1:(N_bi_now - 1)]
+            model.dist_blocks[bi] = model.dist_blocks[bi][1:(N_bi_now - 1), :]
+            model.counts_blocks[bi] = _pop_last_sparse_row(model.counts_blocks[bi])
+            pop!(model.block_param_idxs[bi])
+            _resize_block_buffers!(work, model, bi, N_bi_now - 1)
+        end
         return nothing
     else
         error("undo!: unknown handle kind $(handle.kind)")
@@ -1526,7 +1615,10 @@ function sweep_δ!(cf::Counterfactual, t::QuarterKey)
     bi = _block_index_for_quarter(model, t)
     K = model.K
     year_val, quarter_val = t
-    J_t = length(model.block_param_idxs[bi])
+    # J is the count of *live* products in the block (excludes mask-deleted slots),
+    # since that's what the regression's `log(J)` was trained on and matches the
+    # J_t_lookup used by ModelAdd's own δ prediction.
+    J_t = n_live(model, bi)
 
     δ_idxs = Int32[]
     prices = Float64[]

@@ -29,20 +29,32 @@ struct DemandModel
     M_zs::Vector{Float32}                             # Z
     tjf_to_block_k::Dict{Int32, Tuple{Int32, Int32}}  # δ_idx → (bi, k_local)
     inv_N::Float32
+    # Tweak-time state: physical slots per block that were freed by ModelDelete and
+    # are eligible for reuse by ModelAdd. Empty at load time; grows as CF tweaks are
+    # applied. Not persisted — always defaults to empty on kwarg-constructor load.
+    free_slots::Vector{Vector{Int}}
 end
 
 # Kwarg constructor — splats a NamedTuple loaded from data/model_frames.jld2.
+# `free_slots` is optional and defaults to an empty free list per block so that
+# saved JLD2 frames (which don't carry the field) continue to work.
 function DemandModel(;
     demo_scales, price_scale, dist_scale, distances, product_info, product_lookup,
     agent_data, zips, N, Z, K, Dn, n_blocks, block_keys, block_param_idxs,
     X_blocks, dist_blocks, counts_blocks, t_obs, D_dense, M_zs, tjf_to_block_k, inv_N,
+    free_slots = [Int[] for _ in 1:n_blocks],
 )
     return DemandModel(
         demo_scales, price_scale, dist_scale, distances, product_info, product_lookup,
         agent_data, zips, N, Z, K, Dn, n_blocks, block_keys, block_param_idxs,
         X_blocks, dist_blocks, counts_blocks, t_obs, D_dense, M_zs, tjf_to_block_k, inv_N,
+        free_slots,
     )
 end
+
+# Number of currently-live products in block `bi` (excludes ModelDelete-masked slots).
+n_live(model::DemandModel, bi::Integer) =
+    length(model.block_param_idxs[bi]) - length(model.free_slots[bi])
 
 n_delta(model::DemandModel) = model.N
 n_demographics(_) = length(DEMOGRAPHIC_ATTRIBUTES)
