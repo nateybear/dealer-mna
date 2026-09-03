@@ -123,13 +123,32 @@ function residual_demand(
     demands .= log.(demands)
     prices .= log.(prices)
 
+    # Preallocate the design matrix outside the per-product loop. Column 1 is the
+    # intercept (constant 1s); columns 2:(N_d+1) hold either log(p_k) (k = focal)
+    # or log(p_k)·log(p_focal) (k ≠ focal). Only the interacted columns change
+    # between iterations, so we scribble in-place.
+    N_d = length(product_idxs)
+    X = Matrix{Float64}(undef, SIM_SIZE, N_d + 1)
+    fill!(view(X, :, 1), 1.0)
     for (i, j) in enumerate(product_idxs)
-        X = copy(prices)
-        X[:, Not(i)] .*= @view X[:, i]
-        X = hcat(ones(SIM_SIZE), X)
+        lp_i = view(prices, :, i)
+        @inbounds for k in 1:N_d
+            col = view(X, :, k + 1)
+            if k == i
+                @simd for r in 1:SIM_SIZE
+                    col[r] = prices[r, k]
+                end
+            else
+                @simd for r in 1:SIM_SIZE
+                    col[r] = prices[r, k] * lp_i[r]
+                end
+            end
+        end
         α = X \ view(demands, :, i)
         out[j, 1] = α[1]
-        out[j, product_idxs .+ 1] .= α[2:end]
+        @inbounds for (kk, jj) in enumerate(product_idxs)
+            out[j, jj + 1] = α[kk + 1]
+        end
     end
 
     # Restore internal ModelDeletes (LIFO) and re-invalidate so anyone

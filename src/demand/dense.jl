@@ -14,6 +14,7 @@ export DemandWork, Counterfactual,
     share_matrix, expected_demand, foc_residual, dealer_block_locals
 
 using FixedEffectModels
+using LoopVectorization: @turbo
 import ..pluck
 
 # -------------------------------------------------------------------------------------------------
@@ -93,29 +94,30 @@ end
 # Per-column softmax over a block's rows with outside-good utility = 0 (stabilized).
 # Writes inside_sum[z] = Σ_k CCP[k,z].
 #
-# All three inner k-loops read/write a contiguous column of U (col-major, k is the
-# fast index) → @simd + @fastmath let LLVM vectorize including a SIMD exp. The
-# branchy `v > u_max && (u_max = v)` is rewritten as a branchless `max` so the
-# reduction stays SIMD-friendly.
+# The three inner k-loops read/write a contiguous column of U (col-major, k is the
+# fast index). `@turbo` from LoopVectorization vectorizes them with SLEEFPirates'
+# SIMD exp — critical on aarch64 (Apple libSystem has no libmvec, so `@simd
+# @fastmath exp` stays scalar there). The branchy `v > u_max && (u_max = v)` is
+# rewritten as a branchless `max` so `@turbo` accepts the reduction.
 @inline function softmax_block!(
     U::AbstractMatrix{Float32}, inside_sum_row::AbstractVector{Float32}
 )
     N_t, Z = size(U)
     @inbounds for z in 1:Z
         u_max = 0.0f0
-        @simd for k in 1:N_t
+        @turbo for k in 1:N_t
             u_max = max(u_max, U[k, z])
         end
         outside = @fastmath exp(-u_max)
         denom = outside
-        @simd for k in 1:N_t
-            e = @fastmath exp(U[k, z] - u_max)
+        @turbo for k in 1:N_t
+            e = exp(U[k, z] - u_max)
             U[k, z] = e
             denom += e
         end
         inv_denom = 1.0f0 / denom
         sm_sum = 0.0f0
-        @simd for k in 1:N_t
+        @turbo for k in 1:N_t
             U[k, z] *= inv_denom
             sm_sum += U[k, z]
         end
@@ -132,9 +134,9 @@ function compute_ΠtD!(
     mul!(view(ΠtD, 1:K, :), Πᵦ', D)
     Z = size(D, 2)
     Dn = size(D, 1)
-    @inbounds for z in 1:Z
+    @turbo for z in 1:Z
         s = 0.0f0
-        @simd for d in 1:Dn
+        for d in 1:Dn
             s += Πp[d] * D[d, z]
         end
         ΠtD[K + 1, z] = s
@@ -185,14 +187,15 @@ function forward_pass!(
         mul!(U_bi, X_bi', ΠtD)
         # Gather δ into a contiguous per-block vector so the inner k-loop below
         # can SIMD-vectorize; `δ[param_idxs[k]]` is otherwise a gather that
-        # inhibits vectorization of the E/U update.
+        # inhibits vectorization. `@turbo` (SLEEFPirates) is what actually
+        # vectorizes the exp — this loop is the dominant CF hot-loop cost.
         δ_bi = Vector{Float32}(undef, N_bi)
         @inbounds for k in 1:N_bi
             δ_bi[k] = δ[param_idxs[k]]
         end
         @inbounds for z in 1:(model.Z)
-            @simd for k in 1:N_bi
-                e = @fastmath exp(η1 + η2 * dist_bi[k, z])
+            @turbo for k in 1:N_bi
+                e = exp(η1 + η2 * dist_bi[k, z])
                 E_bi[k, z] = e
                 U_bi[k, z] += δ_bi[k] - e
             end
@@ -1424,10 +1427,10 @@ function share_matrix(
     w = model.M_zs .* α
     PdW = P_d .* reshape(w, 1, Z)
     J = -PdW * P_d'
-    # P_d is contiguous (row-copy above), so the k-loop reads P_d[i, z] as a
-    # strided access → use dot for the diag correction.
+    # Diag correction = Σ_z w[z] · P_d[i, z] — batch all N_d as one gemv.
+    diag_corr = P_d * w
     @inbounds for i in 1:N_d
-        J[i, i] += dot(w, view(P_d, i, :))
+        J[i, i] += diag_corr[i]
     end
     return J
 end
@@ -1444,13 +1447,9 @@ function expected_demand(
     N_d = length(k_locals)
     N_d == 0 && return Float32[]
     P = work.U_blocks[bi]
-    q = Vector{Float32}(undef, N_d)
-    # `dot` on the strided row-view dispatches to BLAS.sdot, which vectorizes the
-    # strided read of P[ki, :] more efficiently than a hand-rolled loop would.
-    @inbounds for i in 1:N_d
-        q[i] = dot(model.M_zs, view(P, k_locals[i], :))
-    end
-    return q
+    # Extract the N_d live rows into a contiguous N_d × Z matrix, then one BLAS
+    # gemv → beats N_d strided dot products for typical Z (~1000-2000).
+    return P[k_locals, :] * model.M_zs
 end
 
 """
