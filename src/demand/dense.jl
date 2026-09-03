@@ -92,26 +92,30 @@ end
 
 # Per-column softmax over a block's rows with outside-good utility = 0 (stabilized).
 # Writes inside_sum[z] = Σ_k CCP[k,z].
+#
+# All three inner k-loops read/write a contiguous column of U (col-major, k is the
+# fast index) → @simd + @fastmath let LLVM vectorize including a SIMD exp. The
+# branchy `v > u_max && (u_max = v)` is rewritten as a branchless `max` so the
+# reduction stays SIMD-friendly.
 @inline function softmax_block!(
     U::AbstractMatrix{Float32}, inside_sum_row::AbstractVector{Float32}
 )
     N_t, Z = size(U)
     @inbounds for z in 1:Z
         u_max = 0.0f0
-        for k in 1:N_t
-            v = U[k, z]
-            v > u_max && (u_max = v)
+        @simd for k in 1:N_t
+            u_max = max(u_max, U[k, z])
         end
-        outside = exp(-u_max)
+        outside = @fastmath exp(-u_max)
         denom = outside
-        for k in 1:N_t
-            e = exp(U[k, z] - u_max)
+        @simd for k in 1:N_t
+            e = @fastmath exp(U[k, z] - u_max)
             U[k, z] = e
             denom += e
         end
         inv_denom = 1.0f0 / denom
         sm_sum = 0.0f0
-        for k in 1:N_t
+        @simd for k in 1:N_t
             U[k, z] *= inv_denom
             sm_sum += U[k, z]
         end
@@ -127,9 +131,10 @@ function compute_ΠtD!(
     _, K = size(Πᵦ)
     mul!(view(ΠtD, 1:K, :), Πᵦ', D)
     Z = size(D, 2)
+    Dn = size(D, 1)
     @inbounds for z in 1:Z
         s = 0.0f0
-        for d in 1:size(D, 1)
+        @simd for d in 1:Dn
             s += Πp[d] * D[d, z]
         end
         ΠtD[K + 1, z] = s
@@ -178,11 +183,18 @@ function forward_pass!(
         N_bi = size(U_bi, 1)
 
         mul!(U_bi, X_bi', ΠtD)
+        # Gather δ into a contiguous per-block vector so the inner k-loop below
+        # can SIMD-vectorize; `δ[param_idxs[k]]` is otherwise a gather that
+        # inhibits vectorization of the E/U update.
+        δ_bi = Vector{Float32}(undef, N_bi)
+        @inbounds for k in 1:N_bi
+            δ_bi[k] = δ[param_idxs[k]]
+        end
         @inbounds for z in 1:(model.Z)
-            for k in 1:N_bi
+            @simd for k in 1:N_bi
                 e = @fastmath exp(η1 + η2 * dist_bi[k, z])
                 E_bi[k, z] = e
-                U_bi[k, z] += δ[param_idxs[k]] - e
+                U_bi[k, z] += δ_bi[k] - e
             end
         end
         softmax_block!(U_bi, view(work.inside_sum, bi, :))
@@ -1397,10 +1409,11 @@ function share_matrix(
     idx = param_indices(model)
     Πp = view(params, idx.i_Πp)
     Z = model.Z
+    Dn = model.Dn
     α = Vector{Float32}(undef, Z)
     @inbounds for z in 1:Z
         s = 0.0f0
-        for d in 1:(model.Dn)
+        @simd for d in 1:Dn
             s += Πp[d] * model.D_dense[d, z]
         end
         α[z] = s + mean_α
@@ -1411,12 +1424,10 @@ function share_matrix(
     w = model.M_zs .* α
     PdW = P_d .* reshape(w, 1, Z)
     J = -PdW * P_d'
+    # P_d is contiguous (row-copy above), so the k-loop reads P_d[i, z] as a
+    # strided access → use dot for the diag correction.
     @inbounds for i in 1:N_d
-        s_diag = 0.0f0
-        for z in 1:Z
-            s_diag += w[z] * P_d[i, z]
-        end
-        J[i, i] += s_diag
+        J[i, i] += dot(w, view(P_d, i, :))
     end
     return J
 end
@@ -1433,15 +1444,11 @@ function expected_demand(
     N_d = length(k_locals)
     N_d == 0 && return Float32[]
     P = work.U_blocks[bi]
-    q = zeros(Float32, N_d)
-    Z = model.Z
+    q = Vector{Float32}(undef, N_d)
+    # `dot` on the strided row-view dispatches to BLAS.sdot, which vectorizes the
+    # strided read of P[ki, :] more efficiently than a hand-rolled loop would.
     @inbounds for i in 1:N_d
-        ki = k_locals[i]
-        s = 0.0f0
-        for z in 1:Z
-            s += model.M_zs[z] * P[ki, z]
-        end
-        q[i] = s
+        q[i] = dot(model.M_zs, view(P, k_locals[i], :))
     end
     return q
 end
