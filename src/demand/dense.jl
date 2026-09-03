@@ -1198,9 +1198,9 @@ function apply!(
     # keeps the physical dimensions of X_blocks / dist_blocks / counts_blocks /
     # work buffers unchanged. If no free slot, grow all block-level arrays by one
     # column/row (hcat / vcat) and grow the work buffers.
-    was_reuse::Bool
-    prev_δ_idx::Int32
-    k_local::Int
+    was_reuse = false
+    prev_δ_idx = Int32(0)
+    k_local = 0
     if !isempty(model.free_slots[bi])
         was_reuse = true
         k_local = pop!(model.free_slots[bi])
@@ -1213,8 +1213,6 @@ function apply!(
         end
         model.block_param_idxs[bi][k_local] = new_δ_idx
     else
-        was_reuse = false
-        prev_δ_idx = Int32(0)
         N_bi = length(model.block_param_idxs[bi])
         model.X_blocks[bi] = hcat(model.X_blocks[bi], new_X_col)
         model.dist_blocks[bi] = vcat(model.dist_blocks[bi], reshape(new_dist_row, 1, Z))
