@@ -365,12 +365,8 @@ function (@main)(_)
                 # Same overall structure as the mean+var Normal version but
                 # each single-row prediction fans out to Q boosters.
                 function draw_scalar_grid(grid::Vector{XGBoost.Booster}, dm)
-                    qs = Vector{Float32}(undef, Q)
-                    @inbounds for qi in 1:Q
-                        qs[qi] = Float32(only(XGBoost.predict(grid[qi], dm; margin = true)))
-                    end
-                    sort!(qs)
-                    return Supply.sample_from_quantile_grid(rng, qs)
+                    let weights_idxs = Supply.sample_from_quantile_grid(rng)
+                    return sum(w * only(XGBoost.predict(grid[i], dm; margin=true)) for (w, i) in weights_idxs)
                 end
                 state_exp_mat = fill(NaN32, J, J + 1)
                 dm_prev_row = XGBoost.DMatrix(reshape(s_prev, 1, :))
@@ -392,17 +388,8 @@ function (@main)(_)
                     # Batch quantile predictions across all partners: Q calls
                     # total (one per quantile booster) instead of Q per partner.
                     cross_grid = st_cross_boosters[vk]
-                    cross_qs = Matrix{Float32}(undef, length(partners), Q)
-                    @inbounds for qi in 1:Q
-                        cross_qs[:, qi] .= Float32.(XGBoost.predict(cross_grid[qi], dm_cross; margin = true))
-                    end
-                    qs_buf = Vector{Float32}(undef, Q)
                     for (i, k_idx) in enumerate(partners)
-                        @inbounds for qi in 1:Q
-                            qs_buf[qi] = cross_qs[i, qi]
-                        end
-                        sort!(qs_buf)
-                        state_exp_mat[j_idx, k_idx + 1] = Supply.sample_from_quantile_grid(rng, qs_buf)
+                        state_exp_mat[j_idx, k_idx + 1] = draw_scalar_grid(view(cross_grid, i, :), view(dm_cross, i, :))
                     end
                     finalize(dm_cross)
                 end

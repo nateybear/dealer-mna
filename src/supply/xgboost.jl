@@ -20,7 +20,7 @@ const XGB_DEFAULT_PARAMS = (
     max_depth = 3,
     eta = 0.15,
     lambda = 1.0,
-    min_child_weight = 1f0,
+    min_child_weight = 1.0f0,
     tree_method = "hist",
     subsample = 0.8,
     max_bin = 32,
@@ -41,13 +41,13 @@ function fit_xgb_custom(
     compute_g_h, dm::XGBoost.DMatrix; num_round::Int, params = XGB_DEFAULT_PARAMS
 )
     b = with_logger(NullLogger()) do
-        XGBoost.Booster(dm; params...)
+        return XGBoost.Booster(dm; params...)
     end
     for _ in 1:num_round
         ŷ = XGBoost.predict(b, dm; margin = true)
         grad, hess = compute_g_h(ŷ)
         with_logger(NullLogger()) do
-            XGBoost.updateone!(b, dm, grad, hess)
+            return XGBoost.updateone!(b, dm, grad, hess)
         end
     end
     return b
@@ -141,7 +141,7 @@ function fit_xgb_custom_oos(
     nll_val = make_nll(val_idx)
 
     b = with_logger(NullLogger()) do
-        XGBoost.Booster(dm_tr; params...)
+        return XGBoost.Booster(dm_tr; params...)
     end
     best_val = Inf
     best_round = 0
@@ -150,7 +150,7 @@ function fit_xgb_custom_oos(
         ŷ_tr = XGBoost.predict(b, dm_tr; margin = true)
         grad, hess = gh_tr(ŷ_tr)
         with_logger(NullLogger()) do
-            XGBoost.updateone!(b, dm_tr, grad, hess)
+            return XGBoost.updateone!(b, dm_tr, grad, hess)
         end
         v = nll_val(XGBoost.predict(b, dm_val; margin = true))
         if v < best_val
@@ -171,13 +171,13 @@ function fit_xgb_custom_oos(
     XGBoost.setinfo!(dm_full, "label", y)
     gh_full = make_gh(1:n)
     b_final = with_logger(NullLogger()) do
-        XGBoost.Booster(dm_full; params...)
+        return XGBoost.Booster(dm_full; params...)
     end
     for _ in 1:best_round
         ŷ = XGBoost.predict(b_final, dm_full; margin = true)
         grad, hess = gh_full(ŷ)
         with_logger(NullLogger()) do
-            XGBoost.updateone!(b_final, dm_full, grad, hess)
+            return XGBoost.updateone!(b_final, dm_full, grad, hess)
         end
     end
     finalize(dm_full)
@@ -216,14 +216,14 @@ function fit_xgb_oos(
     y_val_vec = y[val_idx]
 
     b = with_logger(NullLogger()) do
-        XGBoost.Booster(dm_tr; objective = objective, params...)
+        return XGBoost.Booster(dm_tr; objective = objective, params...)
     end
     best_val = Inf
     best_round = 0
     stale = 0
     for round in 1:max_round
         with_logger(NullLogger()) do
-            XGBoost.updateone!(b, dm_tr)
+            return XGBoost.updateone!(b, dm_tr)
         end
         v = val_loss(XGBoost.predict(b, dm_val), y_val_vec)
         if v < best_val
@@ -242,11 +242,11 @@ function fit_xgb_oos(
     dm_full = XGBoost.DMatrix(X)
     XGBoost.setinfo!(dm_full, "label", y)
     b_final = with_logger(NullLogger()) do
-        XGBoost.Booster(dm_full; objective = objective, params...)
+        return XGBoost.Booster(dm_full; objective = objective, params...)
     end
     for _ in 1:best_round
         with_logger(NullLogger()) do
-            XGBoost.updateone!(b_final, dm_full)
+            return XGBoost.updateone!(b_final, dm_full)
         end
     end
     finalize(dm_full)
@@ -374,31 +374,28 @@ calling); this function does not re-sort.
 """
 @inline function sample_from_quantile_grid(
     rng::AbstractRNG,
-    quantiles::AbstractVector{<:Real};
     τs::AbstractVector{Float32} = QUANTILE_LEVELS,
 )
     u = Float32(rand(rng))
-    return interp_quantile_grid(u, quantiles; τs = τs)
+    return interp_quantile_grid(u; τs = τs)
 end
 
 # The pure-function core of `sample_from_quantile_grid`, exposed for tests /
 # non-random inversion.
 @inline function interp_quantile_grid(
-    u::Real, quantiles::AbstractVector{<:Real};
+    u::Real,
     τs::AbstractVector{Float32} = QUANTILE_LEVELS,
 )
     K = length(τs)
-    @assert length(quantiles) == K "quantile vector length $(length(quantiles)) ≠ τs length $K"
-    u ≤ τs[1] && return Float32(quantiles[1])
-    u ≥ τs[end] && return Float32(quantiles[end])
+    u ≤ τs[1] && return [(1.0, 1)]
+    u ≥ τs[end] && return [(1.0, length(τs))]
     # Locate bracket via linear scan — K is small (9) so log-search isn't worth it.
     @inbounds for i in 1:(K - 1)
         if u ≤ τs[i + 1]
             w = Float32((u - τs[i]) / (τs[i + 1] - τs[i]))
-            return Float32(quantiles[i] * (1 - w) + quantiles[i + 1] * w)
+            return [(1-w, i), (w, i+1)]
         end
     end
-    return Float32(quantiles[end])  # unreachable given the τs[end] guard
 end
 
 #### Custom mixture-likelihood gradients / Hessians / NLLs
