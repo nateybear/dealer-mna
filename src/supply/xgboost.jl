@@ -377,7 +377,7 @@ calling); this function does not re-sort.
     τs::AbstractVector{Float32} = QUANTILE_LEVELS,
 )
     u = Float32(rand(rng))
-    return interp_quantile_grid(u; τs = τs)
+    return interp_quantile_grid(u, τs)
 end
 
 # The pure-function core of `sample_from_quantile_grid`, exposed for tests /
