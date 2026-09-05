@@ -364,7 +364,7 @@ function (@main)(_)
                 # sort! per row to fix quantile crossing before interpolation).
                 # Same overall structure as the mean+var Normal version but
                 # each single-row prediction fans out to Q boosters.
-                function draw_scalar_grid(grid::Vector{XGBoost.Booster}, dm)
+                function draw_scalar_grid(grid, dm)
                     weights_idxs = Supply.sample_from_quantile_grid(rng)
                     return sum(
                         w * only(XGBoost.predict(grid[i], dm; margin = true)) for
