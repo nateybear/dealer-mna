@@ -395,7 +395,7 @@ function (@main)(_)
                     cross_grid = st_cross_boosters[vk]
                     for (i, k_idx) in enumerate(partners)
                         state_exp_mat[j_idx, k_idx + 1] = draw_scalar_grid(
-                            view(cross_grid, i, :), view(dm_cross, i, :)
+                            cross_grid, view(dm_cross, i, :)
                         )
                     end
                     finalize(dm_cross)
