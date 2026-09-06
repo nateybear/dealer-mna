@@ -1,6 +1,6 @@
 using DealerMnA
 using Plots
-using StatsBase: mean, median, quantile
+using StatsBase: mean, median, quantile, trim
 
 function (@main)(_)
     snakemake!()
@@ -73,27 +73,26 @@ function (@main)(_)
         n_buyers = length(wtp_dollars_per_mile)
         median_dollars_per_mile = median(wtp_dollars_per_mile)
         qs = quantile(wtp_dollars_per_mile, [0.05, 0.25, 0.5, 0.75, 0.95])
-        @info "WTP distribution ($/mile)" n_buyers median_dollars_per_mile qs mean_ = mean(
+        @info "WTP distribution (dollars/mile)" n_buyers median_dollars_per_mile qs mean_ = mean(
             wtp_dollars_per_mile
         )
 
         # Log-scale x if the top decile / median ratio exceeds 10 (heavy tail).
         heavy = quantile(wtp_dollars_per_mile, 0.9) > 10 * median_dollars_per_mile
         histogram(
-            wtp_dollars_per_mile;
+            collect(trim(wtp_dollars_per_mile, prop=0.05));
             bins = heavy ? 60 : 50,
             xscale = heavy ? :log10 : :identity,
             xlabel = "WTP (\$/mile)",
-            ylabel = "Buyers",
             label = nothing,
-            linewidth = 0,
+	    normalize = true,
             color = :steelblue,
             alpha = 0.75,
-            size = (700, 500),
+            size = (800, 600),
         )
         vline!(
             [median_dollars_per_mile];
-            color = :red, linewidth = 2, linestyle = :dash,
+            color = :black, linewidth = 2, linestyle = :dash, alpha=0.75,
             label = "median = \$$(round(Float64(median_dollars_per_mile); digits = 2))/mi",
         )
         png(snakemake.output["plot"])

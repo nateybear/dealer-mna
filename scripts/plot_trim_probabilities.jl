@@ -1,5 +1,6 @@
 using DealerMnA
 using Plots
+using StatsPlots
 using XGBoost
 using StatsBase: mean, std, quantile
 using LogExpFunctions
@@ -23,13 +24,11 @@ end
 
 function trim_panel(model_name, model_year, extra, n_sales, p_base, ρ̃)
     p_carry = p_base .+ (1 .- p_base) .* ρ̃
-    return histogram(
+    return density(
         [p_base p_carry];
         label = ["p_base" "P(carry|comply)"],
         color = [:steelblue :orange],
-        linewidth = 0,
-        alpha = 0.55,
-        bins = range(0, 1, length = 41),
+        linewidth = 3,
         xlims = (0, 1),
         title = "$model_name $model_year $extra (n=$n_sales)",
         titlefont = font(8),

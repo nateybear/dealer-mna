@@ -3,6 +3,7 @@ using Plots
 using XGBoost
 using StatsBase: mean, std, corspearman
 using LogExpFunctions
+using LaTeXStrings
 
 function (@main)(_)
     snakemake!()
@@ -81,7 +82,7 @@ function (@main)(_)
         )
 
         xy_max = max(maximum(q), maximum(φ̂))
-        xy_min = max(1.0f0, min(minimum(q), minimum(φ̂)))
+        xy_min = max(1.0f1, min(minimum(q), minimum(φ̂)))
         scatter(
             q, φ̂;
             marker_z = p_compliant,
@@ -90,8 +91,8 @@ function (@main)(_)
             colorbar_title = "P(ι = 1 | data)",
             xscale = :log10, yscale = :log10,
             xlims = (xy_min, xy_max), ylims = (xy_min, xy_max),
-            xlabel = "Observed sales q_{f,t}",
-            ylabel = "Fitted sales target φ̂_{f,t}",
+            xlabel = L"q_{f,t}",
+            ylabel = L"\hat\varphi_{f,t}",
             markersize = 2.5, markerstrokewidth = 0, alpha = 0.6,
             label = nothing,
             size = (700, 600),
