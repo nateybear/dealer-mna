@@ -23,6 +23,11 @@ using Distributed
     Ρ̃_TOL = 1.0f-4
     NUM_ROUND_STEP1 = 20
 
+    # Bias the sweep-0 p_base fit toward "compliers have a real lift" so p_base
+    # doesn't collapse onto ȳ and leave ρ̃ with the (ȳ − p_base)/(1 − p_base) = 0
+    # fixed point.
+    Ρ̃_INIT = 0.15f0
+
     Π_FLOOR = 1.0f-3
 
     N_TOTAL = 100
@@ -260,7 +265,7 @@ function (@main)(_)
                         dm_tr = XGBoost.DMatrix(X_tr)
                         XGBoost.setinfo!(dm_tr, "label", y_tr)
 
-                        ρ̃_tr = fill(Supply.RHO_MIN, n_tr)
+                        ρ̃_tr = fill(Ρ̃_INIT, n_tr)
                         saved_p_bytes = UInt8[]
                         saved_r_bytes = UInt8[]
                         last_sweep = 0
@@ -522,7 +527,7 @@ function (@main)(_)
                         γ_all = Float32.(cars.p_compliant)
                         n = length(y_all)
 
-                        ρ̃ = fill(Supply.RHO_MIN, n)
+                        ρ̃ = fill(Ρ̃_INIT, n)
                         pbase_bytes = UInt8[]
                         rho_bytes = UInt8[]
                         best_round_p = 0

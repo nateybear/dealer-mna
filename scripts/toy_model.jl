@@ -39,10 +39,10 @@ function CS(pL, pH; vL, vH)
     ΔH = (pH - pL) / (vH - vL)
     ΔL = pL / vL
     low_surplus = quadgk(ΔL, ΔH) do θ
-        (vL - pL / θ) * f(θ)
+        return (vL - pL / θ) * f(θ)
     end[1]
     high_surplus = quadgk(ΔH, 10) do θ
-        (vH - pH / θ) * f(θ)
+        return (vH - pH / θ) * f(θ)
     end[1]
     return low_surplus + high_surplus
 end
@@ -101,7 +101,7 @@ function make_ipopt_model(; silent = true)
     m = Model(Ipopt.Optimizer)
     silent && set_silent(m)
     set_attribute(m, "hessian_approximation", "limited-memory")
-    set_attribute(m, "max_iter", 10_000)
+    set_attribute(m, "max_iter", 2_000)
     set_attribute(m, "tol", 1e-6)
     set_attribute(m, "residual_ratio_singular", 1e-8)
     set_attribute(m, "ma27_ignore_singularity", "yes")
@@ -112,9 +112,190 @@ end
 function _check_status(m, tag)
     if !is_solved_and_feasible(m, allow_almost = true)
         @error "$tag model solving error:"
+        clear_model_cache!()
         assert_is_solved_and_feasible(m, allow_almost = true)
     end
     return nothing
+end
+
+############### CACHED SOLVER MODELS
+#
+# Rebuilding a JuMP model per solve dominates wall-clock — @variable +
+# add_nonlinear_operator + @objective + @constraint cost much more than Ipopt's
+# solve for these tiny 2D problems. We keep one model per fixed-shape key
+# ((vL, vH), or (vL,), or (vL, vH, β, σ) for compliance) with the varying inputs
+# wired in as JuMP `Parameter` variables (updated via `set_parameter_value`).
+# Between solves we copy `value(v) → start_value(v)` so Ipopt warm-starts from
+# the previous solution — critical inside outer manufacturer optimize! loops
+# where consecutive calls see nearby (w, q_bar, φ).
+
+const _RETAILER_LIN_CACHE = Dict{Tuple{Float64, Float64}, Any}()
+const _CONSTR_RETAILER_CACHE = Dict{Tuple{Float64, Float64}, Any}()
+const _SINGLE_RETAILER_CACHE = Dict{Float64, Any}()
+const _COMPLIANCE_RETAILER_CACHE = Dict{NTuple{4, Float64}, Any}()
+
+function clear_model_cache!()
+    empty!(_RETAILER_LIN_CACHE)
+    empty!(_CONSTR_RETAILER_CACHE)
+    empty!(_SINGLE_RETAILER_CACHE)
+    empty!(_COMPLIANCE_RETAILER_CACHE)
+    return nothing
+end
+
+# We deliberately do NOT persist value → start_value between solves. The
+# retailer's objective has spurious critical points at high p where q → 0 and
+# ∂D/∂p is nearly rank-deficient; Ipopt happily converges there from a far warm
+# start and returns LOCALLY_SOLVED, so `_check_status` never fires — but the
+# downstream residual trick then throws SingularException on `drdp \ drdw`.
+# Starting each cached solve from the `start = ...` kwarg baked into @variable
+# (a safe interior point) sidesteps the corner. Model caching alone — no
+# rebuild per call — is the dominant win we were after.
+
+function _get_retailer_lin_model(vL, vH)
+    return get!(_RETAILER_LIN_CACHE, (Float64(vL), Float64(vH))) do
+        m = make_ipopt_model()
+        @variable(m, wL_p in Parameter(0.1))
+        @variable(m, wH_p in Parameter(0.1))
+        p_default = SA[vL / 2, vH / 2]
+        @variable(m, p[i = 1:2] >= P_MIN, start = p_default[i])
+        val = (pL, pH, wLv, wHv) ->
+            _retailer_profit_val(pL, pH, LinearCost(SA[wLv, wHv]), vL, vH)
+        grad! = (g, pL, pH, wLv, wHv) -> begin
+            q = D(pL, pH; vL, vH)
+            J = ∂D(pL, pH; vL, vH)
+            gp = q + J' * (SA[pL, pH] - SA[wLv, wHv])
+            g[1] = gp[1]
+            g[2] = gp[2]
+            g[3] = -q[1]  # ∂Π_R/∂wL at fixed p (Parameter — Ipopt sees as fixed)
+            g[4] = -q[2]
+            return nothing
+        end
+        op = add_nonlinear_operator(m, 4, val, grad!; name = :Π_R_lin_cached)
+        @objective(m, Max, op(p[1], p[2], wL_p, wH_p))
+        return (; m, p, wL = wL_p, wH = wH_p, p_default)
+    end
+end
+
+function _solve_retailer_linear(; wL, wH, vL, vH, p_init = nothing)
+    c = _get_retailer_lin_model(vL, vH)
+    set_parameter_value(c.wL, wL)
+    set_parameter_value(c.wH, wH)
+    p0 = isnothing(p_init) ? c.p_default : p_init
+    set_start_value(c.p[1], p0[1])
+    set_start_value(c.p[2], p0[2])
+    optimize!(c.m)
+    _check_status(c.m, "retailer (cached)")
+    return SVector{2}(value(c.p[1]), value(c.p[2]))
+end
+
+function _get_constrained_retailer_model(vL, vH)
+    return get!(_CONSTR_RETAILER_CACHE, (Float64(vL), Float64(vH))) do
+        m = make_ipopt_model()
+        @variable(m, wL_p in Parameter(0.1))
+        @variable(m, wH_p in Parameter(0.1))
+        @variable(m, q_bar_p in Parameter(0.0))
+        p_default = SA[P_MIN, vH]
+        @variable(m, p[i = 1:2] >= P_MIN, start = p_default[i])
+        val = (pL, pH, wLv, wHv) ->
+            _retailer_profit_val(pL, pH, LinearCost(SA[wLv, wHv]), vL, vH)
+        grad! = (g, pL, pH, wLv, wHv) -> begin
+            q = D(pL, pH; vL, vH)
+            J = ∂D(pL, pH; vL, vH)
+            gp = q + J' * (SA[pL, pH] - SA[wLv, wHv])
+            g[1] = gp[1]
+            g[2] = gp[2]
+            g[3] = -q[1]
+            g[4] = -q[2]
+            return nothing
+        end
+        op_Π = add_nonlinear_operator(m, 4, val, grad!; name = :Π_R_c_cached)
+        op_qL = add_nonlinear_operator(
+            m, 2,
+            (pL, pH) -> _qL_val(pL, pH, vL, vH),
+            (g, pL, pH) -> _qL_grad!(g, pL, pH, vL, vH);
+            name = :q_L_c_cached,
+        )
+        @objective(m, Max, op_Π(p[1], p[2], wL_p, wH_p))
+        qcon = @constraint(m, op_qL(p[1], p[2]) >= q_bar_p)
+        return (; m, p, wL = wL_p, wH = wH_p, q_bar = q_bar_p, qcon, p_default)
+    end
+end
+
+function _solve_constrained_retailer_linear(;
+    wL, wH, vL, vH, q_bar, p_init = nothing
+)
+    c = _get_constrained_retailer_model(vL, vH)
+    set_parameter_value(c.wL, wL)
+    set_parameter_value(c.wH, wH)
+    set_parameter_value(c.q_bar, q_bar)
+    p0 = isnothing(p_init) ? c.p_default : p_init
+    set_start_value(c.p[1], p0[1])
+    set_start_value(c.p[2], p0[2])
+    optimize!(c.m)
+    _check_status(c.m, "constrained retailer (cached)")
+    p_star = SVector{2}(value(c.p[1]), value(c.p[2]))
+    λ = abs(dual(c.qcon))
+    return (p = p_star, λ = λ)
+end
+
+function _get_single_retailer_model(vL)
+    return get!(_SINGLE_RETAILER_CACHE, Float64(vL)) do
+        m = make_ipopt_model()
+        @variable(m, wL_p in Parameter(0.1))
+        p_default = vL / 2
+        @variable(m, p >= P_MIN, start = p_default)
+        val = (p1, wLv) -> (p1 - wLv) * D(p1; vL)
+        grad! = (g, p1, wLv) -> begin
+            q = D(p1; vL)
+            dq = ∂D(p1; vL)
+            g[1] = q + (p1 - wLv) * dq
+            g[2] = -q
+            return nothing
+        end
+        op = add_nonlinear_operator(m, 2, val, grad!; name = :Π_defect_cached)
+        @objective(m, Max, op(p, wL_p))
+        return (; m, p, wL = wL_p, p_default)
+    end
+end
+
+function _get_compliance_retailer_model(vL, vH, β, σ)
+    key = (Float64(vL), Float64(vH), Float64(β), Float64(σ))
+    return get!(_COMPLIANCE_RETAILER_CACHE, key) do
+        m = make_ipopt_model()
+        @variable(m, wL_p in Parameter(0.1))
+        @variable(m, wH_p in Parameter(0.1))
+        @variable(m, φ_p in Parameter(0.0))
+        @variable(m, πR_bonus_p in Parameter(0.0))
+        @variable(m, πR_base_p in Parameter(0.0))
+        p_default = SA[max(P_MIN, vL / 2), max(P_MIN, vH / 2)]
+        @variable(m, p[i = 1:2] >= P_MIN, start = p_default[i])
+        val =
+            (pL, pH, wLv, wHv, φv, πb, πs) ->
+                _compliance_V_R_val(pL, pH, wLv, wHv, β, φv, σ, vL, vH, πb, πs)
+        grad! =
+            (g, pL, pH, wLv, wHv, φv, πb, πs) -> begin
+                q = D(pL, pH; vL, vH)
+                J = ∂D(pL, pH; vL, vH)
+                ΔπR = πb - πs
+                Σq = q[1] + q[2]
+                n_val = pdf(Normal(0, σ), φv - Σq)
+                pc = ccdf(Normal(0, σ), φv - Σq)
+                J_sum = SA[J[1, 1] + J[2, 1], J[1, 2] + J[2, 2]]
+                gp = q + J' * (SA[pL, pH] - SA[wLv, wHv]) + β * n_val * ΔπR * J_sum
+                g[1] = gp[1]
+                g[2] = gp[2]
+                g[3] = -q[1]
+                g[4] = -q[2]
+                g[5] = -β * n_val * ΔπR
+                g[6] = β * pc
+                g[7] = β * (1 - pc)
+                return nothing
+            end
+        op = add_nonlinear_operator(m, 7, val, grad!; name = :V_R_c_cached)
+        @objective(m, Max, op(p[1], p[2], wL_p, wH_p, φ_p, πR_bonus_p, πR_base_p))
+        return (; m, p, wL = wL_p, wH = wH_p, φ = φ_p,
+            πR_bonus = πR_bonus_p, πR_base = πR_base_p, p_default)
+    end
 end
 
 ############### RETAILER SOLVERS
@@ -135,9 +316,13 @@ _retailer_profit_grad!(g, p1, p2, C, vL, vH) = begin
     return nothing
 end
 
-function solve_retailer(; C, vL, vH, p_init = SA[vL / 2, vH / 2])
+function solve_retailer(; C, vL, vH, p_init = nothing)
+    if C isa LinearCost && length(C.k) == 2
+        return _solve_retailer_linear(; wL = C.k[1], wH = C.k[2], vL, vH, p_init)
+    end
+    p0 = isnothing(p_init) ? SA[vL / 2, vH / 2] : p_init
     m = make_ipopt_model()
-    @variable(m, p[i = 1:2] >= P_MIN, start = p_init[i])
+    @variable(m, p[i = 1:2] >= P_MIN, start = p0[i])
     op = add_nonlinear_operator(
         m, 2,
         (p1, p2) -> _retailer_profit_val(p1, p2, C, vL, vH),
@@ -160,9 +345,15 @@ _qL_grad!(g, p1, p2, vL, vH) = begin
     return nothing
 end
 
-function solve_constrained_retailer(; C, vL, vH, q_bar, p_init = SA[P_MIN, vH])
+function solve_constrained_retailer(; C, vL, vH, q_bar, p_init = nothing)
+    if C isa LinearCost && length(C.k) == 2
+        return _solve_constrained_retailer_linear(;
+            wL = C.k[1], wH = C.k[2], vL, vH, q_bar, p_init
+        )
+    end
+    p0 = isnothing(p_init) ? SA[P_MIN, vH] : p_init
     m = make_ipopt_model()
-    @variable(m, p[i = 1:2] >= P_MIN, start = p_init[i])
+    @variable(m, p[i = 1:2] >= P_MIN, start = p0[i])
     op_Π = add_nonlinear_operator(
         m, 2,
         (p1, p2) -> _retailer_profit_val(p1, p2, C, vL, vH),
@@ -186,19 +377,13 @@ end
 
 # Single-product retailer facing wholesale w_L on the low good only — used to
 # evaluate the deviating retailer's profit in the allocation-game IC.
-function solve_single_retailer(; wL, vL, p_init = vL / 2)
-    m = make_ipopt_model()
-    @variable(m, p >= P_MIN, start = p_init)
-    op = add_nonlinear_operator(
-        m, 1,
-        p1 -> (p1 - wL) * D(p1; vL),
-        p1 -> D(p1; vL) + (p1 - wL) * ∂D(p1; vL);
-        name = :Π_defect,
-    )
-    @objective(m, Max, op(p))
-    optimize!(m)
-    _check_status(m, "single-product retailer")
-    return value(p)
+function solve_single_retailer(; wL, vL, p_init = nothing)
+    c = _get_single_retailer_model(vL)
+    set_parameter_value(c.wL, wL)
+    set_start_value(c.p, isnothing(p_init) ? c.p_default : p_init)
+    optimize!(c.m)
+    _check_status(c.m, "single-product retailer (cached)")
+    return value(c.p)
 end
 
 ############### RESIDUAL-TRICK RESIDUALS
@@ -534,7 +719,7 @@ end
 function CS_single(pL; vL)
     ΔL = pL / vL
     return quadgk(ΔL, 10) do θ
-        (vL - pL / θ) * f(θ)
+        return (vL - pL / θ) * f(θ)
     end[1]
 end
 
@@ -569,26 +754,22 @@ end
 # Solve retailer's t=1 problem: 2-D Ipopt over (pL, pH). Reuses t=2 subsolves
 # so callers can access them from the returned struct.
 function solve_compliance_retailer(;
-    C, vL, vH, wL, wH, φ, β, σ,
-    p_init = SA[max(P_MIN, vL / 2), max(P_MIN, vH / 2)],
+    C, vL, vH, wL, wH, φ, β, σ, p_init = nothing
 )
     bonus = _period2_bonus(SA[wL, wH], C, vL, vH)
     base = _period2_base(wL, C, vL)
-    ΔπR = bonus.π_R - base.π_R
-    m = make_ipopt_model()
-    @variable(m, p[i = 1:2] >= P_MIN, start = p_init[i])
-    op = add_nonlinear_operator(
-        m, 2,
-        (pL, pH) -> _compliance_V_R_val(
-            pL, pH, wL, wH, β, φ, σ, vL, vH, bonus.π_R, base.π_R
-        ),
-        (g, pL, pH) -> _compliance_V_R_grad!(g, pL, pH, wL, wH, φ, β, σ, vL, vH, ΔπR);
-        name = :V_R,
-    )
-    @objective(m, Max, op(p[1], p[2]))
-    optimize!(m)
-    _check_status(m, "compliance retailer")
-    p_star = SVector{2}(value(p[1]), value(p[2]))
+    c = _get_compliance_retailer_model(vL, vH, β, σ)
+    set_parameter_value(c.wL, wL)
+    set_parameter_value(c.wH, wH)
+    set_parameter_value(c.φ, φ)
+    set_parameter_value(c.πR_bonus, bonus.π_R)
+    set_parameter_value(c.πR_base, base.π_R)
+    p0 = isnothing(p_init) ? c.p_default : p_init
+    set_start_value(c.p[1], p0[1])
+    set_start_value(c.p[2], p0[2])
+    optimize!(c.m)
+    _check_status(c.m, "compliance retailer (cached)")
+    p_star = SVector{2}(value(c.p[1]), value(c.p[2]))
     q_star = D(p_star[1], p_star[2]; vL, vH)
     pc = ccdf(Normal(0, σ), φ - (q_star[1] + q_star[2]))
     return (; p = p_star, Pr_comply = pc, bonus, base)
@@ -933,7 +1114,7 @@ function (@main)(_)
             "v_L" => 2.5,
             "v_H" => 4.0,
             "β" => 1.0,
-            "σ" => 0.05,
+            "σ" => 5e-3,
         )
 
         result = recovered_surplus(data)
@@ -943,11 +1124,6 @@ function (@main)(_)
         @info "Envelope derivatives" derivatives
 
         @info "Compliance regime"
-        result_compliance = recovered_surplus_compliance(data)
-        @info "Compliance summary" wL_compliance = result_compliance.compliance.w[1] wL_dm = result_compliance.dm.w[1] wH_compliance = result_compliance.compliance.w[2] wH_dm = result_compliance.dm.w[2] φ =
-            result_compliance.compliance.φ Pr_c =
-            result_compliance.compliance.Pr_comply recovered = result_compliance.recovered
-        JLD2.save_object(snakemake.output["jld2"], (; result, derivatives, result_compliance))
 
         # 2D heatmaps of recovered surplus over pairs of parameters.
         #         HEAT_N = 15
@@ -982,7 +1158,7 @@ function (@main)(_)
 
         @info "Tracing profit plot"
         (; vi, dm, alloc) = recovered_surplus(data)
-        q_grid = range(0, 0.5, length = 100)
+        q_grid = range(0, 0.5, length = 10)
         C = QuadraticCost(data["c_L"], data["c_H"])
         vL, vH = data["v_L"], data["v_H"]
         y = map(q_grid) do q_bar
@@ -1109,9 +1285,7 @@ function (@main)(_)
         @info "Compliance tracing plots"
         β, σ = data["β"], data["σ"]
         q_cap = 0.99 * _q_total_max(vL, vH)
-        φ_grid = range(0, q_cap, length = 60)
-        comp = result_compliance.compliance
-        dm_ref = result_compliance.dm
+        φ_grid = range(0, q_cap, length = 100)
 
         yc = map(φ_grid) do φ
             try
@@ -1136,6 +1310,13 @@ function (@main)(_)
             end
         end
         yc = DataFrame(filter(!ismissing, yc))
+        result_compliance = NamedTuple(yc[argmax(yc.Π_M), :])
+        comp = result_compliance
+        dm_ref = dm
+
+        @info "Compliance summary" wL_compliance = result_compliance.wL wH_compliance =
+            result_compliance.wH φ = result_compliance.φ Pr_c = result_compliance.Pr_c
+        JLD2.save_object(snakemake.output["jld2"], (; result, derivatives, result_compliance))
 
         plot(
             yc.φ, yc.wL,
@@ -1145,7 +1326,7 @@ function (@main)(_)
             legend = :topright,
         )
         hline!([dm_ref.w[1]], label = "DM baseline", linestyle = :dash)
-        vline!([comp.φ], label = "Optimal target")
+        vline!([yc.φ], label = "Optimal target")
         png(snakemake.output["compliance_wL_plot"])
 
         plot(
@@ -1178,7 +1359,7 @@ function (@main)(_)
         )
         hline!([(1 + β) * dm_ref.Π_manufacturer], label = "(1+β)·DM baseline", linestyle = :dash)
         vline!([comp.φ], label = "Optimal target")
-        png(snakemake.output["compliance_phi_plot"])
+        return png(snakemake.output["compliance_phi_plot"])
     end
     return nothing
 end
