@@ -518,121 +518,102 @@ function (@main)(_)
                 ),
             )
 
-            @info "Step 2: full-data refit with OOS early stopping"
+            @info "Step 2: full-data refit mirroring the step-1 inner sweep"
+            # Mirrors step 1's per-fold inner sweep verbatim, on full data with
+            # a hard γ threshold (γ = 1{p_compliant > 0.5}). Warm-start across
+            # sweeps via xgb_model = saved_*_bytes so the saved booster
+            # accumulates trees exactly the way step 1's cross-fit boosters do —
+            # the previous fit_xgb_custom_oos(max_round=50, patience=5) capped
+            # every saved booster at one fresh ~50-round fit, which under-fit
+            # per-group carry probabilities and collapsed sim assortments toward
+            # the marginal mean.
             final_M_step =
                 let mapped = pmap(collect(gdf)) do cars
                         cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
                         X = X_matrix(cars)
                         y_all = Float32.(cars.is_sold)
-                        γ_all = Float32.(cars.p_compliant)
+                        γ_all = Float32.(cars.p_compliant .> 0.5f0)
                         n = length(y_all)
 
+                        dm = XGBoost.DMatrix(X)
+                        XGBoost.setinfo!(dm, "label", y_all)
+
                         ρ̃ = fill(Ρ̃_INIT, n)
-                        pbase_bytes = UInt8[]
-                        rho_bytes = UInt8[]
-                        best_round_p = 0
-                        best_round_r = 0
+                        saved_p_bytes = UInt8[]
+                        saved_r_bytes = UInt8[]
+                        last_sweep = 0
 
                         for sweep in 1:MAX_INNER_SWEEPS
+                            last_sweep = sweep
                             ρ̃_prev = copy(ρ̃)
 
-                            booster_p, br_p = Supply.fit_xgb_custom_oos(
-                                idxs ->
-                                    let m = length(idxs), y_s = y_all[idxs], γ_s = γ_all[idxs],
-                                        ρ̃_s = ρ̃[idxs]
-
-                                        ŷ -> begin
-                                            grad = Vector{Float32}(undef, m)
-                                            hess = Vector{Float32}(undef, m)
-                                            @inbounds for j in 1:m
-                                                grad[j], hess[j] = Supply.pbase_grad_hess(
-                                                    ŷ[j], y_s[j], γ_s[j], ρ̃_s[j]
-                                                )
-                                            end
-                                            return grad, hess
-                                        end
-                                    end,
-                                idxs ->
-                                    let m = length(idxs), y_s = y_all[idxs], γ_s = γ_all[idxs],
-                                        ρ̃_s = ρ̃[idxs]
-
-                                        ŷ -> begin
-                                            nll = 0.0
-                                            @inbounds for j in 1:m
-                                                nll += Supply.pbase_nll(
-                                                    ŷ[j], y_s[j], γ_s[j], ρ̃_s[j]
-                                                )
-                                            end
-                                            return nll / m
-                                        end
-                                    end,
-                                X,
-                                y_all;
-                                max_round = 50,
-                                patience = 5,
-                                strata = y_all,
+                            booster_p = Supply.fit_xgb_custom(
+                                dm; num_round = NUM_ROUND_STEP1,
                                 params = PBASE_XGB_PARAMS,
-                            )
-                            pbase_bytes = copy(
+                                xgb_model = saved_p_bytes,
+                            ) do ŷ
+                                grad = Vector{Float32}(undef, n)
+                                hess = Vector{Float32}(undef, n)
+                                @inbounds for j in 1:n
+                                    grad[j], hess[j] = Supply.pbase_grad_hess(
+                                        ŷ[j], y_all[j], γ_all[j], ρ̃[j]
+                                    )
+                                end
+                                return grad, hess
+                            end
+                            p = logistic.(XGBoost.predict(booster_p, dm; margin = true))
+                            saved_p_bytes = copy(
                                 XGBoost.save(booster_p, Vector{UInt8}; format = "ubj")
                             )
-                            best_round_p = br_p
-
-                            dm_full = XGBoost.DMatrix(X)
-                            p = logistic.(XGBoost.predict(booster_p, dm_full; margin = true))
                             finalize(booster_p)
 
-                            booster_r, br_r = Supply.fit_xgb_custom_oos(
-                                idxs ->
-                                    let m = length(idxs), y_s = y_all[idxs], γ_s = γ_all[idxs],
-                                        p_s = p[idxs]
+                            complier_local = findall(==(1.0f0), γ_all)
+                            if isempty(complier_local)
+                                saved_r_bytes = UInt8[]
+                                fill!(ρ̃, Supply.RHO_MIN)
+                            else
+                                X_c = X[complier_local, :]
+                                y_c = y_all[complier_local]
+                                p_c = p[complier_local]
+                                n_c = length(complier_local)
+                                dm_c = XGBoost.DMatrix(X_c)
+                                XGBoost.setinfo!(dm_c, "label", y_c)
 
-                                        ŷ -> begin
-                                            grad = Vector{Float32}(undef, m)
-                                            hess = Vector{Float32}(undef, m)
-                                            @inbounds for j in 1:m
-                                                grad[j], hess[j] = Supply.rho_grad_hess(
-                                                    ŷ[j], y_s[j], γ_s[j], p_s[j]
-                                                )
-                                            end
-                                            return grad, hess
-                                        end
-                                    end,
-                                idxs ->
-                                    let m = length(idxs), y_s = y_all[idxs], γ_s = γ_all[idxs],
-                                        p_s = p[idxs]
-
-                                        ŷ -> begin
-                                            nll = 0.0
-                                            @inbounds for j in 1:m
-                                                nll += Supply.rho_nll(
-                                                    ŷ[j], y_s[j], γ_s[j], p_s[j]
-                                                )
-                                            end
-                                            return nll / m
-                                        end
-                                    end,
-                                X,
-                                y_all;
-                                max_round = 50,
-                                patience = 5,
-                                strata = y_all,
-                                params = RHO_XGB_PARAMS,
-                            )
-                            ρ̃ .= Supply.rho_from_margin.(
-                                XGBoost.predict(booster_r, dm_full; margin = true)
-                            )
-                            rho_bytes = copy(XGBoost.save(booster_r, Vector{UInt8}; format = "ubj"))
-                            best_round_r = br_r
-                            finalize(booster_r)
-                            finalize(dm_full)
+                                booster_r = Supply.fit_xgb_custom(
+                                    dm_c;
+                                    num_round = NUM_ROUND_STEP1,
+                                    params = RHO_XGB_PARAMS,
+                                    xgb_model = saved_r_bytes,
+                                ) do ŷ
+                                    grad = Vector{Float32}(undef, n_c)
+                                    hess = Vector{Float32}(undef, n_c)
+                                    @inbounds for j in 1:n_c
+                                        grad[j], hess[j] = Supply.rho_grad_hess(
+                                            ŷ[j], y_c[j], 1.0f0, p_c[j]
+                                        )
+                                    end
+                                    return grad, hess
+                                end
+                                fill!(ρ̃, Supply.RHO_MIN)
+                                ρ̃[complier_local] .= Supply.rho_from_margin.(
+                                    XGBoost.predict(booster_r, dm_c; margin = true)
+                                )
+                                saved_r_bytes = copy(
+                                    XGBoost.save(booster_r, Vector{UInt8}; format = "ubj")
+                                )
+                                finalize(booster_r)
+                                finalize(dm_c)
+                            end
 
                             maximum(abs, ρ̃ .- ρ̃_prev) < Ρ̃_TOL && break
                         end
 
+                        finalize(dm)
                         (; model, model_year, extra) = cars[1, :]
-                        @info "  refit" model model_year extra best_round_p best_round_r
-                        return (model, model_year, extra) => (pbase_bytes, rho_bytes)
+                        @info "  refit" model model_year extra last_sweep n_compliers = count(
+                            ==(1.0f0), γ_all
+                        ) n_total = n
+                        return (model, model_year, extra) => (saved_p_bytes, saved_r_bytes)
                     end
                     mapreduce(
                         Dict,
