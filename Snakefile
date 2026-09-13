@@ -9,6 +9,12 @@ julia_dealers = glob.glob("src/dealers/**/*.jl")
 julia_empirics = glob.glob("src/empirics/**/*.jl")
 
 
+# Number of BBL forward-sim replications for the stratified pipeline. Kept
+# small for fast local cuts; bump for the final run. Every stratified rule
+# that iterates over seeds pulls from here.
+STRATIFIED_SEEDS = range(1, 21)
+
+
 # Wildcard constraints
 wildcard_constraints:
     transaction_uid="[0-9a-f\\-]+",
@@ -1485,7 +1491,35 @@ rule data_bbl_simulation_stratified:
 
 rule data_bbl_simulations_stratified:
     input:
-        expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=range(1, 21))
+        expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=STRATIFIED_SEEDS)
+
+
+rule table_diagnose_sim_assortments_stratified:
+    """
+    Compares simulated assortments against empirical assortments at (t, f).
+    Three outputs: per-quarter size means (real vs sim), per-group marginal
+    carry rates (real vs sim), and pairwise co-carry excess-over-independence
+    (real vs sim). The last is the diagnostic for whether independent
+    Bernoulli group-firing loses joint structure present in the data.
+    """
+    input:
+        "scripts/diagnose_sim_assortments_stratified.jl",
+        model_frames="data/model_frames.jld2",
+        price_table="data/price_table.arrow",
+        simulations=expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=STRATIFIED_SEEDS),
+    output:
+        sizes="tables/diagnose_sim_assortments_sizes_stratified.arrow",
+        groups="tables/diagnose_sim_assortments_groups_stratified.arrow",
+        pairs="tables/diagnose_sim_assortments_pairs_stratified.arrow",
+    log:
+        "logs/diagnose_sim_assortments_stratified.log",
+    run:
+        julia(
+            "scripts/diagnose_sim_assortments_stratified.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
 
 
 rule table_diagnose_state_anticipation_stratified:
@@ -1498,7 +1532,7 @@ rule table_diagnose_state_anticipation_stratified:
     """
     input:
         "scripts/diagnose_state_anticipation_stratified.jl",
-        simulations=expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=range(1, 201)),
+        simulations=expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=STRATIFIED_SEEDS),
     output:
         diagnostic="tables/diagnose_state_anticipation_stratified.arrow",
     log:
@@ -1526,7 +1560,7 @@ rule data_bbl_matrix_stratified:
         delta_decomp="data/delta_decomposition_regout.jld2",
         price_densities="data/price_densities_stratified.jld2",
         state_transition="data/state_transition_stratified.jld2",
-        simulations=expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=range(1, 21)),
+        simulations=expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=STRATIFIED_SEEDS),
     output:
         "data/bbl_matrix_stratified.jld2",
     log:
