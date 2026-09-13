@@ -1290,7 +1290,6 @@ rule plot_sales_targets_scatter:
             log=log,
         )
 
-
 rule plot_trim_probabilities:
     input:
         "scripts/plot_trim_probabilities.jl",
@@ -1309,7 +1308,6 @@ rule plot_trim_probabilities:
             output=output,
             log=log,
         )
-
 
 rule table_trim_probabilities:
     input:
@@ -1330,7 +1328,6 @@ rule table_trim_probabilities:
             output=output,
             log=log,
         )
-
 
 rule plot_mcem_trace:
     input:
@@ -1488,7 +1485,7 @@ rule data_bbl_simulation_stratified:
 
 rule data_bbl_simulations_stratified:
     input:
-        expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=range(1, 201))
+        expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=range(1, 21))
 
 
 rule data_bbl_matrix_stratified:
@@ -1505,7 +1502,7 @@ rule data_bbl_matrix_stratified:
         delta_decomp="data/delta_decomposition_regout.jld2",
         price_densities="data/price_densities_stratified.jld2",
         state_transition="data/state_transition_stratified.jld2",
-        simulations=expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=range(1, 201)),
+        simulations=expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=range(1, 21)),
     output:
         "data/bbl_matrix_stratified.jld2",
     log:
