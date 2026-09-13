@@ -1491,6 +1491,30 @@ rule data_bbl_simulations_stratified:
         expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=range(1, 201))
 
 
+rule table_diagnose_state_anticipation_stratified:
+    """
+    Diagnostic on the "correct anticipation + mean-zero shock" model:
+    scans every forward-sim seed and reports mean(state_actual - state_expected)
+    per (quarter × cell class). Passes if |mean_eta| ≲ SE overall and per
+    subgroup — otherwise the transition draw and residual_demand fit have a
+    systematic offset that leaks into state_prev carry-forward.
+    """
+    input:
+        "scripts/diagnose_state_anticipation_stratified.jl",
+        simulations=expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=range(1, 201)),
+    output:
+        diagnostic="tables/diagnose_state_anticipation_stratified.arrow",
+    log:
+        "logs/diagnose_state_anticipation_stratified.log",
+    run:
+        julia(
+            "scripts/diagnose_state_anticipation_stratified.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 rule data_bbl_matrix_stratified:
     """
     Reuses scripts/bbl_matrix.jl unchanged: it only reads the KEYS of
