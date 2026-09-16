@@ -326,7 +326,11 @@ const RHO_MIN = 0.005f0
 rho_from_margin(gᵣ::Real) = RHO_MIN + (1 - RHO_MIN) * logistic(gᵣ)
 
 function rho_grad_hess(gᵣ::Real, y::Real, γ::Real, p::Real)
-    u = logistic(gᵣ)
+    # Clamp u away from {0, 1} so ρ̃ never hits 1 exactly and dρ̃_dgᵣ =
+    # (1-RHO_MIN)·u·(1-u) never collapses to zero — otherwise g and h below
+    # produce 0/0 = NaN when gᵣ saturates, which corrupts the booster's leaf
+    # weights and cascades to NaN predictions in downstream E-step calls.
+    u = clamp(logistic(gᵣ), 1.0f-6, 1 - 1.0f-6)
     ρ̃ = RHO_MIN + (1 - RHO_MIN) * u
     q = p + (1 - p) * ρ̃
     dρ̃_dgᵣ = (1 - RHO_MIN) * u * (1 - u)
