@@ -17,33 +17,33 @@ using Distributed
 
     DEMOS = Empirics.DEFAULT_DEMOGRAPHICS
 
-    K = 3
+    K = 2
 
-    MAX_INNER_SWEEPS = 100_000
+    MAX_INNER_SWEEPS = 250
     Ρ̃_TOL = 1.0f-4
     NUM_ROUND_STEP1 = 20
 
     # Bias the sweep-0 p_base fit toward "compliers have a real lift" so p_base
     # doesn't collapse onto ȳ and leave ρ̃ with the (ȳ − p_base)/(1 − p_base) = 0
     # fixed point.
-    Ρ̃_INIT = 0.15f0
+    Ρ̃_INIT = 0.20f0
 
     Π_FLOOR = 1.0f-3
 
-    N_TOTAL = 100
-    BURN_IN = 30
+    N_TOTAL = 20
+    BURN_IN = 10
 
     RHO_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (base_score = -3.0, lambda = 5.0f-1, max_depth = 4, eta = 0.1),
+        (base_score = -1.0, lambda = 5.0f-1, max_depth = 5, eta = 0.1),
     )
 
     PBASE_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (max_depth = 4, eta = 0.1),
+        (max_depth = 5, eta = 0.1),
     )
 
-    Z_CLAMP = 0.05f0
+    Z_CLAMP = 0.005f0
 
     demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
 
