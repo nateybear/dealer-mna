@@ -26,21 +26,23 @@ using Distributed
     # Bias the sweep-0 p_base fit toward "compliers have a real lift" so p_base
     # doesn't collapse onto ȳ and leave ρ̃ with the (ȳ − p_base)/(1 − p_base) = 0
     # fixed point.
-    Ρ̃_INIT = 0.20f0
+    Ρ̃_INIT = 0.25f0
 
     Π_FLOOR = 1.0f-3
 
     N_TOTAL = 20
     BURN_IN = 10
 
+    # Flexible trees; ρ̃ cold-starts at ρ̃ ≈ 0.5 via base_score = 0 so a fresh
+    # ρ̃ booster fires with a strong compliance-bonus prior.
     RHO_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (base_score = -0.5, lambda = 5.0f-1, max_depth = 6, eta = 0.1),
+        (base_score = 0.0, lambda = 5.0f-1, max_depth = 8, eta = 0.1),
     )
 
     PBASE_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (max_depth = 6, eta = 0.1),
+        (max_depth = 8, lambda = 5.0f-1, eta = 0.1),
     )
 
     Z_CLAMP = 0.005f0
