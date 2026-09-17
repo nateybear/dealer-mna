@@ -33,8 +33,6 @@ using Distributed
     N_TOTAL = 20
     BURN_IN = 10
 
-    # Flexible trees; ρ̃ cold-starts at ρ̃ ≈ 0.5 via base_score = 0 so a fresh
-    # ρ̃ booster fires with a strong compliance-bonus prior.
     RHO_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
         (base_score = 0.0, lambda = 5.0f-1, max_depth = 8, eta = 0.1),
@@ -520,29 +518,31 @@ function (@main)(_)
                 ),
             )
 
-            @info "Step 2: full-data refit mirroring the step-1 inner sweep"
-            # Mirrors step 1's per-fold inner sweep verbatim, on full data with
-            # a hard γ threshold (γ = 1{p_compliant > 0.5}). Warm-start across
-            # sweeps via xgb_model = saved_*_bytes so the saved booster
-            # accumulates trees exactly the way step 1's cross-fit boosters do —
-            # the previous fit_xgb_custom_oos(max_round=50, patience=5) capped
-            # every saved booster at one fresh ~50-round fit, which under-fit
-            # per-group carry probabilities and collapsed sim assortments toward
-            # the marginal mean.
+            @info "Step 2: full-data refit"
+            # Threshold at the (1 − π̂)-quantile so the complier fraction
+            # matches π̂; `> 0.5` skews high when posterior γ is right-skewed.
+            π_hat = Float64(mean(π_samples))
+            γ_cutoff = Float32(quantile(compliance.p_compliant, 1 - π_hat))
+            @info "Step 2 γ threshold" π_hat γ_cutoff frac_compliers = mean(
+                compliance.p_compliant .>= γ_cutoff
+            )
             final_M_step =
                 let mapped = pmap(collect(gdf)) do cars
                         cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
                         X = X_matrix(cars)
                         y_all = Float32.(cars.is_sold)
-                        γ_all = Float32.(cars.p_compliant .> 0.5f0)
+                        γ_all = Float32.(cars.p_compliant .>= γ_cutoff)
                         n = length(y_all)
 
                         dm = XGBoost.DMatrix(X)
                         XGBoost.setinfo!(dm, "label", y_all)
 
                         ρ̃ = fill(Ρ̃_INIT, n)
-                        saved_p_bytes = UInt8[]
-                        saved_r_bytes = UInt8[]
+                        step1_fits = M_step[(
+                            cars[1, :model], cars[1, :model_year], cars[1, :extra]
+                        )]
+                        saved_p_bytes = copy(step1_fits[1][1])
+                        saved_r_bytes = copy(step1_fits[2][1])
                         last_sweep = 0
 
                         for sweep in 1:MAX_INNER_SWEEPS
