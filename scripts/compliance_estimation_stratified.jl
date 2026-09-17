@@ -35,12 +35,12 @@ using Distributed
 
     RHO_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (base_score = -1.0, lambda = 5.0f-1, max_depth = 5, eta = 0.1),
+        (base_score = -0.5, lambda = 5.0f-1, max_depth = 6, eta = 0.1),
     )
 
     PBASE_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (max_depth = 5, eta = 0.1),
+        (max_depth = 6, eta = 0.1),
     )
 
     Z_CLAMP = 0.005f0
@@ -186,7 +186,7 @@ function (@main)(_)
         Supply.XGB_DEFAULT_PARAMS,
         (
             base_score = Float64(log(mean(q_agg))),
-            max_depth = 4,
+            max_depth = 6,
             min_child_weight = 1,
             lambda = 1.0,
             eta = 0.1,
@@ -374,7 +374,7 @@ function (@main)(_)
             r in eachrow(agg_master)
         ]
         ι_lag_agg = Float32[
-            Float32(get(sampled_lookup, (r.dealer_uid, r.t - Quarter(1)), 0.0f0) > 0.5f0) for
+            Float32(rand() < get(sampled_lookup, (r.dealer_uid, r.t - Quarter(1)), 0.0f0)) for
             r in eachrow(agg_master)
         ]
         X_agg = hcat(X_agg_base, ι_lag_agg)
