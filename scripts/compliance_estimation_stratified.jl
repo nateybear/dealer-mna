@@ -28,22 +28,22 @@ using Distributed
     # fixed point.
     Ρ̃_INIT = 0.25f0
 
-    Π_FLOOR = 1.0f-3
+    Π_FLOOR = 1.0f-6
 
     N_TOTAL = 20
     BURN_IN = 10
 
     RHO_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (base_score = 0.0, lambda = 5.0f-1, max_depth = 8, eta = 0.1),
+        (base_score = 0.0, lambda = 5.0f-1, max_depth = 5, eta = 0.1),
     )
 
     PBASE_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (max_depth = 8, lambda = 5.0f-1, eta = 0.1),
+        (max_depth = 5, lambda = 5.0f-1, eta = 0.1),
     )
 
-    Z_CLAMP = 0.005f0
+    Z_CLAMP = 0.001f0
 
     demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
 
@@ -186,7 +186,7 @@ function (@main)(_)
         Supply.XGB_DEFAULT_PARAMS,
         (
             base_score = Float64(log(mean(q_agg))),
-            max_depth = 6,
+            max_depth = 5,
             min_child_weight = 1,
             lambda = 1.0,
             eta = 0.1,
@@ -594,8 +594,9 @@ function (@main)(_)
                         finalize(dm)
 
                         (; model, model_year, extra) = cars[1, :]
-                        @info "  distill" model model_year extra n_rho_folds K n_compliers =
-                            length(complier_local) n_total = n
+                        @info "  distill" model model_year extra n_rho_folds K n_compliers = length(
+                            complier_local
+                        ) n_total = n
                         return (model, model_year, extra) => (pbase_bytes, rho_bytes)
                     end
                     mapreduce(

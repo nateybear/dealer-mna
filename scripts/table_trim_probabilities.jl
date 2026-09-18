@@ -69,7 +69,7 @@ function (@main)(_)
             )
         end
         finalize(dm)
-        sort!(table, :n_sales, rev = true)
+        sort!(table, [:model, :model_year, :extra])
 
         @info "Trim table" nrows = nrow(table)
 
@@ -90,7 +90,7 @@ function (@main)(_)
             fmt3(r.mean_p_carry),
         ]
         open(snakemake.output["tex"], "w") do io
-            latex_tabular(
+            return latex_tabular(
                 io,
                 Tabular("lll" * "r"^7),
                 [
