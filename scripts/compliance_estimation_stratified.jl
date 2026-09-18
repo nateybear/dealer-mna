@@ -519,11 +519,14 @@ function (@main)(_)
             )
 
             @info "Step 2: distill K-fold ensemble into single boosters"
-            # Sidesteps the coupled p_base/ρ̃ identification problem — step 1
-            # already solved it under cross-fit CEM. Here we just average step
-            # 1's fold margins and fit single boosters (squared-error) to
-            # reproduce those averages. Consumers keep calling logistic() and
-            # rho_from_margin() on the raw output.
+            # ρ̃ distillation restricts to the top-π̂ complier subset — matches
+            # step 1's ρ̃ fit which trained only on γ==1 rows, and the sim's
+            # ρ̃ query only fires when iota_prev == 1.
+            π_hat = Float64(mean(π_samples))
+            γ_cutoff = Float32(quantile(compliance.p_compliant, 1 - π_hat))
+            @info "Step 2 γ threshold" π_hat γ_cutoff frac_compliers = mean(
+                compliance.p_compliant .>= γ_cutoff
+            )
             distill_params = merge(
                 Supply.XGB_DEFAULT_PARAMS,
                 (
@@ -572,14 +575,18 @@ function (@main)(_)
                         )
                         finalize(booster_p)
 
-                        rho_bytes = if n_rho_folds > 0
+                        complier_local = findall(cars.p_compliant .>= γ_cutoff)
+                        rho_bytes = if n_rho_folds > 0 && !isempty(complier_local)
+                            dm_c = XGBoost.DMatrix(X[complier_local, :])
                             booster_r = Supply.fit_regression(
-                                dm, g_avg; num_round = 100, params = distill_params
+                                dm_c, g_avg[complier_local];
+                                num_round = 100, params = distill_params,
                             )
                             bytes = copy(
                                 XGBoost.save(booster_r, Vector{UInt8}; format = "ubj")
                             )
                             finalize(booster_r)
+                            finalize(dm_c)
                             bytes
                         else
                             UInt8[]
@@ -587,7 +594,8 @@ function (@main)(_)
                         finalize(dm)
 
                         (; model, model_year, extra) = cars[1, :]
-                        @info "  distill" model model_year extra n_rho_folds K
+                        @info "  distill" model model_year extra n_rho_folds K n_compliers =
+                            length(complier_local) n_total = n
                         return (model, model_year, extra) => (pbase_bytes, rho_bytes)
                     end
                     mapreduce(
