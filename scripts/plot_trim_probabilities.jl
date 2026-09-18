@@ -24,18 +24,21 @@ end
 
 function trim_panel(model_name, model_year, extra, n_sales, p_base, ρ̃)
     p_carry = p_base .+ (1 .- p_base) .* ρ̃
-    return density(
-        [p_base p_carry];
-        label = ["p_base" "P(carry|comply)"],
-        color = [:steelblue :orange],
-        linewidth = 3,
+    return groupedhist(
+        vcat(p_base, p_carry);
+        bar_position = :stack,
+        group = vcat(
+            repeat(["p_base"], length(p_base)),
+            repeat(["P(carry|comply)"], length(p_carry)),
+        ),
+        fill = [:steelblue :orange],
         xlims = (0, 1),
         title = "$model_name $model_year $extra (n=$n_sales)",
         titlefont = font(8),
         xtickfontsize = 6,
         ytickfontsize = 6,
         legendfontsize = 6,
-        bandwidth=10,
+        bins = 30,
         yticks = false,
     )
 end
@@ -117,7 +120,7 @@ function (@main)(_)
             plot_title = "Top 6 popular (rows 1–2) vs. mid-popularity, top std(ρ̃) (rows 3–4)",
             plot_titlefont = font(10),
         )
-        png(plt, snakemake.output["plot"])
+        return png(plt, snakemake.output["plot"])
     end
     return nothing
 end
