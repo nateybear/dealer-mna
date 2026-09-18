@@ -36,6 +36,18 @@ function fit_xgb_custom(
     return b
 end
 
+function fit_regression(
+    dm::XGBoost.DMatrix, y::AbstractVector;
+    num_round::Int, params = XGB_DEFAULT_PARAMS,
+)
+    y_f32 = Float32.(y)
+    n = length(y_f32)
+    hess = ones(Float32, n)
+    return fit_xgb_custom(dm; num_round, params) do ŷ
+        return ŷ .- y_f32, hess
+    end
+end
+
 function _stratified_split(strata::AbstractVector, val_frac::Float64, rng::AbstractRNG)
     val_idx = Int[]
     tr_idx = Int[]
@@ -326,10 +338,7 @@ const RHO_MIN = 0.005f0
 rho_from_margin(gᵣ::Real) = RHO_MIN + (1 - RHO_MIN) * logistic(gᵣ)
 
 function rho_grad_hess(gᵣ::Real, y::Real, γ::Real, p::Real)
-    # Clamp u away from {0, 1} so ρ̃ never hits 1 exactly and dρ̃_dgᵣ =
-    # (1-RHO_MIN)·u·(1-u) never collapses to zero — otherwise g and h below
-    # produce 0/0 = NaN when gᵣ saturates, which corrupts the booster's leaf
-    # weights and cascades to NaN predictions in downstream E-step calls.
+    # Clamp u off {0, 1} so g and h below don't 0/0 = NaN when gᵣ saturates.
     u = clamp(logistic(gᵣ), 1.0f-6, 1 - 1.0f-6)
     ρ̃ = RHO_MIN + (1 - RHO_MIN) * u
     q = p + (1 - p) * ρ̃

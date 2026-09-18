@@ -518,104 +518,77 @@ function (@main)(_)
                 ),
             )
 
-            @info "Step 2: full-data refit"
-            # Threshold at the (1 − π̂)-quantile so the complier fraction
-            # matches π̂; `> 0.5` skews high when posterior γ is right-skewed.
-            π_hat = Float64(mean(π_samples))
-            γ_cutoff = Float32(quantile(compliance.p_compliant, 1 - π_hat))
-            @info "Step 2 γ threshold" π_hat γ_cutoff frac_compliers = mean(
-                compliance.p_compliant .>= γ_cutoff
+            @info "Step 2: distill K-fold ensemble into single boosters"
+            # Sidesteps the coupled p_base/ρ̃ identification problem — step 1
+            # already solved it under cross-fit CEM. Here we just average step
+            # 1's fold margins and fit single boosters (squared-error) to
+            # reproduce those averages. Consumers keep calling logistic() and
+            # rho_from_margin() on the raw output.
+            distill_params = merge(
+                Supply.XGB_DEFAULT_PARAMS,
+                (
+                    objective = "reg:squarederror",
+                    base_score = 0.0,
+                    max_depth = 5,
+                    eta = 0.1,
+                    lambda = 1.0,
+                ),
             )
             final_M_step =
                 let mapped = pmap(collect(gdf)) do cars
                         cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
                         X = X_matrix(cars)
-                        y_all = Float32.(cars.is_sold)
-                        γ_all = Float32.(cars.p_compliant .>= γ_cutoff)
-                        n = length(y_all)
+                        n = nrow(cars)
+                        group_key = (
+                            cars[1, :model], cars[1, :model_year], cars[1, :extra]
+                        )
+                        pbase_folds = M_step[group_key][1]
+                        rho_folds = M_step[group_key][2]
+                        K = length(pbase_folds)
 
                         dm = XGBoost.DMatrix(X)
-                        XGBoost.setinfo!(dm, "label", y_all)
-
-                        ρ̃ = fill(Ρ̃_INIT, n)
-                        step1_fits = M_step[(
-                            cars[1, :model], cars[1, :model_year], cars[1, :extra]
-                        )]
-                        saved_p_bytes = copy(step1_fits[1][1])
-                        saved_r_bytes = copy(step1_fits[2][1])
-                        last_sweep = 0
-
-                        for sweep in 1:MAX_INNER_SWEEPS
-                            last_sweep = sweep
-                            ρ̃_prev = copy(ρ̃)
-
-                            booster_p = Supply.fit_xgb_custom(
-                                dm; num_round = NUM_ROUND_STEP1,
-                                params = PBASE_XGB_PARAMS,
-                                xgb_model = saved_p_bytes,
-                            ) do ŷ
-                                grad = Vector{Float32}(undef, n)
-                                hess = Vector{Float32}(undef, n)
-                                @inbounds for j in 1:n
-                                    grad[j], hess[j] = Supply.pbase_grad_hess(
-                                        ŷ[j], y_all[j], γ_all[j], ρ̃[j]
-                                    )
-                                end
-                                return grad, hess
+                        f_avg = zeros(Float32, n)
+                        g_avg = zeros(Float32, n)
+                        n_rho_folds = 0
+                        booster = XGBoost.Booster(dm)
+                        for k in 1:K
+                            XGBoost.load!(booster, pbase_folds[k])
+                            f_avg .+= XGBoost.predict(booster, dm; margin = true)
+                            if !isempty(rho_folds[k])
+                                XGBoost.load!(booster, rho_folds[k])
+                                g_avg .+= XGBoost.predict(booster, dm; margin = true)
+                                n_rho_folds += 1
                             end
-                            p = logistic.(XGBoost.predict(booster_p, dm; margin = true))
-                            saved_p_bytes = copy(
-                                XGBoost.save(booster_p, Vector{UInt8}; format = "ubj")
-                            )
-                            finalize(booster_p)
-
-                            complier_local = findall(==(1.0f0), γ_all)
-                            if isempty(complier_local)
-                                saved_r_bytes = UInt8[]
-                                fill!(ρ̃, Supply.RHO_MIN)
-                            else
-                                X_c = X[complier_local, :]
-                                y_c = y_all[complier_local]
-                                p_c = p[complier_local]
-                                n_c = length(complier_local)
-                                dm_c = XGBoost.DMatrix(X_c)
-                                XGBoost.setinfo!(dm_c, "label", y_c)
-
-                                booster_r = Supply.fit_xgb_custom(
-                                    dm_c;
-                                    num_round = NUM_ROUND_STEP1,
-                                    params = RHO_XGB_PARAMS,
-                                    xgb_model = saved_r_bytes,
-                                ) do ŷ
-                                    grad = Vector{Float32}(undef, n_c)
-                                    hess = Vector{Float32}(undef, n_c)
-                                    @inbounds for j in 1:n_c
-                                        grad[j], hess[j] = Supply.rho_grad_hess(
-                                            ŷ[j], y_c[j], 1.0f0, p_c[j]
-                                        )
-                                    end
-                                    return grad, hess
-                                end
-                                fill!(ρ̃, Supply.RHO_MIN)
-                                ρ̃[complier_local] .= Supply.rho_from_margin.(
-                                    XGBoost.predict(booster_r, dm_c; margin = true)
-                                )
-                                saved_r_bytes = copy(
-                                    XGBoost.save(booster_r, Vector{UInt8}; format = "ubj")
-                                )
-                                finalize(booster_r)
-                                finalize(dm_c)
-                            end
-
-                            maximum(abs, ρ̃ .- ρ̃_prev) < Ρ̃_TOL && break
                         end
+                        f_avg ./= K
+                        n_rho_folds > 0 && (g_avg ./= n_rho_folds)
+                        finalize(booster)
 
+                        booster_p = Supply.fit_regression(
+                            dm, f_avg; num_round = 100, params = distill_params
+                        )
+                        pbase_bytes = copy(
+                            XGBoost.save(booster_p, Vector{UInt8}; format = "ubj")
+                        )
+                        finalize(booster_p)
+
+                        rho_bytes = if n_rho_folds > 0
+                            booster_r = Supply.fit_regression(
+                                dm, g_avg; num_round = 100, params = distill_params
+                            )
+                            bytes = copy(
+                                XGBoost.save(booster_r, Vector{UInt8}; format = "ubj")
+                            )
+                            finalize(booster_r)
+                            bytes
+                        else
+                            UInt8[]
+                        end
                         finalize(dm)
+
                         (; model, model_year, extra) = cars[1, :]
-                        @info "  refit" model model_year extra last_sweep n_compliers = count(
-                            ==(1.0f0), γ_all
-                        ) n_total = n
-                        return (model, model_year, extra) => (saved_p_bytes, saved_r_bytes)
+                        @info "  distill" model model_year extra n_rho_folds K
+                        return (model, model_year, extra) => (pbase_bytes, rho_bytes)
                     end
                     mapreduce(
                         Dict,
