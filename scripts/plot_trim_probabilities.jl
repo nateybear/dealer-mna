@@ -38,7 +38,6 @@ function trim_panel(model_name, model_year, extra, n_sales, p_base, ρ̃)
         xtickfontsize = 6,
         ytickfontsize = 6,
         legendfontsize = 6,
-        bins = 30,
         yticks = false,
     )
 end
