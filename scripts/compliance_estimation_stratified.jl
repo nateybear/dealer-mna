@@ -35,12 +35,12 @@ using Distributed
 
     RHO_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (base_score = 0.0, lambda = 5.0f-1, max_depth = 5, eta = 0.1),
+        (base_score = 0.0, lambda = 5.0f-1, max_depth = 4, eta = 0.1),
     )
 
     PBASE_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (max_depth = 5, lambda = 5.0f-1, eta = 0.1),
+        (max_depth = 4, lambda = 5.0f-1, eta = 0.1),
     )
 
     Z_CLAMP = 0.001f0
@@ -186,7 +186,7 @@ function (@main)(_)
         Supply.XGB_DEFAULT_PARAMS,
         (
             base_score = Float64(log(mean(q_agg))),
-            max_depth = 5,
+            max_depth = 4,
             min_child_weight = 1,
             lambda = 1.0,
             eta = 0.1,
