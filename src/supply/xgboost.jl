@@ -10,10 +10,14 @@ const XGB_DEFAULT_PARAMS = (
     max_depth = 3,
     eta = 0.15,
     lambda = 1.0,
-    min_child_weight = 1.0f0,
+    # min_child_weight = 0.1 lets small-Hessian rows (custom mixture grads
+    # where H = p(1-p) or the ρ̃ chain-rule factor) form their own leaves.
+    # max_bin = 256 gives finer per-feature threshold resolution — makes
+    # each split more expressive without adding depth.
+    min_child_weight = 1.0f-1,
     tree_method = "hist",
     subsample = 0.8,
-    max_bin = 32,
+    max_bin = 256,
     seed = 85704,
 )
 
@@ -46,6 +50,97 @@ function fit_regression(
     return fit_xgb_custom(dm; num_round, params) do ŷ
         return ŷ .- y_f32, hess
     end
+end
+
+"""
+    analyze_tree_splits(booster_bytes, X) → DataFrame
+
+For each internal split in a serialized XGBoost booster, return a row with
+the feature, threshold, and — critically — whether the threshold is
+"trivial" (all non-missing rows in `X` fall on one side of the threshold,
+so the split's real work is routing missing rows to its default direction).
+
+Use `X` as the reference population — a training-like matrix with the same
+feature dimension as the booster. Sparse-aware split finding stores a
+`missing → yes|no` default direction per split; if the numeric threshold
+is degenerate on the non-missing values, that split is doing a categorical
+"is this feature missing?" partition, not a value split.
+"""
+function analyze_tree_splits(booster_bytes::Vector{UInt8}, X::AbstractMatrix{<:Real})
+    _, p = size(X)
+    dm = XGBoost.DMatrix(zeros(Float32, 1, p))
+    b = XGBoost.Booster(dm)
+    XGBoost.load!(b, booster_bytes)
+    tree_roots = XGBoost.trees(b; with_stats = false)
+    finalize(b)
+    finalize(dm)
+
+    feat_min = fill(NaN, p)
+    feat_max = fill(NaN, p)
+    feat_missing = zeros(Int, p)
+    for j in 1:p
+        col = @view X[:, j]
+        n_miss = 0
+        mn = Inf
+        mx = -Inf
+        for v in col
+            if isnan(v)
+                n_miss += 1
+            else
+                mn = min(mn, Float64(v))
+                mx = max(mx, Float64(v))
+            end
+        end
+        feat_missing[j] = n_miss
+        feat_min[j] = isinf(mn) ? NaN : mn
+        feat_max[j] = isinf(mx) ? NaN : mx
+    end
+
+    n = size(X, 1)
+    out = DataFrame(
+        tree_idx = Int[], node_id = Int[], depth = Int[],
+        feature = Int[], threshold = Float64[], missing_left = Bool[],
+        n_missing = Int[], n_below = Int[], n_above = Int[],
+        min_nonmiss = Float64[], max_nonmiss = Float64[],
+        threshold_trivial = Bool[],
+    )
+
+    function walk!(node, ti)
+        node.leaf === nothing || return
+        feat_name = node.split
+        feat_idx = parse(Int, replace(feat_name, r"^f" => "")) + 1
+        t = Float64(node.split_condition)
+        missing_left = node.nmissing == node.yes
+
+        n_below = 0
+        n_above = 0
+        col = @view X[:, feat_idx]
+        for v in col
+            isnan(v) && continue
+            if Float64(v) < t
+                n_below += 1
+            else
+                n_above += 1
+            end
+        end
+        trivial = n_below == 0 || n_above == 0
+
+        push!(out, (
+            ti, node.id, node.depth, feat_idx, t, missing_left,
+            feat_missing[feat_idx], n_below, n_above,
+            feat_min[feat_idx], feat_max[feat_idx], trivial,
+        ))
+
+        for child in node.children
+            walk!(child, ti)
+        end
+    end
+
+    for (ti, root) in enumerate(tree_roots)
+        walk!(root, ti)
+    end
+
+    return out
 end
 
 function _stratified_split(strata::AbstractVector, val_frac::Float64, rng::AbstractRNG)

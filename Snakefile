@@ -1522,6 +1522,33 @@ rule table_diagnose_sim_assortments_stratified:
         )
 
 
+rule table_diagnose_booster_splits_compliance_stratified:
+    """
+    Inspects every split node in the distilled compliance boosters and
+    reports whether the numeric threshold is trivial on non-missing feature
+    values (i.e. the split is really a categorical "is this cell missing?"
+    partition). High frac_trivial means the sparsity pattern of the state
+    matrix is doing more work than the feature values, and increasing
+    max_depth just buys more missingness partitions.
+    """
+    input:
+        "scripts/diagnose_booster_splits_compliance_stratified.jl",
+        compliance_fits_final="data/compliance_fits_final_stratified.jld2",
+        residual_demand="data/residual_demand.jld2",
+    output:
+        detailed="tables/diagnose_booster_splits_compliance_stratified_detailed.arrow",
+        summary="tables/diagnose_booster_splits_compliance_stratified_summary.arrow",
+    log:
+        "logs/diagnose_booster_splits_compliance_stratified.log",
+    run:
+        julia(
+            "scripts/diagnose_booster_splits_compliance_stratified.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 rule table_diagnose_state_anticipation_stratified:
     """
     Diagnostic on the "correct anticipation + mean-zero shock" model:
