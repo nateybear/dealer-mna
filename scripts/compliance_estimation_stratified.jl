@@ -26,7 +26,7 @@ using Distributed
     # Bias the sweep-0 p_base fit toward "compliers have a real lift" so p_base
     # doesn't collapse onto ȳ and leave ρ̃ with the (ȳ − p_base)/(1 − p_base) = 0
     # fixed point.
-    Ρ̃_INIT = 0.25f0
+    Ρ̃_INIT = 0.20f0
 
     Π_FLOOR = 1.0f-6
 
@@ -35,7 +35,7 @@ using Distributed
 
     RHO_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (base_score = 0.0, lambda = 5.0f-1, max_depth = 8, eta = 0.1),
+        (base_score = -0.5, lambda = 5.0f-1, max_depth = 8, eta = 0.1),
     )
 
     PBASE_XGB_PARAMS = merge(
@@ -274,8 +274,11 @@ function (@main)(_)
                             last_sweep = sweep
                             ρ̃_prev = copy(ρ̃_tr)
 
+                            # don't go too flexible too early
+                            num_rounds = min(NUM_ROUND_STEP1, sweep)
+
                             booster_p = Supply.fit_xgb_custom(
-                                dm_tr; num_round = NUM_ROUND_STEP1,
+                                dm_tr; num_round = num_rounds,
                                 params = PBASE_XGB_PARAMS,
                                 xgb_model = saved_p_bytes,
                             ) do ŷ
@@ -308,7 +311,7 @@ function (@main)(_)
 
                                 booster_r = Supply.fit_xgb_custom(
                                     dm_tr_c;
-                                    num_round = NUM_ROUND_STEP1,
+                                    num_round = num_rounds,
                                     params = RHO_XGB_PARAMS,
                                     xgb_model = saved_r_bytes,
                                 ) do ŷ
