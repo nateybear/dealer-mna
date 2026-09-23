@@ -23,9 +23,6 @@ using Distributed
     Ρ̃_TOL = 1.0f-4
     NUM_ROUND_STEP1 = 20
 
-    # Bias the sweep-0 p_base fit toward "compliers have a real lift" so p_base
-    # doesn't collapse onto ȳ and leave ρ̃ with the (ȳ − p_base)/(1 − p_base) = 0
-    # fixed point.
     Ρ̃_INIT = 0.20f0
 
     Π_FLOOR = 1.0f-6
