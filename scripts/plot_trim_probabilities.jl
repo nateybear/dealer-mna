@@ -39,6 +39,7 @@ function trim_panel(model_name, model_year, extra, n_sales, p_base, ρ̃)
         ytickfontsize = 6,
         legendfontsize = 6,
         yticks = false,
+        bins = 30,
     )
 end
 
@@ -97,13 +98,13 @@ function (@main)(_)
         ]
 
         n_total = nrow(summary)
-        lo_cut = quantile(summary.n_sales, 1 / 3)
-        hi_cut = quantile(summary.n_sales, 2 / 3)
+        lo_cut = quantile(summary.n_sales, 2 / 10)
+        hi_cut = quantile(summary.n_sales, 9 / 10)
         mid = subset(
             summary,
             :n_sales => ByRow(x -> lo_cut ≤ x ≤ hi_cut),
         )
-        sort!(mid, :std_rho, rev = true)
+        sort!(mid, :mean_rho, rev = true)
         variation_keys = [
             (r.model, r.model_year, r.extra) for r in eachrow(first(mid, 6))
         ]
