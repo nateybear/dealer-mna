@@ -274,9 +274,15 @@ function (@main)(_)
                             # don't go too flexible too early
                             num_rounds = min(NUM_ROUND_STEP1, sweep)
 
+                            max_depth = if sweep < 10
+                                min(2^sweep, PBASE_XGB_PARAMS.max_depth)
+                            else
+                                PBASE_XGB_PARAMS.max_depth
+                            end
+
                             booster_p = Supply.fit_xgb_custom(
                                 dm_tr; num_round = num_rounds,
-                                params = PBASE_XGB_PARAMS,
+                                params = merge(PBASE_XGB_PARAMS, (; max_depth)),
                                 xgb_model = saved_p_bytes,
                             ) do ŷ
                                 grad = Vector{Float32}(undef, n_tr)
@@ -306,10 +312,16 @@ function (@main)(_)
                                 dm_tr_c = XGBoost.DMatrix(X_tr_c)
                                 XGBoost.setinfo!(dm_tr_c, "label", y_tr_c)
 
+                                max_depth = if sweep < 10
+                                    min(2^sweep, RHO_XGB_PARAMS.max_depth)
+                                else
+                                    RHO_XGB_PARAMS.max_depth
+                                end
+
                                 booster_r = Supply.fit_xgb_custom(
                                     dm_tr_c;
                                     num_round = num_rounds,
-                                    params = RHO_XGB_PARAMS,
+                                    params = merge(RHO_XGB_PARAMS, (; max_depth)),
                                     xgb_model = saved_r_bytes,
                                 ) do ŷ
                                     grad = Vector{Float32}(undef, n_tr_c)
