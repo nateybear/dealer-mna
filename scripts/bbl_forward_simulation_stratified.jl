@@ -137,11 +137,29 @@ function (@main)(_)
         # accordingly. Base-score-only stub boosters would predict 0.5 for
         # every quantile, giving nonsense draws.
         Q = length(Supply.QUANTILE_LEVELS)
+        # If any quantile in the grid is empty (best_round == 0 at fit time —
+        # XGBoost couldn't beat the marginal-quantile base score), fill it from
+        # the nearest non-empty neighbor. Nearest-neighbor keeps the CDF
+        # monotone under inverse-CDF sampling, and preserves VKs that would
+        # otherwise get dropped for a single weak tail booster. Only bail if
+        # every quantile is empty (fit was truly unfittable).
         function bootup_grid(byte_vecs::Vector{Vector{UInt8}}, ncols::Int)
-            all(!isempty, byte_vecs) || return nothing
+            any(!isempty, byte_vecs) || return nothing
             grid = Vector{XGBoost.Booster}(undef, length(byte_vecs))
-            for (i, b) in enumerate(byte_vecs)
-                grid[i] = bootup(b, ncols)
+            for i in eachindex(byte_vecs)
+                src = i
+                if isempty(byte_vecs[i])
+                    best_d = typemax(Int)
+                    for j in eachindex(byte_vecs)
+                        isempty(byte_vecs[j]) && continue
+                        d = abs(j - i)
+                        if d < best_d
+                            best_d = d
+                            src = j
+                        end
+                    end
+                end
+                grid[i] = bootup(byte_vecs[src], ncols)
             end
             return grid
         end
@@ -182,6 +200,12 @@ function (@main)(_)
         # would be in-season at Q4 of the last year but their vehicleid isn't
         # in regout.fe (2020 data is incomplete), so sweep_δ! → pred_regout
         # would return `missing` and blow up on Float64 conversion.
+        @info "Booster-family populations" n_price = length(price_boosters) n_st_int = length(
+            st_int_boosters
+        ) n_st_own = length(st_own_boosters) n_st_cross = length(st_cross_boosters) n_j = length(
+            model.product_lookup.j
+        )
+
         usable_vks = intersect(
             Set(keys(price_boosters)),
             Set(keys(st_int_boosters)),
