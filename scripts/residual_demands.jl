@@ -26,8 +26,40 @@ using Distributed
         push!(keep, vk)
     end
 
-    # Persistent eviction: remove every non-kept (t, j, f) triple from the
-    # demand model model-wide before any residual_demand call. This makes the
+    # First eviction: singleton-FE tuples. FixedEffectModels writes `missing`
+    # to fe_dealer_uid / fe_vehicleid for iteratively-dropped singleton groups.
+    # pred_regout (called by sweep_δ! below) reads those FEs — if any survives,
+    # sweep_δ! throws `MethodError: Cannot convert Missing to Float64`. Must
+    # happen BEFORE the kept-trims eviction so the singleton-FE + AR-sweep pass
+    # runs on a self-consistent product set.
+    let fe_df = cf.regout.fe
+        identifiable_vehicleids = Set{String}(
+            row.vehicleid for row in eachrow(fe_df) if !ismissing(row.fe_vehicleid)
+        )
+        identifiable_dealers = Set{UUID}(
+            row.dealer_uid for row in eachrow(fe_df) if !ismissing(row.fe_dealer_uid)
+        )
+        vk_to_vehicleid(vk) = string(vk[2], "_", vk[3], "_", Float32(vk[4]))
+        n_evicted = 0
+        for (tjf_key, _) in collect(pairs(cf.model.product_lookup.tjf))
+            (t_key, j_key, f_key) = tjf_key
+            bad_dealer = f_key ∉ identifiable_dealers
+            bad_vk = vk_to_vehicleid(j_key) ∉ identifiable_vehicleids
+            (bad_dealer || bad_vk) || continue
+            h = apply!(
+                cf, Demand.ModelDelete(vehicle = j_key, quarter = t_key, dealer_uid = f_key)
+            )
+            ismissing(h) || (n_evicted += 1)
+        end
+        Supply.invalidate_tf_to_j_lookup!()
+        for t_sweep in unique(k[1] for k in keys(cf.model.product_lookup.tjf))
+            Demand.sweep_δ!(cf, t_sweep)
+        end
+        Demand.refresh!(cf)
+        @info "Evicted singleton-FE (t,j,f) triples" n_evicted
+    end
+
+    # Second eviction: non-kept (t, j, f) triples model-wide. This makes the
     # residual fit and every downstream booster reflect the same reduced-
     # product world that BBL forward simulation runs in — no world-A vs world-B
     # mismatch between training data and the sim.
@@ -41,22 +73,11 @@ using Distributed
             ismissing(h) || (n_evicted += 1)
         end
         Supply.invalidate_tf_to_j_lookup!()
-        @info "Persistent eviction of non-kept (t,j,f) triples" n_evicted n_kept_vks = length(keep)
-    end
-
-    # Re-sweep δ per quarter under the Ackerberg-Rysman correction. Persistent
-    # eviction shrinks J_t (live-product count) in every block, and pred_regout
-    # is trained with log(J) as a covariate — so the pre-eviction δ values are
-    # stale for the new J_t. Without this sweep, expected_demand inside
-    # residual_demand reads δ that reflects the old market size, contaminating
-    # every downstream booster. ModelDelete's per-tweak δ shift is a linear
-    # offset only; only pred_regout does the full AR correction.
-    let quarters = unique(k[1] for k in keys(cf.model.product_lookup.tjf))
-        for t in quarters
-            Demand.sweep_δ!(cf, t)
+        for t_sweep in unique(k[1] for k in keys(cf.model.product_lookup.tjf))
+            Demand.sweep_δ!(cf, t_sweep)
         end
         Demand.refresh!(cf)
-        @info "Swept δ under AR correction" n_quarters = length(quarters)
+        @info "Persistent eviction of non-kept (t,j,f) triples" n_evicted n_kept_vks = length(keep)
     end
 
     # Canonical kept-VK ordering — column layout for the K × (K+1) output
