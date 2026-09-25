@@ -44,6 +44,21 @@ using Distributed
         @info "Persistent eviction of non-kept (t,j,f) triples" n_evicted n_kept_vks = length(keep)
     end
 
+    # Re-sweep δ per quarter under the Ackerberg-Rysman correction. Persistent
+    # eviction shrinks J_t (live-product count) in every block, and pred_regout
+    # is trained with log(J) as a covariate — so the pre-eviction δ values are
+    # stale for the new J_t. Without this sweep, expected_demand inside
+    # residual_demand reads δ that reflects the old market size, contaminating
+    # every downstream booster. ModelDelete's per-tweak δ shift is a linear
+    # offset only; only pred_regout does the full AR correction.
+    let quarters = unique(k[1] for k in keys(cf.model.product_lookup.tjf))
+        for t in quarters
+            Demand.sweep_δ!(cf, t)
+        end
+        Demand.refresh!(cf)
+        @info "Swept δ under AR correction" n_quarters = length(quarters)
+    end
+
     # Canonical kept-VK ordering — column layout for the K × (K+1) output
     # matrix and the reference `products` list every downstream stage indexes
     # into. Sorted so the ordering is deterministic across runs.

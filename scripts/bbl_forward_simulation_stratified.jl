@@ -85,6 +85,15 @@ function (@main)(_)
             bad_vk && (n_evicted_vehicleid += 1)
         end
         Supply.invalidate_tf_to_j_lookup!()
+        # Re-sweep δ per quarter under the Ackerberg-Rysman correction: J_t
+        # shrunk, and pred_regout is trained with log(J) as a covariate. Every
+        # persistent ModelDelete block must be followed by a full sweep — the
+        # per-tweak δ shift is only the linear PriceMultiply offset, never the
+        # AR log(J) re-fit.
+        for t_sweep in unique(k[1] for k in keys(cf.model.product_lookup.tjf))
+            Demand.sweep_δ!(cf, t_sweep)
+        end
+        Demand.refresh!(cf)
         @info "Evicted singleton-FE tuples from DemandModel" n_evicted n_evicted_dealer n_evicted_vehicleid
 
         # -----------------------------------------------------------------------------
@@ -257,6 +266,10 @@ function (@main)(_)
             n_evicted_usable += 1
         end
         Supply.invalidate_tf_to_j_lookup!()
+        for t_sweep in unique(k[1] for k in keys(cf.model.product_lookup.tjf))
+            Demand.sweep_δ!(cf, t_sweep)
+        end
+        Demand.refresh!(cf)
         intermed = Supply.tf_to_j_lookup(model)
         @info "Evicted non-usable VKs from DemandModel" n_evicted_usable
 

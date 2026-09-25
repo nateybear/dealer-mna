@@ -226,6 +226,13 @@ function (@main)(_)
             )
         end
         Supply.invalidate_tf_to_j_lookup!()
+        # Ackerberg-Rysman correction: J_t shrank, so pred_regout's log(J)
+        # covariate makes every stored δ stale. Sweep every quarter before any
+        # downstream expected_demand / residual_demand read runs.
+        for t_sweep in unique(k[1] for k in keys(cf.model.product_lookup.tjf))
+            Demand.sweep_δ!(cf, t_sweep)
+        end
+        Demand.refresh!(cf)
 
         # Snapshot state_lookup HERE — mirrors bbl_forward_simulation.jl:79-80,
         # captured after first eviction but before the usable_vks eviction so
@@ -261,6 +268,11 @@ function (@main)(_)
             )
         end
         Supply.invalidate_tf_to_j_lookup!()
+        # AR correction — see first-eviction sweep above.
+        for t_sweep in unique(k[1] for k in keys(cf.model.product_lookup.tjf))
+            Demand.sweep_δ!(cf, t_sweep)
+        end
+        Demand.refresh!(cf)
 
         # ---------------------------------------------------------------------
         # dealers — mirrors bbl_forward_simulation.jl:207. Read off the
