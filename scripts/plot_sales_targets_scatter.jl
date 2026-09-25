@@ -11,9 +11,9 @@ function (@main)(_)
         demand_model = Demand.DemandModel(;
             JLD2.load_object(snakemake.input["model_frames"])...
         )
-        state_matrix = JLD2.load_object(snakemake.input["state_matrix"])
-        intermed = Supply.tf_to_j_lookup(demand_model)
-        state_lookup = Dict(k => i for (i, k) in enumerate(keys(intermed)))
+        _rd = JLD2.load_object(snakemake.input["state_matrix"])
+        state_matrix = _rd.matrix
+        state_lookup = Dict(k => i for (i, k) in enumerate(_rd.tf_keys))
 
         compliance = read_arrow(snakemake.input["compliance"])
         fords = read_arrow(snakemake.input["fords"])
