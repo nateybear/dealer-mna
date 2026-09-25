@@ -12,7 +12,8 @@ using Distributed
     import Base: size  # disambiguate against Cleaner.size (re-exported via DealerMnA)
 
     model = DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
-    state_matrix = JLD2.load_object("data/residual_demand.jld2")
+    _rd = JLD2.load_object("data/residual_demand.jld2")
+    state_matrix = _rd.matrix
 
     # Sales-target booster + τ (from data_sales_target_estimation) — used to
     # compute log φ_{t,f} as an additional conditioning feature for prices.
@@ -23,7 +24,7 @@ using Distributed
     # t−1 in compliance.arrow). Rows without a lagged compliance entry drop
     # out — dealer's first observed quarter.
     @memoize function logphi_lookup()
-        state_lookup = Dict(k => i for (i, k) in enumerate(keys(Supply.tf_to_j_lookup(model))))
+        state_lookup = Dict(k => i for (i, k) in enumerate(_rd.tf_keys))
         tlag_of(t) = t[2] == 1 ? (t[1] - 1, 4) : (t[1], t[2] - 1)
 
         # Sales-target booster was trained with ι_lag as a hard 1{p_compliant > 0.5}
@@ -73,16 +74,21 @@ using Distributed
     end
 
     @memoize function j_to_tf_lookup()
+        # Iterate the model's tf_to_j_lookup but key row indices off `_rd.tf_keys`
+        # (persistent-eviction row layout). Extra (t, f) entries in `base` that
+        # aren't in the residual-demand ordering are dropped along with (t, f)
+        # pairs that lack a log-φ prediction. `kept_set` restricts js to the
+        # canonical product universe.
         base = Supply.tf_to_j_lookup(model)
-        idx_dict = Dict(k => i for (i, k) in enumerate(keys(base)))
+        idx_dict = Dict(k => i for (i, k) in enumerate(_rd.tf_keys))
+        kept_set = Set(_rd.kept_vks)
         φ_lookup = logphi_lookup()
         out = Dict{VehicleKey, Vector{Tuple{Tuple{QuarterKey, UUID}, Int64}}}()
         for (tf, js) in base
-            # Drop (t, f) pairs where log φ_{t, f} is unavailable — dealer's
-            # first observed quarter has no lagged compliance to feed the
-            # sales-target booster.
+            haskey(idx_dict, tf) || continue
             haskey(φ_lookup, tf) || continue
             for j in js
+                j ∈ kept_set || continue
                 if haskey(out, j)
                     push!(out[j], (tf, idx_dict[tf]))
                 else
@@ -150,27 +156,11 @@ using Distributed
 end
 
 function (@main)(_)
-    # Kept-trim filter: only fit boosters for VehicleKeys whose (model, extra)
-    # cleared the share cutoff in scripts/kept_trims.jl. Prevents unreliable
-    # fits on rare trims and lets BBL forward simulation assume every drawn VK
-    # has a booster.
-    kept_pairs = Set(
-        (row.model, row.extra) for row in eachrow(read_arrow("data/kept_trims.arrow"))
-    )
-    price_table = read_arrow("data/price_table.arrow")
-    vk_to_extra = Dict{VehicleKey, String}()
-    for row in eachrow(price_table)
-        vk = (row.make, row.model, row.model_year, Float32(row.trim_rank))
-        vk_to_extra[vk] = row.extra
-    end
-    all_js = collect(keys(model.product_lookup.j))
-    js = [
-        j for j in all_js if
-        haskey(vk_to_extra, j) && (j[2], vk_to_extra[j]) ∈ kept_pairs
-    ]
-    @info "Filtered VK universe" n_kept = length(js) n_dropped = length(all_js) - length(
-        js
-    )
+    # Kept-VK universe comes straight from residual_demand.jld2, which was
+    # produced under the kept-trims filter — every VK here already cleared
+    # the share cutoff, so no further filtering is needed.
+    js = _rd.kept_vks
+    @info "Kept VK universe" n_kept = length(js) n_all = length(model.product_lookup.j)
 
     fitted = pmap(fit_prices, js)
     # Layout per VK: one Vector{UInt8} per quantile level in Supply.QUANTILE_LEVELS,

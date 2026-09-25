@@ -10,10 +10,6 @@ const XGB_DEFAULT_PARAMS = (
     max_depth = 3,
     eta = 0.15,
     lambda = 1.0,
-    # min_child_weight = 0.1 lets small-Hessian rows (custom mixture grads
-    # where H = p(1-p) or the ρ̃ chain-rule factor) form their own leaves.
-    # max_bin = 256 gives finer per-feature threshold resolution — makes
-    # each split more expressive without adding depth.
     min_child_weight = 1.0f-1,
     tree_method = "hist",
     subsample = 0.8,

@@ -62,7 +62,7 @@ function seed!(cf::Counterfactual)
 end
 
 """
-    residual_demand(cf, dealer_uid, quarter; return_draws=false, keep=nothing)
+    residual_demand(cf, dealer_uid, quarter; return_draws=false, keep=nothing, products=nothing)
 
 Perturbs SIM_SIZE prices for the dealer's assortment at `(quarter, dealer_uid)`
 and OLS-fits per-product intercept + own-/cross-price coefficients. Order is
@@ -72,15 +72,21 @@ and OLS-fits per-product intercept + own-/cross-price coefficients. Order is
 Reads the assortment via `tf_to_j_lookup(cf)` after invalidating the memoize
 cache, so tweaks applied by the caller before the call are reflected. Pass
 `keep::Set{VehicleKey}` to restrict the perturbed assortment to those VKs;
-non-kept products are ModelDelete'd here and restored before returning.
+non-kept products are ModelDelete'd here and restored before returning. Pass
+`products::AbstractVector{VehicleKey}` to fix the row/column ordering of the
+returned matrix — the caller can then interpret slice indices in a stable
+kept-VK layout independent of `keys(product_lookup.j)`'s Dict order. Defaults
+to `collect(keys(product_lookup.j))` for backward compat.
 """
 function residual_demand(
     cf::Counterfactual, dealer_uid::UUID, quarter;
     return_draws::Bool = false,
     keep::Union{Nothing, Set{VehicleKey}} = nothing,
+    products::Union{Nothing, AbstractVector{VehicleKey}} = nothing,
 )
     invalidate_tf_to_j_lookup!()
-    products = collect(keys(cf.model.product_lookup.j))
+    products = products === nothing ? collect(keys(cf.model.product_lookup.j)) : products
+    prod_pos = Dict(p => i for (i, p) in enumerate(products))
     out = fill(NaN32, (length(products), length(products) + 1))
 
     delete_handles = NamedTuple[]
@@ -99,7 +105,7 @@ function residual_demand(
 
     prices = zeros(SIM_SIZE, length(carried_products))
     demands = zeros(SIM_SIZE, length(carried_products))
-    product_idxs = [findfirst(==(j), products) for j in carried_products]
+    product_idxs = [prod_pos[j] for j in carried_products]
     seed!(cf)
     for i in 1:SIM_SIZE
         handles = map(product_idxs) do j

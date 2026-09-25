@@ -39,7 +39,15 @@ function (@main)(_)
         price_densities = JLD2.load_object(snakemake.input["price_densities"])
         state_transition = JLD2.load_object(snakemake.input["state_transition"])
         compliance_arrow = read_arrow(snakemake.input["compliance"])
-        state_matrix_obs = JLD2.load_object(snakemake.input["residual_demand"])
+        _rd = JLD2.load_object(snakemake.input["residual_demand"])
+        state_matrix_obs = _rd.matrix
+        # kept_vks / tf_keys are the canonical column / row ordering baked
+        # into state_matrix_obs. `products` and `state_lookup` below key off
+        # these — not the demand model's Dict-order — so every downstream
+        # slice into state_matrix_obs, state_exp_mat, and residual_demand
+        # outputs lines up.
+        kept_vks = _rd.kept_vks
+        kept_set = Set(kept_vks)
         price_table = read_arrow(snakemake.input["price_table"])
 
         # -----------------------------------------------------------------------------
@@ -83,8 +91,8 @@ function (@main)(_)
         # Indices and lookups
         # -----------------------------------------------------------------------------
         intermed = Supply.tf_to_j_lookup(model)
-        state_lookup = Dict(k => i for (i, k) in enumerate(keys(intermed)))
-        products = collect(keys(model.product_lookup.j))
+        state_lookup = Dict(k => i for (i, k) in enumerate(_rd.tf_keys))
+        products = kept_vks
         J = length(products)
         prod_index = Dict(p => i for (i, p) in enumerate(products))
         ncols_state = size(state_matrix_obs, 2)
@@ -505,7 +513,7 @@ function (@main)(_)
                 new_iota = rand(rng) < p_iota
 
                 s_actual, pert_prices, pert_demands = Supply.residual_demand(
-                    cf, f, t; return_draws = true
+                    cf, f, t; return_draws = true, products = kept_vks
                 )
 
                 # `assortment_by_dealer[f]` and `prices_by_dealer[f]` are in

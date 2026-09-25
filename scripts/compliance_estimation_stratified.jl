@@ -44,7 +44,8 @@ using Distributed
 
     demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
 
-    state_matrix = JLD2.load_object("data/residual_demand.jld2")
+    _rd = JLD2.load_object("data/residual_demand.jld2")
+    state_matrix = _rd.matrix
 
     function prepare_dealers!(dealer_demographics)
         M = Matrix(dealer_demographics[!, DEMOS])
@@ -55,8 +56,7 @@ using Distributed
     end
 
     @memoize function state_lookup()
-        intermed = Supply.tf_to_j_lookup(demand_model)
-        return Dict(k => i for (i, k) in enumerate(keys(intermed)))
+        return Dict(k => i for (i, k) in enumerate(_rd.tf_keys))
     end
 
     function X_matrix(cars)

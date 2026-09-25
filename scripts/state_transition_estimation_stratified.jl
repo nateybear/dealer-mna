@@ -15,35 +15,29 @@ using Distributed
     BLAS.set_num_threads(1)
 
     model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
-    state_matrix = JLD2.load_object("data/residual_demand.jld2")
-
-    intermed = Supply.tf_to_j_lookup(model)
-    state_lookup = Dict(k => i for (i, k) in enumerate(keys(intermed)))
-    tf_keys = collect(keys(intermed))
-
-    products = collect(keys(model.product_lookup.j))
+    _rd = JLD2.load_object("data/residual_demand.jld2")
+    state_matrix = _rd.matrix
+    # kept_vks is the canonical product ordering baked into state_matrix by
+    # residual_demands.jl. Every j_idx here indexes into kept_vks (K = ~131),
+    # not into the demand model's full 193-VK keyset. tf_keys is the row
+    # ordering; the un-evicted model's tf_to_j_lookup can have extra (t, f)
+    # pairs, so we key state_lookup off _rd.tf_keys directly.
+    products = _rd.kept_vks
     J = length(products)
     prod_index = Dict(p => i for (i, p) in enumerate(products))
+    kept_set = Set(products)
 
-    # Kept-trim filter: fit boosters only for VehicleKeys whose (model, extra)
-    # cleared the share cutoff, and only train cross-price predictions on
-    # partners that also cleared it. Same filter as price_density_estimation
-    # and residual_demands so BBL sees a consistent VK universe.
-    _kept_pairs = Set(
-        (row.model, row.extra) for
-        row in eachrow(read_arrow("data/kept_trims.arrow"))
+    state_lookup = Dict(k => i for (i, k) in enumerate(_rd.tf_keys))
+    tf_keys = _rd.tf_keys
+    intermed_raw = Supply.tf_to_j_lookup(model)
+    intermed = Dict(
+        k => VehicleKey[j for j in get(intermed_raw, k, VehicleKey[]) if j ∈ kept_set]
+        for k in tf_keys
     )
-    _price_table = read_arrow("data/price_table.arrow")
-    _vk_to_extra = Dict{VehicleKey, String}()
-    for row in eachrow(_price_table)
-        _vk_to_extra[(row.make, row.model, row.model_year, Float32(row.trim_rank))] =
-            row.extra
-    end
-    kept_vks = Set(
-        j for j in keys(model.product_lookup.j) if
-        haskey(_vk_to_extra, j) && (j[2], _vk_to_extra[j]) ∈ _kept_pairs
-    )
-    kept_j_idxs = sort([prod_index[j] for j in kept_vks])
+
+    # Every kept VK is a fit target — the kept-trims filter is already applied
+    # at the residual-demand stage, so no further filtering here.
+    kept_j_idxs = collect(1:J)
 
     # Column-major flat layout for the J × (J+1) residual_demand matrix per row:
     #   intercept for product j: column j
@@ -70,7 +64,8 @@ using Distributed
             # Restrict cross-price partners to kept VKs — BBL only ever
             # samples kept assortments, so unfiltered partners would train
             # on rows the sim can't produce.
-            push!(carried, [prod_index[k] for k in js_at_t if k ∈ kept_vks])
+            # js_at_t is already kept-filtered by intermed's construction.
+            push!(carried, [prod_index[k] for k in js_at_t])
         end
         return rows_t, rows_tlag, carried
     end
