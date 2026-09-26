@@ -6,7 +6,7 @@ function (@main)(_)
     snakemake!()
     with_logging() do
         fits = JLD2.load_object(snakemake.input["compliance_fits_final"])
-        state_matrix = JLD2.load_object(snakemake.input["residual_demand"])
+        state_matrix = JLD2.load_object(snakemake.input["residual_demand"]).matrix
         @info "Loaded" n_groups = length(fits) n_state_rows = size(state_matrix, 1) n_state_cols = size(
             state_matrix, 2
         )

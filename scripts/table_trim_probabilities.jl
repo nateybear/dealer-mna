@@ -27,7 +27,7 @@ fmt3(x) = @sprintf("%.3f", x)
 function (@main)(_)
     snakemake!()
     with_logging() do
-        state_matrix = JLD2.load_object(snakemake.input["state_matrix"])
+        state_matrix = JLD2.load_object(snakemake.input["state_matrix"]).matrix
         fits = JLD2.load_object(snakemake.input["fits"])
         fords = read_arrow(snakemake.input["fords"])
 

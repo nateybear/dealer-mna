@@ -46,7 +46,7 @@ end
 function (@main)(_)
     snakemake!()
     with_logging() do
-        state_matrix = JLD2.load_object(snakemake.input["state_matrix"])
+        state_matrix = JLD2.load_object(snakemake.input["state_matrix"]).matrix
         fits = JLD2.load_object(snakemake.input["fits"])
 
         # State DMatrix is shared across all trims (per-car boosters use only
