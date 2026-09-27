@@ -386,7 +386,8 @@ end
         f_weights = Float64[get(dealer_share, f, 0.0) for f in index.dealer_cols]
         t_weights = Float64[q_share[q] for q in 1:4]
         avg_price_dollars = price_n > 0 ? price_sum / price_n : NaN
-        return w_weights, f_weights, t_weights, n_total, avg_price_dollars, price_n
+	med_price_dollars = median(skipmissing(filtered.vehsalesprice))
+        return w_weights, f_weights, t_weights, n_total, avg_price_dollars, med_price_dollars, price_n
     end
 
     # Build the sales-weighted mean marginal-cost objective as a JuMP AffExpr.
@@ -454,7 +455,7 @@ function (@main)(_)
     @everywhere workers() set_sigma_for_diag!($σ)
 
     @info "Step 4: sales-weighted best/worst counterfactual solves"
-    w_weights, f_weights, t_weights, n_sales, avg_price_dollars, n_priced =
+    w_weights, f_weights, t_weights, n_sales, avg_price_dollars, med_price_dollars, n_priced =
         @fetch compute_sales_weights()
     @info "Sales-weight summary" n_sales n_priced n_vks_with_share = count(>(0), w_weights) n_dealers_with_share = count(>(0), f_weights) w_share_sum = sum(w_weights) f_share_sum = sum(f_weights) t_share_sum = sum(t_weights)
 
@@ -462,7 +463,8 @@ function (@main)(_)
     # directly from model_frames.jld2 without materializing the full DemandModel.
     price_scale = Float64(JLD2.load_object("data/model_frames.jld2").price_scale)
     avg_price_std = avg_price_dollars / price_scale
-    @info "Sales-weighted average price" avg_price_dollars avg_price_std price_scale
+    med_price_std = med_price_dollars / price_scale
+    @info "Sales-weighted average price" avg_price_dollars avg_price_std price_scale med_price_dollars med_price_std
 
     best_case = @fetch solve_extreme_case(MIN_SENSE, w_weights, f_weights, t_weights)
     worst_case = @fetch solve_extreme_case(MAX_SENSE, w_weights, f_weights, t_weights)
@@ -472,9 +474,9 @@ function (@main)(_)
     # Sales-weighted markup range: avg_price − mc, bounded by best/worst mc.
     # (best_case has the LOWEST mc → LARGEST implied markup; worst_case is the
     # tightest markup.)
-    markup_upper_std = avg_price_std - best_case.obj
-    markup_lower_std = avg_price_std - worst_case.obj
-    @info "Sales-weighted markup implied by identified set" markup_lower_dollars = markup_lower_std * price_scale markup_upper_dollars = markup_upper_std * price_scale markup_lower_std markup_upper_std pct_of_avg_price_lower = markup_lower_std / avg_price_std pct_of_avg_price_upper = markup_upper_std / avg_price_std
+    markup_upper_std = med_price_std - best_case.obj
+    markup_lower_std = med_price_std - worst_case.obj
+    @info "Sales-weighted markup implied by identified set" markup_lower_dollars = markup_lower_std * price_scale markup_upper_dollars = markup_upper_std * price_scale markup_lower_std markup_upper_std pct_of_avg_price_lower = markup_lower_std / med_price_std pct_of_avg_price_upper = markup_upper_std / med_price_std
 
     @info "Step 5: bounding-box LPs on weighted problem" n_bounds = 2 * (n_j + n_f + n_t)
 
@@ -517,7 +519,7 @@ function (@main)(_)
             w = w_bounds, f = f_bounds, t = t_bounds,
             best_case, worst_case,
             w_weights, f_weights, t_weights, n_sales,
-            avg_price_dollars, avg_price_std, price_scale,
+            avg_price_dollars, avg_price_std, med_price_dollars, med_price_scale, price_scale,
             markup_lower_std, markup_upper_std,
             c_unweighted, c_weighted, σ,
         ),
