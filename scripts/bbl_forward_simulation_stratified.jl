@@ -11,11 +11,10 @@ import Base: size  # disambiguate against Cleaner.size (re-exported via DealerMn
 
 BLAS.set_num_threads(1)
 
-# Coordinated uniform price multipliers applied to a dealer's whole assortment,
-# separate from the per-product `_PRICE_SEEDS` used to fit residual demand.
-# These shift ALL prices together → probes substitution to the outside good,
-# which per-product independent wiggles absorb into within-dealer cross-substitution.
-const COORDINATED_SHIFTS = Float32[0.75, 0.9, 0.95, 0.98, 0.99, 1.01, 1.02, 1.05, 1.1, 1.25]
+# Coordinated uniform shifts live in Supply.COORDINATED_SHIFTS (single source of
+# truth shared with bbl_matrix.jl and bbl_estimation_stratified.jl). Rebind as a
+# local const for the tight sim loops that reference it.
+const COORDINATED_SHIFTS = Supply.COORDINATED_SHIFTS
 
 function (@main)(_)
     snakemake!()

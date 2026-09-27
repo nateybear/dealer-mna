@@ -7,6 +7,13 @@ using DataStructures
 const _PRICE_SEEDS = Ref{Matrix{Float32}}()
 const SIM_SIZE = 50
 
+# Coordinated uniform price multipliers applied to a dealer's whole assortment
+# in BBL forward simulation. Single source of truth — bbl_forward_simulation
+# emits `length(COORDINATED_SHIFTS)` scenarios, and bbl_matrix / bbl_estimation
+# derive N_SHIFTS from `length(Supply.COORDINATED_SHIFTS)` so the counts can't
+# drift.
+const COORDINATED_SHIFTS = Float32[0.75, 0.9, 0.95, 0.98, 0.99, 1.01, 1.02, 1.05, 1.1, 1.25]
+
 """
     tf_to_j_lookup(model_or_cf) → OrderedDict{(QuarterKey, UUID), Vector{VehicleKey}}
 

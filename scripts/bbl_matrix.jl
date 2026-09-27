@@ -11,10 +11,9 @@ const T_START = QuarterKey[(y, q) for y in 2017:2018 for q in 1:4]
 
 const N_SCENARIOS = Supply.SIM_SIZE
 
-# Must match `COORDINATED_SHIFTS` in scripts/bbl_forward_simulation.jl.
-# Kept as a plain const rather than an include! to avoid pulling that script's
-# top-level `using` into this module. Update both if you change one.
-const N_SHIFTS = 8
+# Single source of truth is Supply.COORDINATED_SHIFTS — derived here so any
+# change to the coord-shift list flows through automatically.
+const N_SHIFTS = length(Supply.COORDINATED_SHIFTS)
 
 increment((y, q)) =
     let new_q = (q % 4) + 1
