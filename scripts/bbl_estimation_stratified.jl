@@ -191,7 +191,7 @@ end
     # Row i inside block bi's stripe corresponds to (tf_idx, k) via
     #   tf_idx = ((i-1) mod n_tf) + 1, k = ((i-1) ÷ n_tf) + 1.
     # k = rank position for sorted blocks, raw scenario index for raw blocks.
-    row_meta = let meta = Vector{NamedTuple{(:block, :t, :k), Tuple{Symbol, QuarterKey, Int}}}()
+    row_meta = let meta = Vector{NamedTuple{(:block, :t, :k), Tuple{Symbol, Demand.QuarterKey, Int}}}()
         for (bi, (name, n_scen, _lo, _hi, _sorted)) in enumerate(block_specs)
             for i in 1:(n_tf * n_scen)
                 tf_idx = ((i - 1) % n_tf) + 1
@@ -291,10 +291,10 @@ end
     function attribute_binding(ε_vals::AbstractVector)
         max_ε = maximum(ε_vals)
         if max_ε < 1e-12
-            return Tuple{Tuple{Symbol, QuarterKey}, Int}[], 0, max_ε
+            return Tuple{Tuple{Symbol, Demand.QuarterKey}, Int}[], 0, max_ε
         end
         threshold = 0.9 * max_ε
-        counts = Dict{Tuple{Symbol, QuarterKey}, Int}()
+        counts = Dict{Tuple{Symbol, Demand.QuarterKey}, Int}()
         n_binding = 0
         for i in eachindex(ε_vals)
             ε_vals[i] >= threshold || continue
@@ -346,14 +346,14 @@ function (@main)(_)
         pmap(1:n) do k
             x = model[xs][k]
             lo, lo_bindings, lo_n = if skip_min[k]
-                (-Inf, Tuple{Tuple{Symbol, QuarterKey}, Int}[], 0)
+                (-Inf, Tuple{Tuple{Symbol, Demand.QuarterKey}, Int}[], 0)
             else
                 v, _, εs = solve_bound_with_epsilons!(MIN_SENSE, x)
                 bindings, n_binding, _max_ε = attribute_binding(εs)
                 (v, bindings, n_binding)
             end
             hi, hi_bindings, hi_n = if skip_max[k]
-                (Inf, Tuple{Tuple{Symbol, QuarterKey}, Int}[], 0)
+                (Inf, Tuple{Tuple{Symbol, Demand.QuarterKey}, Int}[], 0)
             else
                 v, _, εs = solve_bound_with_epsilons!(MAX_SENSE, x)
                 bindings, n_binding, _max_ε = attribute_binding(εs)
