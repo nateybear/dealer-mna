@@ -315,6 +315,89 @@ end
             ),
             ", ",
         )
+
+    # Per-j / per-f / per-quarter-of-year sales-share vectors aligned to
+    # index.vehicle_cols / index.dealer_cols / 1:4. Restricted to the BBL
+    # panel's (t, f, j) universe so the objective is defined only on the
+    # (w, f, t) space the LP actually identifies. Years 2017–2019 mirror the
+    # panel's coverage: T_START ∈ 2017Q1..2018Q4, each row walks 5 quarters
+    # forward → last touched quarter is 2019Q4.
+    function compute_sales_weights()
+        fords = read_arrow("data/arrow/fords.arrow")
+        vehicle_set = Set(index.vehicle_cols)
+        dealer_set = Set(index.dealer_cols)
+        filtered = subset(
+            fords,
+            [:make, :model, :model_year, :trim_rank] => ByRow(
+                (mk, m, y, r) -> (mk, m, y, Float32(r)) ∈ vehicle_set
+            ),
+            :dealer_uid => ByRow(∈(dealer_set)),
+            :t => ByRow(x -> 2017 <= Dates.year(x) <= 2019),
+        )
+        n_total = nrow(filtered)
+        n_total == 0 && error("No fords rows match the BBL universe — check filters")
+
+        vk_share = Dict{Demand.VehicleKey, Float64}()
+        dealer_share = Dict{UUID, Float64}()
+        q_share = zeros(Float64, 4)
+        for row in eachrow(filtered)
+            vk = (row.make, row.model, row.model_year, Float32(row.trim_rank))
+            vk_share[vk] = get(vk_share, vk, 0.0) + 1.0
+            dealer_share[row.dealer_uid] = get(dealer_share, row.dealer_uid, 0.0) + 1.0
+            q_share[Dates.quarterofyear(row.t)] += 1.0
+        end
+        for k in keys(vk_share)
+            vk_share[k] /= n_total
+        end
+        for k in keys(dealer_share)
+            dealer_share[k] /= n_total
+        end
+        q_share ./= n_total
+
+        w_weights = Float64[get(vk_share, j, 0.0) for j in index.vehicle_cols]
+        f_weights = Float64[get(dealer_share, f, 0.0) for f in index.dealer_cols]
+        t_weights = Float64[q_share[q] for q in 1:4]
+        return w_weights, f_weights, t_weights, n_total
+    end
+
+    # Build the sales-weighted mean marginal-cost objective as a JuMP AffExpr.
+    #   objective = Σ_j w_weights[j] · w[j] + Σ_f f_weights[f] · f[f] + Σ_q t_weights[q] · t[q]
+    # In LP identified-set terms this is the sales-weighted average cost per
+    # unit at (j, f, quarter-of-year); min/max over the polytope gives the
+    # best/worst-case bounds for pricing counterfactuals.
+    function sales_weighted_objective(w_weights, f_weights, t_weights)
+        expr = AffExpr(0.0)
+        for j in 1:n_j
+            w_weights[j] == 0 && continue
+            add_to_expression!(expr, w_weights[j], model[:w][j])
+        end
+        for k in 1:n_f
+            f_weights[k] == 0 && continue
+            add_to_expression!(expr, f_weights[k], model[:f][k])
+        end
+        for k in 1:n_t
+            t_weights[k] == 0 && continue
+            add_to_expression!(expr, t_weights[k], model[:t][k])
+        end
+        return expr
+    end
+
+    # One-shot best/worst counterfactual solve: build the sales-weighted
+    # objective, run the LP, attribute binding constraints, and return a
+    # self-contained NamedTuple (all master-side references only).
+    function solve_extreme_case(sense, w_weights, f_weights, t_weights)
+        obj = sales_weighted_objective(w_weights, f_weights, t_weights)
+        obj_val, all_vals, εs = solve_bound_with_epsilons!(sense, obj)
+        bindings, n_binding, max_ε = attribute_binding(εs)
+        top_str = format_binding_summary(bindings)
+        return (;
+            obj = obj_val,
+            w = all_vals[1:n_j],
+            f = all_vals[(n_j + 1):(n_j + n_f)],
+            t = all_vals[(n_j + n_f + 1):(n_j + n_f + n_t)],
+            bindings, n_binding, max_ε, top_str,
+        )
+    end
 end
 
 function (@main)(_)
@@ -340,7 +423,16 @@ function (@main)(_)
     @everywhere workers() set_start_values!($start_vals_weighted)
     @everywhere workers() add_weighted_sse_constraint!($c_weighted, $σ)
 
-    @info "Step 4: bounding-box LPs on weighted problem" n_bounds = 2 * (n_j + n_f + n_t)
+    @info "Step 4: sales-weighted best/worst counterfactual solves"
+    w_weights, f_weights, t_weights, n_sales = @fetch compute_sales_weights()
+    @info "Sales-weight summary" n_sales n_vks_with_share = count(>(0), w_weights) n_dealers_with_share = count(>(0), f_weights) w_share_sum = sum(w_weights) f_share_sum = sum(f_weights) t_share_sum = sum(t_weights)
+
+    best_case = @fetch solve_extreme_case(MIN_SENSE, w_weights, f_weights, t_weights)
+    worst_case = @fetch solve_extreme_case(MAX_SENSE, w_weights, f_weights, t_weights)
+    @info "Best case (min sales-weighted marginal cost)" obj = best_case.obj n_binding = best_case.n_binding top = best_case.top_str
+    @info "Worst case (max sales-weighted marginal cost)" obj = worst_case.obj n_binding = worst_case.n_binding top = worst_case.top_str
+
+    @info "Step 5: bounding-box LPs on weighted problem" n_bounds = 2 * (n_j + n_f + n_t)
 
     function bounds_for(name, xs, n, skip_min, skip_max)
         pmap(1:n) do k
@@ -379,6 +471,8 @@ function (@main)(_)
         "data/bbl_estimates_stratified.jld2",
         (;
             w = w_bounds, f = f_bounds, t = t_bounds,
+            best_case, worst_case,
+            w_weights, f_weights, t_weights, n_sales,
             c_unweighted, c_weighted, σ,
         ),
     )
