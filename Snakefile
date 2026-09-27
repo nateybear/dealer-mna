@@ -1626,7 +1626,8 @@ rule data_bbl_estimation_stratified:
     bbl_estimation_stratified.jl hardcodes the _stratified matrix + map paths
     (mirrors bbl_estimation.jl's hardcoded reads via Mmap.mmap). Also reads
     data/arrow/fords.arrow to compute sales-share weights for the best/worst
-    counterfactual solves.
+    counterfactual solves, and data/model_frames.jld2 for price_scale (the
+    dollars-to-std-price divisor used at demand-estimation load time).
     """
     input:
         "scripts/bbl_estimation_stratified.jl",
@@ -1636,6 +1637,7 @@ rule data_bbl_estimation_stratified:
         C_f="data/bbl_C_f_stratified.map",
         C_t="data/bbl_C_t_stratified.map",
         fords="data/arrow/fords.arrow",
+        model_frames="data/model_frames.jld2",
     output:
         "data/bbl_estimates_stratified.jld2",
     log:

@@ -360,11 +360,19 @@ end
         vk_share = Dict{Demand.VehicleKey, Float64}()
         dealer_share = Dict{UUID, Float64}()
         q_share = zeros(Float64, 4)
+        price_sum = 0.0
+        price_n = 0
         for row in eachrow(filtered)
             vk = (row.make, row.model, row.model_year, Float32(row.trim_rank))
             vk_share[vk] = get(vk_share, vk, 0.0) + 1.0
             dealer_share[row.dealer_uid] = get(dealer_share, row.dealer_uid, 0.0) + 1.0
             q_share[Dates.quarterofyear(row.t)] += 1.0
+            # vehsalesprice may be missing on a handful of rows — skip them so
+            # the mean is over sales with recorded prices, not a NaN.
+            if !ismissing(row.vehsalesprice)
+                price_sum += Float64(row.vehsalesprice)
+                price_n += 1
+            end
         end
         for k in keys(vk_share)
             vk_share[k] /= n_total
@@ -377,7 +385,8 @@ end
         w_weights = Float64[get(vk_share, j, 0.0) for j in index.vehicle_cols]
         f_weights = Float64[get(dealer_share, f, 0.0) for f in index.dealer_cols]
         t_weights = Float64[q_share[q] for q in 1:4]
-        return w_weights, f_weights, t_weights, n_total
+        avg_price_dollars = price_n > 0 ? price_sum / price_n : NaN
+        return w_weights, f_weights, t_weights, n_total, avg_price_dollars, price_n
     end
 
     # Build the sales-weighted mean marginal-cost objective as a JuMP AffExpr.
@@ -445,13 +454,27 @@ function (@main)(_)
     @everywhere workers() set_sigma_for_diag!($σ)
 
     @info "Step 4: sales-weighted best/worst counterfactual solves"
-    w_weights, f_weights, t_weights, n_sales = @fetch compute_sales_weights()
-    @info "Sales-weight summary" n_sales n_vks_with_share = count(>(0), w_weights) n_dealers_with_share = count(>(0), f_weights) w_share_sum = sum(w_weights) f_share_sum = sum(f_weights) t_share_sum = sum(t_weights)
+    w_weights, f_weights, t_weights, n_sales, avg_price_dollars, n_priced =
+        @fetch compute_sales_weights()
+    @info "Sales-weight summary" n_sales n_priced n_vks_with_share = count(>(0), w_weights) n_dealers_with_share = count(>(0), f_weights) w_share_sum = sum(w_weights) f_share_sum = sum(f_weights) t_share_sum = sum(t_weights)
+
+    # price_scale = std(observed prices) at demand-estimation load time. Read
+    # directly from model_frames.jld2 without materializing the full DemandModel.
+    price_scale = Float64(JLD2.load_object("data/model_frames.jld2").price_scale)
+    avg_price_std = avg_price_dollars / price_scale
+    @info "Sales-weighted average price" avg_price_dollars avg_price_std price_scale
 
     best_case = @fetch solve_extreme_case(MIN_SENSE, w_weights, f_weights, t_weights)
     worst_case = @fetch solve_extreme_case(MAX_SENSE, w_weights, f_weights, t_weights)
     @info "Best case (min sales-weighted marginal cost)" obj = best_case.obj n_binding = best_case.n_binding top = best_case.top_str
     @info "Worst case (max sales-weighted marginal cost)" obj = worst_case.obj n_binding = worst_case.n_binding top = worst_case.top_str
+
+    # Sales-weighted markup range: avg_price − mc, bounded by best/worst mc.
+    # (best_case has the LOWEST mc → LARGEST implied markup; worst_case is the
+    # tightest markup.)
+    markup_upper_std = avg_price_std - best_case.obj
+    markup_lower_std = avg_price_std - worst_case.obj
+    @info "Sales-weighted markup implied by identified set" markup_lower_dollars = markup_lower_std * price_scale markup_upper_dollars = markup_upper_std * price_scale markup_lower_std markup_upper_std pct_of_avg_price_lower = markup_lower_std / avg_price_std pct_of_avg_price_upper = markup_upper_std / avg_price_std
 
     @info "Step 5: bounding-box LPs on weighted problem" n_bounds = 2 * (n_j + n_f + n_t)
 
@@ -494,6 +517,8 @@ function (@main)(_)
             w = w_bounds, f = f_bounds, t = t_bounds,
             best_case, worst_case,
             w_weights, f_weights, t_weights, n_sales,
+            avg_price_dollars, avg_price_std, price_scale,
+            markup_lower_std, markup_upper_std,
             c_unweighted, c_weighted, σ,
         ),
     )
