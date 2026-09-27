@@ -334,7 +334,7 @@ function (@main)(_)
     end
 
     @info "Step 3: weighted feasibility"
-    c_weighted, start_vals_weighted = @fetch solve_bound!(MIN_SENSE, weighted_sse_obj($σ))
+    c_weighted, start_vals_weighted = @fetch solve_bound!(MIN_SENSE, weighted_sse_obj(σ))
     @info "Weighted feasibility done" c_weighted c_unweighted ratio_c = c_weighted / max(c_unweighted, eps())
 
     @everywhere workers() set_start_values!($start_vals_weighted)
