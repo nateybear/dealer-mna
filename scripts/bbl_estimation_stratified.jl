@@ -285,20 +285,40 @@ end
 @fetchinit n_j w_skip_min w_skip_max n_f f_skip_min f_skip_max n_t t_skip_min t_skip_max total_constraints
 
 @everywhere workers() begin
-    # Attribute a solved bound to its binding constraint rows. Returns
-    # ((block, quarter) => count) sorted by count descending, plus total
-    # binding count and max_ε for context.
+    # Buffer for per-moment σ; populated by `set_sigma_for_diag!` before
+    # bounds_for runs, so attribute_binding can weight residuals.
+    global _σ_for_diag = Float64[]
+
+    set_sigma_for_diag!(σ) = (global _σ_for_diag = σ; nothing)
+
+    # Attribute a solved bound to its binding constraint rows. In the weighted
+    # LP, the KKT shadow price on row i is ∝ ε_i/σ_i², so rank rows by the
+    # weighted residual ε_i/σ_i rather than raw ε_i — raw ε is dominated by
+    # whichever row has the largest σ (cheapest slack sink) regardless of the
+    # bound direction. Reports the top-K rows by weighted residual, grouped by
+    # (block, quarter). `n_binding` = count of rows with ε_i > slack_floor
+    # (moments the LP is actively violating).
+    const _ATTR_TOP_K = 20
+    const _ATTR_SLACK_FLOOR = 1e-8
+
     function attribute_binding(ε_vals::AbstractVector)
         max_ε = maximum(ε_vals)
-        if max_ε < 1e-12
+        if max_ε < 1e-12 || isempty(_σ_for_diag)
             return Tuple{Tuple{Symbol, Demand.QuarterKey}, Int}[], 0, max_ε
         end
-        threshold = 0.9 * max_ε
-        counts = Dict{Tuple{Symbol, Demand.QuarterKey}, Int}()
+        weighted = similar(ε_vals, Float64)
         n_binding = 0
         for i in eachindex(ε_vals)
-            ε_vals[i] >= threshold || continue
-            n_binding += 1
+            ε_i = ε_vals[i]
+            weighted[i] = ε_i / max(_σ_for_diag[i], 1e-8)
+            ε_i > _ATTR_SLACK_FLOOR && (n_binding += 1)
+        end
+        # Top-K by weighted residual — these are the moments carrying the
+        # largest shadow price at the solved bound.
+        perm = partialsortperm(weighted, 1:min(_ATTR_TOP_K, length(weighted)); rev = true)
+        counts = Dict{Tuple{Symbol, Demand.QuarterKey}, Int}()
+        for i in perm
+            weighted[i] > _ATTR_SLACK_FLOOR || continue
             m = row_meta[i]
             key = (m.block, m.t)
             counts[key] = get(counts, key, 0) + 1
@@ -422,6 +442,7 @@ function (@main)(_)
 
     @everywhere workers() set_start_values!($start_vals_weighted)
     @everywhere workers() add_weighted_sse_constraint!($c_weighted, $σ)
+    @everywhere workers() set_sigma_for_diag!($σ)
 
     @info "Step 4: sales-weighted best/worst counterfactual solves"
     w_weights, f_weights, t_weights, n_sales = @fetch compute_sales_weights()
