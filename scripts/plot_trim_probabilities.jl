@@ -58,6 +58,7 @@ function trim_panel(model_name, model_year, extra, n_sales, p_base, ρ̃)
         layout = (2, 1),
         title = "$model_year $model_name $extra",
         titlefont = font(8),
+        margin = 5Plots.mm,
     )
 end
 
