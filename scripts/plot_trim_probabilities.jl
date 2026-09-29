@@ -48,7 +48,7 @@ function trim_panel(model_name, model_year, extra, n_sales, p_base, ρ̃)
         ytickfontsize = 6,
         yticks = false,
         xlims = (0, 1),
-        xlabel = L"\rho",
+        xlabel = L"\rho^{\text{bonus}}",
         label = nothing,
         bins = 20,
     )
