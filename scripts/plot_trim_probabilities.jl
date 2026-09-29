@@ -118,8 +118,8 @@ function (@main)(_)
         ]
 
         n_total = nrow(summary)
-        lo_cut = quantile(summary.n_sales, 1 / 10)
-        hi_cut = quantile(summary.n_sales, 95 / 100)
+        lo_cut = quantile(summary.n_sales, 1 / 100)
+        hi_cut = quantile(summary.n_sales, 90 / 100)
         mid = subset(
             summary,
             :n_sales => ByRow(x -> lo_cut ≤ x ≤ hi_cut),
