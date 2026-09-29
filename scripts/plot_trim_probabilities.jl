@@ -45,12 +45,12 @@ function trim_panel(model_name, model_year, extra, n_sales, p_base, ρ̃)
         xtickfontsize = 6,
         ytickfontsize = 6,
         yticks = false,
-                         label = nothing
+        label = nothing,
     )
     return plot(
-        stacked_hist, 
-        rho_hist, 
-        layout = [2,1],
+        stacked_hist,
+        rho_hist,
+        layout = (2, 1),
         title = "$model_year $model_name $extra",
         titlefont = font(8),
     )
@@ -138,7 +138,7 @@ function (@main)(_)
             plot_title = "Trim Dist'n, Highly Rewarded Models",
             plot_titlefont = font(10),
         )
-        png(plt, snakemake.output["variation_plot"])
+        return png(plt, snakemake.output["variation_plot"])
     end
     return nothing
 end
