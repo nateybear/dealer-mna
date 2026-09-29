@@ -116,13 +116,15 @@ function (@main)(_)
         ]
 
         n_total = nrow(summary)
-        lo_cut = quantile(summary.n_sales, 2 / 10)
-        hi_cut = quantile(summary.n_sales, 9 / 10)
+        lo_cut = quantile(summary.n_sales, 1 / 10)
+        hi_cut = quantile(summary.n_sales, 95 / 100)
         mid = subset(
             summary,
             :n_sales => ByRow(x -> lo_cut ≤ x ≤ hi_cut),
         )
         sort!(mid, :median_rho, rev = true)
+        mid = unique(mid, [:model, :model_year])
+
         variation_keys = [
             (r.model, r.model_year, r.extra) for r in eachrow(first(mid, 3))
         ]
