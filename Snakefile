@@ -1304,7 +1304,8 @@ rule plot_trim_probabilities:
         fords="data/arrow/fords.arrow",
         kept_trims="data/kept_trims.arrow",
     output:
-        plot="plots/trim_probabilities_featured.png",
+        popular_plot="plots/trim_probabilities_popular.png",
+        variation_plot="plots/trim_probabilities_variation.png",
     log:
         "logs/plot_trim_probabilities.log",
     run:

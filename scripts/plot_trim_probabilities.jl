@@ -23,8 +23,8 @@ function predict_trim(dm::XGBoost.DMatrix, pbase_bytes, rho_bytes)
 end
 
 function trim_panel(model_name, model_year, extra, n_sales, p_base, ρ̃)
-    p_carry = p_base .+ (1 .- p_base) .* ρ̃
-    return groupedhist(
+    p_carry = @. p_base + (1 - p_base) * ρ̃
+    stacked_hist = groupedhist(
         vcat(p_base, p_carry);
         bar_position = :stack,
         group = vcat(
@@ -33,13 +33,26 @@ function trim_panel(model_name, model_year, extra, n_sales, p_base, ρ̃)
         ),
         fill = [:steelblue :orange],
         xlims = (0, 1),
-        title = "$model_name $model_year $extra (n=$n_sales)",
-        titlefont = font(8),
         xtickfontsize = 6,
         ytickfontsize = 6,
         legendfontsize = 6,
         yticks = false,
         bins = 30,
+    )
+
+    rho_hist = histogram(ρ̃;
+        fill = :chartreuse3
+        xtickfontsize = 6,
+        ytickfontsize = 6,
+        yticks = false,
+                         label = nothing
+    )
+    return plot(
+        stacked_hist, 
+        rho_hist, 
+        layout = [2,1],
+        title = "$model_year $model_name $extra",
+        titlefont = font(8),
     )
 end
 
@@ -76,7 +89,7 @@ function (@main)(_)
             model = String[], model_year = Int64[], extra = String[],
             n_sales = Int[],
             mean_pbase = Float32[], std_pbase = Float32[],
-            mean_rho = Float32[], std_rho = Float32[],
+            median_rho = Float32[], std_rho = Float32[],
         )
         for k in keys_all
             pbase_bytes, rho_bytes = fits[k][1], fits[k][2]
@@ -86,15 +99,16 @@ function (@main)(_)
                 summary,
                 (
                     k[1], k[2], k[3], n_sales_lookup[k],
-                    mean(p_base), std(p_base), mean(ρ̃), std(ρ̃),
+                    mean(p_base), std(p_base), median(ρ̃), std(ρ̃),
                 ),
             )
         end
         finalize(dm)
 
         sort!(summary, :n_sales, rev = true)
+        popular_models = unique(summary, :model)
         popular_keys = [
-            (r.model, r.model_year, r.extra) for r in eachrow(first(summary, 6))
+            (r.model, r.model_year, r.extra) for r in eachrow(first(popular_models, 3))
         ]
 
         n_total = nrow(summary)
@@ -104,9 +118,9 @@ function (@main)(_)
             summary,
             :n_sales => ByRow(x -> lo_cut ≤ x ≤ hi_cut),
         )
-        sort!(mid, :mean_rho, rev = true)
+        sort!(mid, :median_rho, rev = true)
         variation_keys = [
-            (r.model, r.model_year, r.extra) for r in eachrow(first(mid, 6))
+            (r.model, r.model_year, r.extra) for r in eachrow(first(mid, 3))
         ]
 
         @info "Featured trims" n_total popular_keys variation_keys
@@ -115,12 +129,16 @@ function (@main)(_)
             p_base, ρ̃ = pred_cache[k]
             return trim_panel(k[1], k[2], k[3], n_sales_lookup[k], p_base, ρ̃)
         end
-        panels = vcat(panel_for.(popular_keys), panel_for.(variation_keys))
-        plt = plot(panels...; layout = (4, 3), size = (1200, 900),
-            plot_title = "Top 6 popular (rows 1–2) vs. mid-popularity, top std(ρ̃) (rows 3–4)",
+        plt = plot(panel_for.(popular_keys)...; layout = (1, 3), size = (1200, 900),
+            plot_title = "Trim Dist'n, Popular Models",
             plot_titlefont = font(10),
         )
-        return png(plt, snakemake.output["plot"])
+        png(plt, snakemake.output["popular_plot"])
+        plt = plot(panel_for.(variation_keys)...; layout = (1, 3), size = (1200, 900),
+            plot_title = "Trim Dist'n, Highly Rewarded Models",
+            plot_titlefont = font(10),
+        )
+        png(plt, snakemake.output["variation_plot"])
     end
     return nothing
 end
