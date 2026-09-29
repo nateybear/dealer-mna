@@ -39,16 +39,18 @@ function trim_panel(model_name, model_year, extra, n_sales, p_base, ρ̃)
         legendfontsize = 6,
         yticks = false,
         xlabel = L"P[j \in \mathcal{J}]",
+        bins = 20,
     )
 
     rho_hist = histogram(ρ̃;
-        fill = :chartreuse3,
+        fill = :forestgreen,
         xtickfontsize = 6,
         ytickfontsize = 6,
         yticks = false,
         xlims = (0, 1),
         xlabel = L"\rho",
         label = nothing,
+        bins = 20,
     )
     return plot(
         stacked_hist,
