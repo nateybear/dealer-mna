@@ -57,7 +57,7 @@ function (@main)(_)
         )
         vline!(p4, [BURN_IN]; color = :gray, linestyle = :dash, label = nothing)
 
-        plt = plot(p1, p2, p3, p4; layout = (2, 2), size = (1100, 800))
+        plt = plot(p1, p2, p3, p4; layout = (2, 2), size = (1200, 800), margin = 5Plots.mm)
         png(plt, snakemake.output["plot"])
 
         post_burn = (BURN_IN + 1):N_TOTAL
