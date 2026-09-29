@@ -105,7 +105,7 @@ function (@main)(_)
                 summary,
                 (
                     k[1], k[2], k[3], n_sales_lookup[k],
-                    mean(p_base), std(p_base), median(ρ̃ ./ max.(p_base, 0.1)), std(ρ̃),
+                    mean(p_base), std(p_base), mean(ρ̃ ./ max.(p_base, 0.2)), std(ρ̃),
                 ),
             )
         end
