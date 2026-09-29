@@ -1,6 +1,7 @@
 using DealerMnA
 using Plots
 using StatsBase: mean, quantile
+using LaTeXStrings
 
 function (@main)(_)
     snakemake!()
@@ -25,7 +26,7 @@ function (@main)(_)
 
         p1 = plot(
             rounds, pi_trace;
-            label = "π", color = :black, xlabel = "Round", ylabel = "π",
+            label = L"\pi", color = :black, xlabel = "Round", ylabel = L"\pi",
             title = "π trace",
         )
         vline!(p1, [BURN_IN]; color = :gray, linestyle = :dash, label = "burn-in")
@@ -33,7 +34,7 @@ function (@main)(_)
         p2 = plot(
             rounds, γ_q10;
             label = "10%", color = :steelblue,
-            xlabel = "Round", ylabel = "γ_{f,t} quantile",
+            xlabel = "Round", ylabel = L"\gamma_{ft}",
             title = "γ quantiles per round",
         )
         plot!(p2, rounds, γ_q50; label = "50%", color = :black)
@@ -42,16 +43,16 @@ function (@main)(_)
 
         p3 = plot(
             rounds, γ_mean;
-            label = "mean γ", color = :steelblue,
-            xlabel = "Round", ylabel = "mean γ_{f,t}",
+            label = L"\overline{\gamma}", color = :steelblue,
+            xlabel = "Round", ylabel = L"\overline{\gamma_{ft}}",
             title = "Mean posterior compliance",
         )
         vline!(p3, [BURN_IN]; color = :gray, linestyle = :dash, label = nothing)
 
         p4 = plot(
             rounds, φ_mean;
-            label = "mean φ̂", color = :darkgreen,
-            xlabel = "Round", ylabel = "mean φ̂_{f,t}",
+            label = L"\overline{\varphi}", color = :darkgreen,
+            xlabel = "Round", ylabel = L"\overline{\gamma_{ft}}",
             title = "Mean fitted sales target",
         )
         vline!(p4, [BURN_IN]; color = :gray, linestyle = :dash, label = nothing)
@@ -66,7 +67,7 @@ function (@main)(_)
 
         @info "Post-burn-in summaries" pi_posterior_mean mean_gamma_final mean_phi_final
 
-        JLD2.save_object(
+        return JLD2.save_object(
             snakemake.output["summary"],
             (; pi_posterior_mean, mean_gamma_final, mean_phi_final, N_TOTAL, BURN_IN),
         )
