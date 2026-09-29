@@ -39,7 +39,6 @@ function trim_panel(model_name, model_year, extra, n_sales, p_base, ρ̃)
         legendfontsize = 6,
         yticks = false,
         xlabel = L"P[j \in \mathcal{J}]",
-        bins = 30,
     )
 
     rho_hist = histogram(ρ̃;
