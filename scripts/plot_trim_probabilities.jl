@@ -4,6 +4,7 @@ using StatsPlots
 using XGBoost
 using StatsBase: mean, std, quantile, median
 using LogExpFunctions
+using LaTeXStrings
 
 # Predict (p_base, ρ̃) on the full state matrix for one trim.
 function predict_trim(dm::XGBoost.DMatrix, pbase_bytes, rho_bytes)
@@ -37,6 +38,7 @@ function trim_panel(model_name, model_year, extra, n_sales, p_base, ρ̃)
         ytickfontsize = 6,
         legendfontsize = 6,
         yticks = false,
+        xlabel = L"P[j \in \mathcal{J}]",
         bins = 30,
     )
 
@@ -45,6 +47,8 @@ function trim_panel(model_name, model_year, extra, n_sales, p_base, ρ̃)
         xtickfontsize = 6,
         ytickfontsize = 6,
         yticks = false,
+        xlims = (0, 1),
+        xlabel = L"\rho",
         label = nothing,
     )
     return plot(
