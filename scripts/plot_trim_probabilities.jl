@@ -2,7 +2,7 @@ using DealerMnA
 using Plots
 using StatsPlots
 using XGBoost
-using StatsBase: mean, std, quantile
+using StatsBase: mean, std, quantile, median
 using LogExpFunctions
 
 # Predict (p_base, ρ̃) on the full state matrix for one trim.
