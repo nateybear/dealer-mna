@@ -41,7 +41,7 @@ function trim_panel(model_name, model_year, extra, n_sales, p_base, ρ̃)
     )
 
     rho_hist = histogram(ρ̃;
-        fill = :chartreuse3
+        fill = :chartreuse3,
         xtickfontsize = 6,
         ytickfontsize = 6,
         yticks = false,
