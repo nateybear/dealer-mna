@@ -471,52 +471,51 @@ function (@main)(_)
     @info "Best case (min sales-weighted marginal cost)" obj = best_case.obj n_binding = best_case.n_binding top = best_case.top_str
     @info "Worst case (max sales-weighted marginal cost)" obj = worst_case.obj n_binding = worst_case.n_binding top = worst_case.top_str
 
-    # Sales-weighted markup range: avg_price − mc, bounded by best/worst mc.
-    # (best_case has the LOWEST mc → LARGEST implied markup; worst_case is the
-    # tightest markup.)
-    markup_upper_std = med_price_std - best_case.obj
-    markup_lower_std = med_price_std - worst_case.obj
-    @info "Sales-weighted markup implied by identified set" markup_lower_dollars = markup_lower_std * price_scale markup_upper_dollars = markup_upper_std * price_scale markup_lower_std markup_upper_std pct_of_avg_price_lower = markup_lower_std / med_price_std pct_of_avg_price_upper = markup_upper_std / med_price_std
+    # # Sales-weighted markup range: avg_price − mc, bounded by best/worst mc.
+    # # (best_case has the LOWEST mc → LARGEST implied markup; worst_case is the
+    # # tightest markup.)
+    # markup_upper_std = med_price_std - best_case.obj
+    # markup_lower_std = med_price_std - worst_case.obj
+    # @info "Sales-weighted markup implied by identified set" markup_lower_dollars = markup_lower_std * price_scale markup_upper_dollars = markup_upper_std * price_scale markup_lower_std markup_upper_std pct_of_avg_price_lower = markup_lower_std / med_price_std pct_of_avg_price_upper = markup_upper_std / med_price_std
 
-    @info "Step 5: bounding-box LPs on weighted problem" n_bounds = 2 * (n_j + n_f + n_t)
+    # @info "Step 5: bounding-box LPs on weighted problem" n_bounds = 2 * (n_j + n_f + n_t)
 
-    function bounds_for(name, xs, n, skip_min, skip_max)
-        pmap(1:n) do k
-            x = model[xs][k]
-            lo, lo_bindings, lo_n = if skip_min[k]
-                (-Inf, Tuple{Tuple{Symbol, Demand.QuarterKey}, Int}[], 0)
-            else
-                v, _, εs = solve_bound_with_epsilons!(MIN_SENSE, x)
-                bindings, n_binding, _max_ε = attribute_binding(εs)
-                (v, bindings, n_binding)
-            end
-            hi, hi_bindings, hi_n = if skip_max[k]
-                (Inf, Tuple{Tuple{Symbol, Demand.QuarterKey}, Int}[], 0)
-            else
-                v, _, εs = solve_bound_with_epsilons!(MAX_SENSE, x)
-                bindings, n_binding, _max_ε = attribute_binding(εs)
-                (v, bindings, n_binding)
-            end
-            extra = if xs == :w
-                " $(index.vehicle_cols[k])"
-            else
-                ""
-            end
-            @info "$name[$k]$extra" lo hi n_bind_lo = lo_n n_bind_hi = hi_n top_lo = format_binding_summary(
-                lo_bindings,
-            ) top_hi = format_binding_summary(hi_bindings)
-            return (; lo, hi, lo_bindings, hi_bindings)
-        end
-    end
+    # function bounds_for(name, xs, n, skip_min, skip_max)
+    #     pmap(1:n) do k
+    #         x = model[xs][k]
+    #         lo, lo_bindings, lo_n = if skip_min[k]
+    #             (-Inf, Tuple{Tuple{Symbol, Demand.QuarterKey}, Int}[], 0)
+    #         else
+    #             v, _, εs = solve_bound_with_epsilons!(MIN_SENSE, x)
+    #             bindings, n_binding, _max_ε = attribute_binding(εs)
+    #             (v, bindings, n_binding)
+    #         end
+    #         hi, hi_bindings, hi_n = if skip_max[k]
+    #             (Inf, Tuple{Tuple{Symbol, Demand.QuarterKey}, Int}[], 0)
+    #         else
+    #             v, _, εs = solve_bound_with_epsilons!(MAX_SENSE, x)
+    #             bindings, n_binding, _max_ε = attribute_binding(εs)
+    #             (v, bindings, n_binding)
+    #         end
+    #         extra = if xs == :w
+    #             " $(index.vehicle_cols[k])"
+    #         else
+    #             ""
+    #         end
+    #         @info "$name[$k]$extra" lo hi n_bind_lo = lo_n n_bind_hi = hi_n top_lo = format_binding_summary(
+    #             lo_bindings,
+    #         ) top_hi = format_binding_summary(hi_bindings)
+    #         return (; lo, hi, lo_bindings, hi_bindings)
+    #     end
+    # end
 
-    w_bounds = bounds_for("w", :w, n_j, w_skip_min, w_skip_max)
-    f_bounds = bounds_for("f", :f, n_f, f_skip_min, f_skip_max)
-    t_bounds = bounds_for("t", :t, n_t, t_skip_min, t_skip_max)
+    # w_bounds = bounds_for("w", :w, n_j, w_skip_min, w_skip_max)
+    # f_bounds = bounds_for("f", :f, n_f, f_skip_min, f_skip_max)
+    # t_bounds = bounds_for("t", :t, n_t, t_skip_min, t_skip_max)
 
     JLD2.write_object(
         "data/bbl_estimates_stratified.jld2",
         (;
-            w = w_bounds, f = f_bounds, t = t_bounds,
             best_case, worst_case,
             w_weights, f_weights, t_weights, n_sales,
             avg_price_dollars, avg_price_std, med_price_dollars, med_price_scale, price_scale,

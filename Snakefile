@@ -12,7 +12,7 @@ julia_empirics = glob.glob("src/empirics/**/*.jl")
 # Number of BBL forward-sim replications for the stratified pipeline. Kept
 # small for fast local cuts; bump for the final run. Every stratified rule
 # that iterates over seeds pulls from here.
-STRATIFIED_SEEDS = range(1, 21)
+STRATIFIED_SEEDS = range(1, 101)
 
 
 # Wildcard constraints
