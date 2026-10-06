@@ -93,15 +93,28 @@ function (@main)(_)
         # holds the ORIGINAL observed price (PriceChange does not overwrite it), so
         # this is a valid pre-tweak snapshot.
         # -----------------------------------------------------------------------------
+        # Skip (t,f) pairs where any product is outside BBL's identified universe;
+        # mixed pairs would break the J-matrix / mc dimension match since
+        # expected_demand returns over the full assortment.
+        bbl_dealer_set = Set(index.dealer_cols)
+        bbl_vk_set = Set(index.vehicle_cols)
+        in_bbl_universe(f, js) = f ∈ bbl_dealer_set && all(j -> j ∈ bbl_vk_set, js)
+
         panel_meta = Tuple{QuarterKey, VehicleKey, UUID}[]
         p_observed = Float32[]
+        n_skipped_tf = 0
         for ((t, f), js) in Supply.tf_to_j_lookup(cf)
+            if !in_bbl_universe(f, js)
+                n_skipped_tf += 1
+                continue
+            end
             for j in js
                 idx = cf.model.product_lookup.tjf[(t, j, f)]
                 push!(panel_meta, (t, j, f))
                 push!(p_observed, cf.model.product_info[idx].p)
             end
         end
+        @info "Panel restricted to BBL universe" n_skipped_tf
         panel_key_to_idx = Dict(pm => i for (i, pm) in enumerate(panel_meta))
         @info "Panel snapshot" n_triples = length(panel_meta) n_tf_pairs = length(
             Supply.tf_to_j_lookup(cf),
@@ -149,6 +162,7 @@ function (@main)(_)
                 max_Δ = 0.0f0
                 for ((t, f), js) in collect(Supply.tf_to_j_lookup(cf))
                     isempty(js) && continue
+                    in_bbl_universe(f, js) || continue
                     q = expected_demand(cf, f, t)
                     J = share_matrix(cf, f, t)
                     mc = Float32[mc_of(t, j, f) for j in js]
@@ -183,6 +197,7 @@ function (@main)(_)
             p_eq = Vector{Float32}(undef, length(panel_meta))
             q_eq = Vector{Float32}(undef, length(panel_meta))
             for ((t, f), js) in Supply.tf_to_j_lookup(cf)
+                in_bbl_universe(f, js) || continue
                 q_vec = expected_demand(cf, f, t)
                 for (i, j) in enumerate(js)
                     idx = panel_key_to_idx[(t, j, f)]
