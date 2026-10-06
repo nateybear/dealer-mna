@@ -1755,9 +1755,19 @@ function foc_residual(
     cf::Counterfactual, dealer_uid::UUID, t::QuarterKey,
     prices::AbstractVector{Float32}, costs::AbstractVector{Float32},
 )
+    # Route through the CF-level share_matrix / expected_demand so mean_α is
+    # supplied automatically (the low-level foc_residual at line 1528 omits
+    # mean_α from its share_matrix call — kept there for callers with their
+    # own mean_α source, but the CF wrapper's contract is that β_price is
+    # already known).
     refresh!(cf)
-    params = _full_params(cf)
-    return foc_residual(cf.model, cf.work, params, dealer_uid, t, prices, costs)
+    q = expected_demand(cf.model, cf.work, dealer_uid, t)
+    length(prices) == length(q) ||
+        error("foc_residual: prices length $(length(prices)) ≠ N_d $(length(q))")
+    length(costs) == length(q) ||
+        error("foc_residual: costs length $(length(costs)) ≠ N_d $(length(q))")
+    J = share_matrix(cf.model, cf.work, _full_params(cf), dealer_uid, t; mean_α = cf.β_price)
+    return q .+ J' * (prices .- costs)
 end
 
 # Rebuild a flat params vector from cf's unpacked pieces. Used by share_matrix / foc_residual

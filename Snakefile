@@ -1652,6 +1652,36 @@ rule data_bbl_estimation_stratified:
         )
 
 
+rule data_nash_bertrand_counterfactual_stratified:
+    """
+    Nash-Bertrand price equilibrium under best_case and worst_case marginal-cost
+    scenarios from the BBL identified set. Repricing is restricted to observed
+    (t, j, f) triples in the 105-VK / 214-dealer BBL universe; the gap between
+    equilibrium and observed prices isolates the dynamic sales-target incentive
+    effect on markups.
+    """
+    input:
+        "scripts/nash_bertrand_counterfactual.jl",
+        model_frames="data/model_frames.jld2",
+        demand_estimates="data/demand_estimates.jld2",
+        delta_decomp="data/delta_decomposition_regout.jld2",
+        bbl_estimates="data/bbl_estimates_stratified.jld2",
+        bbl_matrix="data/bbl_matrix_stratified.jld2",
+        price_densities="data/price_densities_stratified.jld2",
+        state_transition="data/state_transition_stratified.jld2",
+    output:
+        counterfactual="data/nash_bertrand_counterfactual_stratified.jld2",
+    log:
+        "logs/nash_bertrand_counterfactual_stratified.log",
+    run:
+        julia(
+            "scripts/nash_bertrand_counterfactual.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 rule plot_sales_targets_scatter_stratified:
     input:
         "scripts/plot_sales_targets_scatter.jl",
