@@ -179,27 +179,10 @@ using Distributed
 end
 
 function (@main)(_)
-    # Kept-trim filter: only fit boosters for VehicleKeys whose (model, extra)
-    # cleared the share cutoff in scripts/kept_trims.jl. Prevents unreliable
-    # fits on rare trims and lets BBL forward simulation assume every drawn VK
-    # has a booster.
-    kept_pairs = Set(
-        (row.model, row.extra) for row in eachrow(read_arrow("data/kept_trims.arrow"))
-    )
-    price_table = read_arrow("data/price_table.arrow")
-    vk_to_extra = Dict{VehicleKey, String}()
-    for row in eachrow(price_table)
-        vk = (row.make, row.model, row.model_year, Float32(row.trim_rank))
-        vk_to_extra[vk] = row.extra
-    end
-    all_js = collect(keys(model.product_lookup.j))
-    js = [
-        j for j in all_js if
-        haskey(vk_to_extra, j) && (j[2], vk_to_extra[j]) ∈ kept_pairs
-    ]
-    @info "Filtered VK universe" n_kept = length(js) n_dropped = length(all_js) - length(
-        js
-    )
+    # kept_trims restriction is applied upstream in load_model_frames —
+    # every VK in model.product_lookup.j already cleared the cutoff.
+    js = collect(keys(model.product_lookup.j))
+    @info "VK universe" n = length(js)
 
     fitted = pmap(fit_prices, js)
     out = Dict{VehicleKey, Tuple{Vector{UInt8}, Vector{UInt8}}}()

@@ -17,11 +17,10 @@ using Distributed
     model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
     _rd = JLD2.load_object("data/residual_demand.jld2")
     state_matrix = _rd.matrix
-    # kept_vks is the canonical product ordering baked into state_matrix by
-    # residual_demands.jl. Every j_idx here indexes into kept_vks (K = ~131),
-    # not into the demand model's full 193-VK keyset. tf_keys is the row
-    # ordering; the un-evicted model's tf_to_j_lookup can have extra (t, f)
-    # pairs, so we key state_lookup off _rd.tf_keys directly.
+    # kept_trims is applied upstream in load_model_frames. `_rd.kept_vks` is the
+    # column layout baked into state_matrix: model VKs minus residual_demands.jl's
+    # singleton-FE eviction. Every j_idx indexes into this list, not the raw
+    # demand model's keyset. tf_keys is the row ordering.
     products = _rd.kept_vks
     J = length(products)
     prod_index = Dict(p => i for (i, p) in enumerate(products))
@@ -35,8 +34,7 @@ using Distributed
         for k in tf_keys
     )
 
-    # Every kept VK is a fit target — the kept-trims filter is already applied
-    # at the residual-demand stage, so no further filtering here.
+    # Every surviving VK is a fit target.
     kept_j_idxs = collect(1:J)
 
     # Column-major flat layout for the J × (J+1) residual_demand matrix per row:

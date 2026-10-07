@@ -73,12 +73,8 @@ function (@main)(_)
         dm = XGBoost.DMatrix(state_matrix)
 
         fords = read_arrow(snakemake.input["fords"])
-        # Match compliance_estimation.jl's universe.
-        kept_pairs = Set(
-            (row.model, row.extra) for
-            row in eachrow(read_arrow(snakemake.input["kept_trims"]))
-        )
-        fords = subset(fords, [:model, :extra] => ByRow((m, e) -> (m, e) ∈ kept_pairs))
+        # kept_trims applied upstream in load_model_frames; match
+        # compliance_estimation.jl's model_year cap.
         fords = subset(fords, :model_year => ByRow(≤(2019)))
 
         trim_counts = @> fords groupby([:model, :model_year, :extra]) combine(nrow => :n_sales)

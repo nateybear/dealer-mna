@@ -156,11 +156,13 @@ using Distributed
 end
 
 function (@main)(_)
-    # Kept-VK universe comes straight from residual_demand.jld2, which was
-    # produced under the kept-trims filter — every VK here already cleared
-    # the share cutoff, so no further filtering is needed.
+    # kept_trims is applied upstream in load_model_frames; the demand model's
+    # product_lookup is the authoritative kept-VK universe. `_rd.kept_vks` is a
+    # strict subset (model VKs minus the singleton-FE eviction done in
+    # residual_demands.jl), which is what we want for booster fits so we don't
+    # train on (t, j, f) rows that no longer exist in the Counterfactual.
     js = _rd.kept_vks
-    @info "Kept VK universe" n_kept = length(js) n_all = length(model.product_lookup.j)
+    @info "VK universe" n_fit = length(js) n_model = length(model.product_lookup.j)
 
     fitted = pmap(fit_prices, js)
     # Layout per VK: one Vector{UInt8} per quantile level in Supply.QUANTILE_LEVELS,

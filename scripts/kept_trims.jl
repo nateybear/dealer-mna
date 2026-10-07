@@ -2,33 +2,31 @@ using DealerMnA
 using DataFrames
 using Lazy: @>
 using Arrow
+using StatsBase: mean
 
-# Trims kept for the BBL supply pipeline. Cutoff at 3% of Ford dealer-quarters
-# — matches the natural shoulder in tables/trim_variation_dealer_quarter.csv.
-# The share denominator is the same one that plot_assortment_probs.jl reports,
-# so the two stay comparable.
-const THRESHOLD_SHARE = 0.03
+AVG_Q_THRESHOLD = 3
 
 function (@main)(_)
     snakemake!()
     with_logging() do
         fords = read_arrow(snakemake.input["fords"])
 
-        dealer_quarter_trim = @> fords groupby([:model, :extra, :dealer_uid, :t]) combine(
-            nrow => :_sales
+        dealer_quarter_trim = @> fords groupby([:model, :model_year, :extra, :dealer_uid, :t]) combine(
+            nrow => :dq_sales
         )
-        dq_counts = @> dealer_quarter_trim groupby([:model, :extra]) combine(
-            nrow => :n_dq_with_trim
+        dq_counts = @> dealer_quarter_trim groupby([:model, :model_year, :extra]) combine(
+            :dq_sales => mean
         )
-        n_total_dq = nrow(unique(select(fords, :dealer_uid, :t)))
-        dq_counts.share = dq_counts.n_dq_with_trim ./ n_total_dq
 
-        kept = subset(dq_counts, :share => ByRow(>=(THRESHOLD_SHARE)))
-        dropped = subset(dq_counts, :share => ByRow(<(THRESHOLD_SHARE)))
-        @info "Kept trims" n_kept = nrow(kept) n_dropped = nrow(dropped) n_total = nrow(dq_counts) threshold = THRESHOLD_SHARE
+        kept = subset(dq_counts, :dq_sales_mean => ByRow(>=(AVG_Q_THRESHOLD)))
+        dropped = subset(dq_counts, :dq_sales_mean => ByRow(<(AVG_Q_THRESHOLD)))
+        @info "Kept trims" n_kept = nrow(kept) n_dropped = nrow(dropped) n_total = nrow(dq_counts) threshold =
+            AVG_Q_THRESHOLD
         @info "Dropped trims" trims = collect(zip(dropped.model, dropped.extra, dropped.share))
 
-        Arrow.write(snakemake.output["kept_trims"], select(kept, :model, :extra))
+        return Arrow.write(
+            snakemake.output["kept_trims"], select(kept, :model, :model_year, :extra)
+        )
     end
     return nothing
 end

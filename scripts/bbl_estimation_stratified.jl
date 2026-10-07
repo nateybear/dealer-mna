@@ -52,7 +52,7 @@ end
     const N_TOTAL = N_LOCAL + N_SHIFTS
 
     n_tf = length(index.tf_rows)
-    n_col = 20                                 # BBL sim replications; matches Snakefile expand range
+    n_col = 100                                 # BBL sim replications; matches Snakefile expand range
     n_j = length(index.vehicle_cols)
     n_f = length(index.dealer_cols)
     n_t = 4

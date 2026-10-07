@@ -101,9 +101,16 @@ function hausman_price(mean_prices::GroupedDataFrame, t, j, k, f)
 end
 
 function load_model_frames()
+    kept_triples = Set(
+        (row.model, row.model_year, row.extra) for
+        row in eachrow(read_arrow(snakemake.input["kept_trims"]))
+    )
     r = @> read_arrow(snakemake.input["registrations"]) subset(
-        :regeffdate => ByRow(>=(Date(2017))), view = true
-    ) # events start in 2017 Q1
+        :regeffdate => ByRow(>=(Date(2017))),
+        [:model, :model_year, :extra] =>
+            ByRow((m, y, e) -> (m, y, e) ∈ kept_triples),
+        view = true,
+    ) # events start in 2017 Q1; kept_trims restricts to (model, model_year, extra) with ≥ AVG_Q_THRESHOLD avg dealer-quarter sales
     ford_dealer_mask = Dealers.State.df.uid .∈ Ref(unique(r.dealer_uid))
 
     # Agent data: zip-level demographics + market size; standardize demographics by std-dev.

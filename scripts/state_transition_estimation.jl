@@ -25,25 +25,9 @@ using Distributed
     J = length(products)
     prod_index = Dict(p => i for (i, p) in enumerate(products))
 
-    # Kept-trim filter: fit boosters only for VehicleKeys whose (model, extra)
-    # cleared the share cutoff, and only train cross-price predictions on
-    # partners that also cleared it. Same filter as price_density_estimation
-    # and residual_demands so BBL sees a consistent VK universe.
-    _kept_pairs = Set(
-        (row.model, row.extra) for
-        row in eachrow(read_arrow("data/kept_trims.arrow"))
-    )
-    _price_table = read_arrow("data/price_table.arrow")
-    _vk_to_extra = Dict{VehicleKey, String}()
-    for row in eachrow(_price_table)
-        _vk_to_extra[(row.make, row.model, row.model_year, Float32(row.trim_rank))] =
-            row.extra
-    end
-    kept_vks = Set(
-        j for j in keys(model.product_lookup.j) if
-        haskey(_vk_to_extra, j) && (j[2], _vk_to_extra[j]) ∈ _kept_pairs
-    )
-    kept_j_idxs = sort([prod_index[j] for j in kept_vks])
+    # kept_trims restriction is applied upstream in load_model_frames —
+    # every VK in model.product_lookup.j already cleared the cutoff.
+    kept_j_idxs = sort([prod_index[j] for j in keys(model.product_lookup.j)])
 
     # Column-major flat layout for the J × (J+1) residual_demand matrix per row:
     #   intercept for product j: column j

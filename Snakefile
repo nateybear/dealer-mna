@@ -692,6 +692,7 @@ rule data_model_frames:
         dealers_init="data/dealers_init_filtered.jld2",
         registrations="data/arrow/fords.arrow",
         price_table="data/price_table.arrow",
+        kept_trims="data/kept_trims.arrow",
     output:
         "data/model_frames.jld2",
     log:
@@ -1037,7 +1038,6 @@ rule data_residual_demand:
         model_frames="data/model_frames.jld2",
         demand_estimates="data/demand_estimates.jld2",
         price_table="data/price_table.arrow",
-        kept_trims="data/kept_trims.arrow",
     output:
         residual_demand="data/residual_demand.jld2",
     log:
@@ -1067,7 +1067,6 @@ rule data_compliance_estimation:
         dealer_demographics="data/dealer_demographics.arrow",
         model_frames="data/model_frames.jld2",
         residual_demand="data/residual_demand.jld2",
-        kept_trims="data/kept_trims.arrow",
     output:
         compliance="data/compliance.arrow",
         fits="data/compliance_fits.jld2",
@@ -1100,7 +1099,6 @@ rule data_price_density_estimation:
         sales_targets="data/sales_targets.jld2",
         compliance="data/compliance.arrow",
         price_table="data/price_table.arrow",
-        kept_trims="data/kept_trims.arrow",
     output:
         price_densities="data/price_densities.jld2",
     log:
@@ -1126,7 +1124,6 @@ rule data_state_transition_estimation:
         model_frames="data/model_frames.jld2",
         residual_demand="data/residual_demand.jld2",
         price_table="data/price_table.arrow",
-        kept_trims="data/kept_trims.arrow",
     output:
         state_transition="data/state_transition.jld2",
     log:
@@ -1283,7 +1280,6 @@ rule plot_sales_targets_scatter:
         compliance="data/compliance.arrow",
         sales_targets="data/sales_targets.jld2",
         fords="data/arrow/fords.arrow",
-        kept_trims="data/kept_trims.arrow",
     output:
         plot="plots/sales_targets_scatter.png",
     log:
@@ -1302,7 +1298,6 @@ rule plot_trim_probabilities:
         state_matrix="data/residual_demand.jld2",
         fits="data/compliance_fits_final.jld2",
         fords="data/arrow/fords.arrow",
-        kept_trims="data/kept_trims.arrow",
     output:
         popular_plot="plots/trim_probabilities_popular.png",
         variation_plot="plots/trim_probabilities_variation.png",
@@ -1322,7 +1317,6 @@ rule table_trim_probabilities:
         state_matrix="data/residual_demand.jld2",
         fits="data/compliance_fits_final.jld2",
         fords="data/arrow/fords.arrow",
-        kept_trims="data/kept_trims.arrow",
     output:
         tex="tables/trim_probabilities.tex",
         csv="tables/trim_probabilities.csv",
@@ -1378,7 +1372,6 @@ rule data_compliance_estimation_stratified:
         dealer_demographics="data/dealer_demographics.arrow",
         model_frames="data/model_frames.jld2",
         residual_demand="data/residual_demand.jld2",
-        kept_trims="data/kept_trims.arrow",
     output:
         compliance="data/compliance_stratified.arrow",
         fits="data/compliance_fits_stratified.jld2",
@@ -1412,7 +1405,6 @@ rule data_price_density_estimation_stratified:
         sales_targets="data/sales_targets_stratified.jld2",
         compliance="data/compliance_stratified.arrow",
         price_table="data/price_table.arrow",
-        kept_trims="data/kept_trims.arrow",
     output:
         price_densities="data/price_densities_stratified.jld2",
     log:
@@ -1441,7 +1433,6 @@ rule data_state_transition_estimation_stratified:
         model_frames="data/model_frames.jld2",
         residual_demand="data/residual_demand.jld2",
         price_table="data/price_table.arrow",
-        kept_trims="data/kept_trims.arrow",
     output:
         state_transition="data/state_transition_stratified.jld2",
     log:
@@ -1690,7 +1681,6 @@ rule plot_sales_targets_scatter_stratified:
         compliance="data/compliance_stratified.arrow",
         sales_targets="data/sales_targets_stratified.jld2",
         fords="data/arrow/fords.arrow",
-        kept_trims="data/kept_trims.arrow",
     output:
         plot="plots/sales_targets_scatter_stratified.png",
     log:
@@ -1710,7 +1700,6 @@ rule plot_trim_probabilities_stratified:
         state_matrix="data/residual_demand.jld2",
         fits="data/compliance_fits_final_stratified.jld2",
         fords="data/arrow/fords.arrow",
-        kept_trims="data/kept_trims.arrow",
     output:
         popular_plot="plots/trim_probabilities_popular_stratified.png",
         variation_plot="plots/trim_probabilities_variation_stratified.png",
@@ -1731,7 +1720,6 @@ rule table_trim_probabilities_stratified:
         state_matrix="data/residual_demand.jld2",
         fits="data/compliance_fits_final_stratified.jld2",
         fords="data/arrow/fords.arrow",
-        kept_trims="data/kept_trims.arrow",
     output:
         tex="tables/trim_probabilities_stratified.tex",
         csv="tables/trim_probabilities_stratified.csv",
@@ -1766,21 +1754,22 @@ rule plot_mcem_trace_stratified:
 
 rule all_stratified:
     """
-    Convenience aggregator: builds every terminal artifact in the stratified
-    parallel pipeline. Use `snakemake --config processes=<N> all_stratified`
-    to kick off end-to-end. Nothing in the un-suffixed pipeline is touched.
+    Convenience aggregator: builds every stratified artifact the JMP paper
+    uses, plus the newest data-only outputs (BBL estimates + Nash–Bertrand
+    counterfactual) whose plots are not yet in the paper. The manual
+    `trim_probabilities_featured_stratified.png` is produced by hand and
+    is intentionally omitted.
     """
     input:
-        "data/compliance_stratified.arrow",
-        "data/compliance_fits_final_stratified.jld2",
-        "data/sales_targets_stratified.jld2",
-        "data/price_densities_stratified.jld2",
-        "data/state_transition_stratified.jld2",
-        "data/bbl_estimates_stratified.jld2",
-        "plots/sales_targets_scatter_stratified.png",
-        "plots/trim_probabilities_featured_stratified.png",
+        # Paper artifacts
         "tables/trim_probabilities_stratified.tex",
         "plots/mcem_trace_stratified.png",
+        "plots/sales_targets_scatter_stratified.png",
+        "plots/trim_probabilities_popular_stratified.png",
+        "plots/trim_probabilities_variation_stratified.png",
+        # New data-only outputs (plots not yet in paper)
+        "data/bbl_estimates_stratified.jld2",
+        "data/nash_bertrand_counterfactual_stratified.jld2",
 
 
 rule plot_wtp_distance:

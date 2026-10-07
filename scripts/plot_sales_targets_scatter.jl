@@ -17,11 +17,7 @@ function (@main)(_)
 
         compliance = read_arrow(snakemake.input["compliance"])
         fords = read_arrow(snakemake.input["fords"])
-        kept_pairs = Set(
-            (row.model, row.extra) for
-            row in eachrow(read_arrow(snakemake.input["kept_trims"]))
-        )
-        fords = subset(fords, [:model, :extra] => ByRow((m, e) -> (m, e) ∈ kept_pairs))
+        # kept_trims applied upstream in load_model_frames.
         fords = subset(fords, :model_year => ByRow(≤(2019)))
 
         dq = select(Supply.make_dealer_quarter(fords), :dealer_uid, :t, :total_units => :q)

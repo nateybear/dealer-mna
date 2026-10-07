@@ -11,27 +11,12 @@ using Distributed
     params = JLD2.load_object("data/demand_estimates.jld2").minimizer
     cf = Counterfactual(model, params)
 
-    # Kept-VK set — same (model, extra) → VehicleKey map that
-    # scripts/bbl_forward_simulation_stratified.jl builds from price_table.
-    _kept_pairs = Set(
-        (row.model, row.extra) for
-        row in eachrow(read_arrow("data/kept_trims.arrow"))
-    )
-    _price_table = read_arrow("data/price_table.arrow")
-    keep = Set{VehicleKey}()
-    for row in eachrow(_price_table)
-        vk = (row.make, row.model, row.model_year, Float32(row.trim_rank))
-        haskey(model.product_lookup.j, vk) || continue
-        (row.model, row.extra) ∈ _kept_pairs || continue
-        push!(keep, vk)
-    end
-
-    # First eviction: singleton-FE tuples. FixedEffectModels writes `missing`
-    # to fe_dealer_uid / fe_vehicleid for iteratively-dropped singleton groups.
-    # pred_regout (called by sweep_δ! below) reads those FEs — if any survives,
-    # sweep_δ! throws `MethodError: Cannot convert Missing to Float64`. Must
-    # happen BEFORE the kept-trims eviction so the singleton-FE + AR-sweep pass
-    # runs on a self-consistent product set.
+    # kept_trims restriction is applied upstream in load_model_frames —
+    # every VK in model.product_lookup.j already cleared the cutoff, so no
+    # kept-trims eviction is needed here. Only singleton-FE (t,j,f) triples
+    # still need pruning, since FixedEffectModels writes `missing` to
+    # fe_dealer_uid / fe_vehicleid for iteratively-dropped singleton groups
+    # and sweep_δ! would then throw `MethodError: Cannot convert Missing to Float64`.
     let fe_df = cf.regout.fe
         identifiable_vehicleids = Set{String}(
             row.vehicleid for row in eachrow(fe_df) if !ismissing(row.fe_vehicleid)
@@ -59,31 +44,10 @@ using Distributed
         @info "Evicted singleton-FE (t,j,f) triples" n_evicted
     end
 
-    # Second eviction: non-kept (t, j, f) triples model-wide. This makes the
-    # residual fit and every downstream booster reflect the same reduced-
-    # product world that BBL forward simulation runs in — no world-A vs world-B
-    # mismatch between training data and the sim.
-    let n_evicted = 0
-        for (tjf_key, _) in collect(pairs(cf.model.product_lookup.tjf))
-            (t_key, j_key, f_key) = tjf_key
-            j_key ∈ keep && continue
-            h = apply!(
-                cf, Demand.ModelDelete(vehicle = j_key, quarter = t_key, dealer_uid = f_key)
-            )
-            ismissing(h) || (n_evicted += 1)
-        end
-        Supply.invalidate_tf_to_j_lookup!()
-        for t_sweep in unique(k[1] for k in keys(cf.model.product_lookup.tjf))
-            Demand.sweep_δ!(cf, t_sweep)
-        end
-        Demand.refresh!(cf)
-        @info "Persistent eviction of non-kept (t,j,f) triples" n_evicted n_kept_vks = length(keep)
-    end
-
     # Canonical kept-VK ordering — column layout for the K × (K+1) output
     # matrix and the reference `products` list every downstream stage indexes
     # into. Sorted so the ordering is deterministic across runs.
-    kept_vks = sort(collect(keep))
+    kept_vks = sort(collect(keys(cf.model.product_lookup.j)))
     K = length(kept_vks)
 
     # Pre-seed Supply's price-perturbation matrix from a deterministic RNG so
@@ -103,9 +67,9 @@ using Distributed
 end
 
 function (@main)(_)
-    @info "Residual demand" nworkers = nworkers() n_kept_vks = length(keep) K n_tfs = length(
-        tf_keys
-    ) n_all_vks = length(model.product_lookup.j)
+    @info "Residual demand" nworkers = nworkers() K n_tfs = length(tf_keys) n_all_vks = length(
+        model.product_lookup.j
+    )
     out = Matrix{Float32}(undef, length(tf_keys), K * (K + 1))
     fitted = pmap(compute_row, 1:length(tf_keys))
     for (i, row) in enumerate(fitted)

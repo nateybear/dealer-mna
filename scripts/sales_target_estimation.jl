@@ -20,19 +20,10 @@ function (@main)(_)
         compliance = read_arrow(snakemake.input["compliance"])
         fords = read_arrow(snakemake.input["fords"])
 
-        # Filter fords to the same VK universe the sim samples from — same
-        # kept_trims filter as compliance_estimation.jl, plus a model_year cap
-        # at bbl_forward_simulation.jl's `max_model_year = 2019`. Without this,
-        # q_{f,t} in the panel counts sales the sim can never generate and φ
-        # is systematically too large.
-        kept_pairs = Set(
-            (row.model, row.extra) for
-            row in eachrow(read_arrow("data/kept_trims.arrow"))
-        )
-        fords = subset(
-            fords,
-            [:model, :extra] => ByRow((m, e) -> (m, e) ∈ kept_pairs),
-        )
+        # kept_trims restriction is applied upstream in load_model_frames.
+        # Cap model_year at bbl_forward_simulation.jl's `max_model_year = 2019`.
+        # Without this, q_{f,t} in the panel counts sales the sim can never
+        # generate and φ is systematically too large.
         fords = subset(fords, :model_year => ByRow(≤(2019)))
 
         # q_{d,t} = total units sold per dealer-quarter.
