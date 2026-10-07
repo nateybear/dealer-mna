@@ -19,7 +19,7 @@ using Distributed
 
     K = 2
 
-    MAX_INNER_SWEEPS = 500
+    MAX_INNER_SWEEPS = 250
     Ρ̃_TOL = 1.0f-4
     NUM_ROUND_STEP1 = 20
 
@@ -27,8 +27,8 @@ using Distributed
 
     Π_FLOOR = 1.0f-6
 
-    N_TOTAL = 100
-    BURN_IN = 30
+    N_TOTAL = 20
+    BURN_IN = 10
 
     RHO_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
