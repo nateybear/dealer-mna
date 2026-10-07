@@ -22,7 +22,9 @@ function (@main)(_)
         dropped = subset(dq_counts, :dq_sales_mean => ByRow(<(AVG_Q_THRESHOLD)))
         @info "Kept trims" n_kept = nrow(kept) n_dropped = nrow(dropped) n_total = nrow(dq_counts) threshold =
             AVG_Q_THRESHOLD
-        @info "Dropped trims" trims = collect(zip(dropped.model, dropped.extra, dropped.share))
+        @info "Dropped trims" trims = collect(
+            zip(dropped.model, dropped.extra, dropped.dq_sales_mean)
+        )
 
         return Arrow.write(
             snakemake.output["kept_trims"], select(kept, :model, :model_year, :extra)
