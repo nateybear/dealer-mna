@@ -27,8 +27,8 @@ using Distributed
 
     Π_FLOOR = 1.0f-6
 
-    N_TOTAL = 20
-    BURN_IN = 10
+    N_TOTAL = 100
+    BURN_IN = 30
 
     RHO_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
