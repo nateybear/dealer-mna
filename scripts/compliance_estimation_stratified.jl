@@ -115,11 +115,8 @@ A_PRIOR=10
 function (@main)(_)
     Dealers.load_from_disk!("data/dealers_init_filtered.jld2")
     fords = read_arrow("data/arrow/fords.arrow")
-
-    # kept_trims restriction is applied upstream in load_model_frames.
-    # Must match bbl_forward_simulation.jl's max_model_year (T runs 2017-2019).
-    fords = subset(fords, :model_year => ByRow(≤(2019)))
-    @info "Filtered fords" n_rows = nrow(fords)
+    # kept_trims and model_year ≤ 2019 are applied upstream in load_model_frames.
+    @info "Loaded fords" n_rows = nrow(fords)
 
     dealer_demographics = semijoin(
         read_arrow("data/dealer_demographics.arrow"), fords, on = :uid => :dealer_uid

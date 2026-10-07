@@ -31,8 +31,7 @@ function (@main)(_)
         fits = JLD2.load_object(snakemake.input["fits"])
         fords = read_arrow(snakemake.input["fords"])
 
-        # kept_trims applied upstream in load_model_frames.
-        fords = subset(fords, :model_year => ByRow(≤(2019)))
+        # kept_trims and model_year ≤ 2019 are applied upstream in load_model_frames.
 
         trim_counts = @> fords groupby([:model, :model_year, :extra]) combine(nrow => :n_sales)
         n_sales_lookup = Dict(

@@ -148,15 +148,11 @@ A_PRIOR=10
 function (@main)(_)
     Dealers.load_from_disk!("data/dealers_init_filtered.jld2")
     fords = read_arrow("data/arrow/fords.arrow")
-
-    # Cap model_year to match bbl_forward_simulation.jl's `max_model_year =
-    # maximum(y for (y, _) in T) = 2019` (T runs 2017-2019). Without this,
-    # q_{f,t} in the sales-target panel counts 2020-MY units sold in Q4 2019
-    # that the sim can never generate — φ ends up too large and p_iota in the
-    # sim sits systematically low. The kept_trims restriction is applied
-    # upstream in load_model_frames so no filter is needed here.
-    fords = subset(fords, :model_year => ByRow(≤(2019)))
-    @info "Filtered fords" n_rows = nrow(fords)
+    # kept_trims, model_year ≤ 2019, and the Date(2020) upper bound are applied
+    # upstream in load_model_frames; fords.arrow itself is not pre-filtered, so
+    # any (model, 2020, extra) rows here get stranded as compliance_fits
+    # entries that BBL's vk_to_group never queries.
+    @info "Loaded fords" n_rows = nrow(fords)
 
     dealer_demographics = semijoin(
         read_arrow("data/dealer_demographics.arrow"), fords, on = :uid => :dealer_uid

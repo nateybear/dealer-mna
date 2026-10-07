@@ -17,8 +17,7 @@ function (@main)(_)
 
         compliance = read_arrow(snakemake.input["compliance"])
         fords = read_arrow(snakemake.input["fords"])
-        # kept_trims applied upstream in load_model_frames.
-        fords = subset(fords, :model_year => ByRow(≤(2019)))
+        # kept_trims and model_year ≤ 2019 are applied upstream in load_model_frames.
 
         dq = select(Supply.make_dealer_quarter(fords), :dealer_uid, :t, :total_units => :q)
 

@@ -105,12 +105,18 @@ function load_model_frames()
         (row.model, row.model_year, row.extra) for
         row in eachrow(read_arrow(snakemake.input["kept_trims"]))
     )
+    # Date window: 2017 Q1 through 2019 Q4 (strict < Date(2020) drops stray
+    # Jan 1 2020 registrations). model_year ≤ 2019 matches the BBL sim horizon
+    # — 2020-MY cars appear only in a few Q3/Q4 2019 panels, aren't sold by
+    # the sim, and keeping them would fit demand coefficients against data
+    # that can't propagate downstream.
     r = @> read_arrow(snakemake.input["registrations"]) subset(
-        :regeffdate => ByRow(>=(Date(2017))),
+        :regeffdate => ByRow(d -> Date(2017) <= d < Date(2020)),
+        :model_year => ByRow(≤(2019)),
         [:model, :model_year, :extra] =>
             ByRow((m, y, e) -> (m, y, e) ∈ kept_triples),
         view = true,
-    ) # events start in 2017 Q1; kept_trims restricts to (model, model_year, extra) with ≥ AVG_Q_THRESHOLD avg dealer-quarter sales
+    )
     ford_dealer_mask = Dealers.State.df.uid .∈ Ref(unique(r.dealer_uid))
 
     # Agent data: zip-level demographics + market size; standardize demographics by std-dev.

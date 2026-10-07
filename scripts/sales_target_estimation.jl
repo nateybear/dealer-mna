@@ -20,11 +20,7 @@ function (@main)(_)
         compliance = read_arrow(snakemake.input["compliance"])
         fords = read_arrow(snakemake.input["fords"])
 
-        # kept_trims restriction is applied upstream in load_model_frames.
-        # Cap model_year at bbl_forward_simulation.jl's `max_model_year = 2019`.
-        # Without this, q_{f,t} in the panel counts sales the sim can never
-        # generate and φ is systematically too large.
-        fords = subset(fords, :model_year => ByRow(≤(2019)))
+        # kept_trims and model_year ≤ 2019 are applied upstream in load_model_frames.
 
         # q_{d,t} = total units sold per dealer-quarter.
         dq = Supply.make_dealer_quarter(fords)
