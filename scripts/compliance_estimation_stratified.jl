@@ -19,7 +19,7 @@ using Distributed
 
     K = 2
 
-    MAX_INNER_SWEEPS = 250
+    MAX_INNER_SWEEPS = 500
     Ρ̃_TOL = 1.0f-4
     NUM_ROUND_STEP1 = 20
 
@@ -55,9 +55,8 @@ using Distributed
         return nothing
     end
 
-    @memoize function state_lookup()
-        return Dict(k => i for (i, k) in enumerate(_rd.tf_keys))
-    end
+    @memoize state_lookup() =
+        Dict(k => i for (i, k) in enumerate(_rd.tf_keys))
 
     function X_matrix(cars)
         nrows = nrow(cars)
@@ -262,10 +261,10 @@ function (@main)(_)
                             ρ̃_prev = copy(ρ̃_tr)
 
                             # don't go too flexible too early
-                            num_rounds = min(NUM_ROUND_STEP1, sweep)
+                            num_rounds = min(NUM_ROUND_STEP1, sweep ÷ 2)
 
                             max_depth = if sweep < 10
-                                min(2^sweep, PBASE_XGB_PARAMS.max_depth)
+                                min(2^(sweep ÷ 2), PBASE_XGB_PARAMS.max_depth)
                             else
                                 PBASE_XGB_PARAMS.max_depth
                             end
