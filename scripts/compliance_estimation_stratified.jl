@@ -261,10 +261,10 @@ function (@main)(_)
                             ρ̃_prev = copy(ρ̃_tr)
 
                             # don't go too flexible too early
-                            num_rounds = min(NUM_ROUND_STEP1, (sweep + 1) ÷ 2)
+                            num_rounds = min(NUM_ROUND_STEP1, sweep)
 
                             max_depth = if sweep < 10
-                                min(2^(sweep ÷ 2), PBASE_XGB_PARAMS.max_depth)
+                                min(2^sweep, PBASE_XGB_PARAMS.max_depth)
                             else
                                 PBASE_XGB_PARAMS.max_depth
                             end
