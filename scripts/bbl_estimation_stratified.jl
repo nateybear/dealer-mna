@@ -150,15 +150,15 @@ end
     t_skip_min, t_skip_max = column_skip_flags(Ct_blocks)
 
     model = Model(KNITRO.Optimizer)
-    set_silent(model)
+    #set_silent(model)
     #set_attribute(model, "threads", nthreads())
     # Half the bound LPs hit DUAL_INFEASIBLE by design (one-sided BBL moments);
     # HiGHS's default ray-extraction on those is wasted work.
     #set_attribute(model, HiGHS.ComputeInfeasibilityCertificate(), false)
 
-    @variable(model, 0 <= w[1:n_j] <= 1000)
-    @variable(model, -1000 <= f[1:n_f] <= 1000)
-    @variable(model, -1000 <= t[1:n_t] <= 1000)
+    @variable(model, 0.25 <= w[1:n_j] <= 10)
+    @variable(model, -10 <= f[1:n_f] <= 10)
+    @variable(model, -10 <= t[1:n_t] <= 10)
     # treat f and t as nuisance FEs, sum-to-zero constraint
     # identifies the levels of wholesale price
     @constraint(model, sum(f) == 0)
@@ -513,7 +513,7 @@ function (@main)(_)
     # f_bounds = bounds_for("f", :f, n_f, f_skip_min, f_skip_max)
     # t_bounds = bounds_for("t", :t, n_t, t_skip_min, t_skip_max)
 
-    JLD2.write_object(
+    JLD2.save_object(
         "data/bbl_estimates_stratified.jld2",
         (;
             best_case, worst_case,
