@@ -21,7 +21,8 @@ function (@main)(_)
     with_logging() do
         seed = parse(Int, snakemake.wildcards["seed"])
         rng = MersenneTwister(seed)
-        @info "BBL forward simulation" seed
+        state_locked = get(snakemake.params, "state_locked", false)
+        @info "BBL forward simulation" seed state_locked
 
         # -----------------------------------------------------------------------------
         # Load
@@ -290,6 +291,23 @@ function (@main)(_)
             iota_prev[f] = rand(rng) < get(p_compliant_t0, f, 0.5f0)
         end
 
+        # Diagnostic knob: when state_locked, feed the empirical state at
+        # (t_prev, f) into every booster that reads s_prev. Isolates whether
+        # the sim's assortment collapse is driven by state drift (empirical
+        # state → calibrated assortment ⇒ drift is the whole story) or by
+        # pbase/ρ̃ miscalibration independently of state.
+        empirical_s = Dict{Tuple{QuarterKey, UUID}, Vector{Float32}}()
+        if state_locked
+            for ((t_k, f_k), i_row) in state_lookup
+                empirical_s[(t_k, f_k)] = Vector{Float32}(
+                    view(state_matrix_obs, i_row, :)
+                )
+            end
+            @info "State-locked mode: feeding empirical s_prev into boosters" n_tf = length(
+                empirical_s
+            )
+        end
+
         outputs = Dict{Tuple{QuarterKey, UUID}, NamedTuple}()
 
         # Seed period record: observed everything, no simulated draws yet.
@@ -328,7 +346,8 @@ function (@main)(_)
         # -----------------------------------------------------------------------------
         # Simulation loop Q2 2017 → Q4 2019
         # -----------------------------------------------------------------------------
-        for t in T[2:end]
+        for (i_t, t) in enumerate(T[2:end])
+            t_prev = T[i_t]
             @info "Simulating period" t
 
             phi_by_dealer = Dict{UUID, Float32}()
@@ -338,7 +357,13 @@ function (@main)(_)
             prices_by_dealer = Dict{UUID, Vector{Float32}}()  # parallel to assortment
 
             for f in dealers
-                s_prev = state_prev[f]
+                s_prev = if state_locked
+                    key_prev = (t_prev, f)
+                    haskey(empirical_s, key_prev) || continue
+                    empirical_s[key_prev]
+                else
+                    state_prev[f]
+                end
                 ι_prev_f32 = Float32(iota_prev[f])
 
                 # Sales target φ_t = f(state_{t-1}, quarter_of_year(t), ι_{t-1}).
@@ -495,6 +520,9 @@ function (@main)(_)
 
             # Phase 2: q_t, ι_t, actual state
             for f in dealers
+                # Under state_locked, Phase 1 skips (t, f) when empirical
+                # state is missing — carry that skip into Phase 2.
+                haskey(assortment_by_dealer, f) || continue
                 # Dealer drew an empty assortment (every compliance-group
                 # Bernoulli fired 0). Treat as "sat this quarter out": carry
                 # state_prev / iota_prev forward, record an empty-assortment

@@ -1514,6 +1514,82 @@ rule table_diagnose_sim_assortments_stratified:
         )
 
 
+rule data_bbl_simulation_state_locked_stratified:
+    """
+    State-locked diagnostic variant of data_bbl_simulation_stratified. Feeds
+    the empirical state_matrix row at (t_prev, f) into every booster that
+    reads s_prev, instead of the sim's own propagated state. Isolates whether
+    the assortment-size collapse in the standard sim is driven by state
+    drift (empirical s_prev ⇒ calibrated assortment) or by pbase/ρ̃
+    miscalibration independently of state.
+    """
+    input:
+        "scripts/bbl_forward_simulation_stratified.jl",
+        model_frames="data/model_frames.jld2",
+        demand_estimates="data/demand_estimates.jld2",
+        delta_decomp="data/delta_decomposition_regout.jld2",
+        compliance_fits="data/compliance_fits_final_stratified.jld2",
+        sales_targets="data/sales_targets_stratified.jld2",
+        price_densities="data/price_densities_stratified.jld2",
+        state_transition="data/state_transition_stratified.jld2",
+        compliance="data/compliance_stratified.arrow",
+        residual_demand="data/residual_demand.jld2",
+        price_table="data/price_table.arrow",
+    output:
+        sim="data/bbl_simulation_state_locked_stratified/seed_{seed}.jld2",
+    log:
+        "logs/bbl_forward_simulation_state_locked_stratified_seed_{seed}.log",
+    params:
+        state_locked=True,
+    run:
+        julia(
+            "scripts/bbl_forward_simulation_stratified.jl",
+            input=input,
+            output=output,
+            wildcards=wildcards,
+            params=params,
+            log=log,
+        )
+
+
+rule data_bbl_simulations_state_locked_stratified:
+    input:
+        expand(
+            "data/bbl_simulation_state_locked_stratified/seed_{seed}.jld2",
+            seed=STRATIFIED_SEEDS,
+        )
+
+
+rule table_diagnose_sim_assortments_state_locked_stratified:
+    """
+    Same diagnostic as table_diagnose_sim_assortments_stratified, run against
+    the state-locked sim outputs. Side-by-side comparison with the standard
+    sizes/groups/pairs tables answers whether the assortment-size collapse
+    survives when state drift is removed from the sim.
+    """
+    input:
+        "scripts/diagnose_sim_assortments_stratified.jl",
+        model_frames="data/model_frames.jld2",
+        price_table="data/price_table.arrow",
+        simulations=expand(
+            "data/bbl_simulation_state_locked_stratified/seed_{seed}.jld2",
+            seed=STRATIFIED_SEEDS,
+        ),
+    output:
+        sizes="tables/diagnose_sim_assortments_sizes_state_locked_stratified.arrow",
+        groups="tables/diagnose_sim_assortments_groups_state_locked_stratified.arrow",
+        pairs="tables/diagnose_sim_assortments_pairs_state_locked_stratified.arrow",
+    log:
+        "logs/diagnose_sim_assortments_state_locked_stratified.log",
+    run:
+        julia(
+            "scripts/diagnose_sim_assortments_stratified.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 rule table_diagnose_booster_splits_compliance_stratified:
     """
     Inspects every split node in the distilled compliance boosters and
