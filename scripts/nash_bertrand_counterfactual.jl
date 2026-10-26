@@ -9,7 +9,7 @@ const NB_TOL = 1e-4
 const NB_MAX_SWEEPS = 100
 # Damping factor for the fixed-point iterate: p ← λ·p_new + (1−λ)·p_old.
 # Below 1 dampens oscillation; 1 is the raw markup mapping.
-const NB_DAMPING = 0.7f0
+const NB_DAMPING = 0.9f0
 
 function (@main)(_)
     snakemake!()
