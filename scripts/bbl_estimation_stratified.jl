@@ -518,9 +518,8 @@ function (@main)(_)
         (;
             best_case, worst_case,
             w_weights, f_weights, t_weights, n_sales,
-            avg_price_dollars, avg_price_std, med_price_dollars, med_price_scale, price_scale,
-            markup_lower_std, markup_upper_std,
-            c_unweighted, c_weighted, σ,
+            avg_price_dollars, med_price_dollars, price_scale,
+            c_weighted, σ,
         ),
     )
     return nothing
