@@ -1,4 +1,5 @@
 using DealerMnA
+using .Demand
 using DataFrames
 using Statistics: mean, std
 
