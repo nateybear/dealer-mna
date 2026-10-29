@@ -50,6 +50,19 @@ function (@main)(_)
         kept_set = Set(kept_vks)
         price_table = read_arrow(snakemake.input["price_table"])
 
+        # Deterministically seed Supply._PRICE_SEEDS to the exact same stream
+        # residual_demands.jl uses to build data/residual_demand.jld2. Without
+        # this, bbl_forward_simulation's residual_demand reads state through a
+        # fresh default-RNG perturbation grid, which the sensitivity diagnostic
+        # (tables/diagnose_residual_demand_sensitivity.arrow) showed accounts
+        # for ~all of the cross-coefficient drift and ~40% of own-coefficient
+        # drift in the state matrix.
+        let rng_seeds = MersenneTwister(20260709)
+            Supply._PRICE_SEEDS[] =
+                rand(rng_seeds, Float32, length(kept_vks), Supply.SIM_SIZE) .*
+                0.3f0 .+ 0.85f0
+        end
+
         # -----------------------------------------------------------------------------
         # Evict products whose dealer_uid or vehicleid has no identifiable FE in
         # regout. FixedEffectModels writes `missing` to fe_* for iteratively-
