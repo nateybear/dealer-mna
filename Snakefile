@@ -1590,6 +1590,39 @@ rule table_diagnose_sim_assortments_state_locked_stratified:
         )
 
 
+rule table_diagnose_log_j_shift_stratified:
+    """
+    Per-quarter comparison of total live products J_t (sum of assortment sizes
+    across all dealers) in sim vs observed, with log_j_shift = log(J_sim) −
+    log(J_obs). Hypothesis: the systematic positive intercept bias in
+    diagnose_state_drift_columns_stratified for F-series products is driven by
+    the Ackerberg-Rysman log(J) covariate inside pred_regout — sim's shrunk
+    assortment at quarter t gives sweep_δ a smaller log(J) than training saw,
+    and the AR term shifts predicted δ (and therefore residual_demand's
+    recovered intercept). If |log_j_shift| grows over time in tandem with the
+    intercept drift growth in diagnose_state_drift_summary, this is likely
+    the mechanism.
+    """
+    input:
+        "scripts/diagnose_log_j_shift_stratified.jl",
+        residual_demand="data/residual_demand.jld2",
+        simulations=expand(
+            "data/bbl_simulation_stratified/seed_{seed}.jld2",
+            seed=STRATIFIED_SEEDS,
+        ),
+    output:
+        summary="tables/diagnose_log_j_shift_stratified.arrow",
+    log:
+        "logs/diagnose_log_j_shift_stratified.log",
+    run:
+        julia(
+            "scripts/diagnose_log_j_shift_stratified.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 rule table_diagnose_state_drift_stratified:
     """
     Per-column drift of simulated state_actual vs observed state_matrix at each
