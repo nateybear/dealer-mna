@@ -1590,6 +1590,76 @@ rule table_diagnose_sim_assortments_state_locked_stratified:
         )
 
 
+rule table_diagnose_state_drift_stratified:
+    """
+    Per-column drift of simulated state_actual vs observed state_matrix at each
+    (t, f). Each state column tagged by (focal_vk model/MY/extra, coef_type ∈
+    {intercept, own, cross}, partner_vk when cross). Also produces a (quarter ×
+    coef_type × focal_model_year) summary so model-year effects (e.g. a 2016
+    MY blow-up) show up as a row-level signal.
+    """
+    input:
+        "scripts/diagnose_state_drift_stratified.jl",
+        residual_demand="data/residual_demand.jld2",
+        price_table="data/price_table.arrow",
+        simulations=expand(
+            "data/bbl_simulation_stratified/seed_{seed}.jld2",
+            seed=STRATIFIED_SEEDS,
+        ),
+    output:
+        columns="tables/diagnose_state_drift_columns_stratified.arrow",
+        summary="tables/diagnose_state_drift_summary_stratified.arrow",
+    log:
+        "logs/diagnose_state_drift_stratified.log",
+    run:
+        julia(
+            "scripts/diagnose_state_drift_stratified.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule table_diagnose_residual_demand_sensitivity:
+    """
+    Isolates where residual_demand's state-matrix output moves from.
+    Perturbations on observed (t, f) inputs:
+      - rng_reseed_A / rng_reseed_B: re-seed Supply._PRICE_SEEDS with a
+        different MersenneTwister, same assortment and prices (measures the
+        internal translog-OLS sampling noise). bbl_forward_simulation_stratified
+        does NOT re-seed _PRICE_SEEDS from a fixed stream, so any materially
+        nonzero number here means the sim's state matrix uses a different
+        perturbation grid than data/residual_demand.jld2 was built with.
+      - drop_one_trim: ModelDelete one random product from the assortment
+        (sim's assortment typically differs from observed by ~5 trims).
+      - prices_x1.05: PriceMultiply the whole assortment by 1.05 (sim prices
+        drawn from the price density typically live within a few % of obs).
+    Compare the resulting mean/p90/p99 |Δ| per coef_type against the drift
+    magnitudes in diagnose_state_drift_summary — whichever perturbation's
+    magnitude matches the drift is the mechanism we need to fix.
+    """
+    input:
+        "scripts/diagnose_residual_demand_sensitivity.jl",
+        model_frames="data/model_frames.jld2",
+        demand_estimates="data/demand_estimates.jld2",
+        delta_decomp="data/delta_decomposition_regout.jld2",
+        residual_demand="data/residual_demand.jld2",
+    output:
+        summary="tables/diagnose_residual_demand_sensitivity.arrow",
+    log:
+        "logs/diagnose_residual_demand_sensitivity.log",
+    params:
+        n_samples=lambda _: str(config.get("sensitivity_n_samples", 25)),
+    run:
+        julia(
+            "scripts/diagnose_residual_demand_sensitivity.jl",
+            input=input,
+            output=output,
+            params=params,
+            log=log,
+        )
+
+
 rule table_diagnose_booster_splits_compliance_stratified:
     """
     Inspects every split node in the distilled compliance boosters and
