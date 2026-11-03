@@ -34,6 +34,12 @@ using Distributed
         for k in tf_keys
     )
 
+    # log(J_t) carries the Ackerberg-Rysman AR correction into state_transition.
+    J_by_t = Dict{QuarterKey, Int}()
+    for tf in tf_keys
+        J_by_t[tf[1]] = get(J_by_t, tf[1], 0) + length(intermed[tf])
+    end
+
     # Every surviving VK is a fit target.
     kept_j_idxs = collect(1:J)
 
@@ -84,9 +90,13 @@ using Distributed
         end
 
         ncols_state = size(state_matrix, 2)
-        X_common = Matrix{Float32}(undef, n, ncols_state)
+        # X_common = [state_{t-1}, log(J_t), quarter_of_year(t)]; cross appends partner.
+        X_common = Matrix{Float32}(undef, n, ncols_state + 2)
         for r in 1:n
-            X_common[r, :] .= @view state_matrix[rows_tlag[r], :]
+            X_common[r, 1:ncols_state] .= @view state_matrix[rows_tlag[r], :]
+            t_r = tf_keys[rows_t[r]][1]
+            X_common[r, ncols_state + 1] = Float32(log(Float64(J_by_t[t_r])))
+            X_common[r, ncols_state + 2] = Float32(t_r[2])
         end
 
         y_int = Float32[state_matrix[rows_t[r], intercept_col(j_idx)] for r in 1:n]
@@ -105,9 +115,9 @@ using Distributed
             end
         end
         n_cross = length(cross_r)
-        X_cross = Matrix{Float32}(undef, n_cross, ncols_state + 1)
+        X_cross = Matrix{Float32}(undef, n_cross, ncols_state + 3)
         for i in 1:n_cross
-            X_cross[i, 1:ncols_state] .= @view X_common[cross_r[i], :]
+            X_cross[i, 1:(ncols_state + 2)] .= @view X_common[cross_r[i], :]
             X_cross[i, end] = Float32(cross_k[i])
         end
 
@@ -118,7 +128,7 @@ using Distributed
             (
                 subsample = 0.8,
                 max_depth = 8,
-                min_child_weight = 5,
+                min_child_weight = 1,
                 eta = 0.05,
                 lambda = 1.0,
             ),

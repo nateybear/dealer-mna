@@ -1515,14 +1515,7 @@ rule table_diagnose_sim_assortments_stratified:
 
 
 rule data_bbl_simulation_state_locked_stratified:
-    """
-    State-locked diagnostic variant of data_bbl_simulation_stratified. Feeds
-    the empirical state_matrix row at (t_prev, f) into every booster that
-    reads s_prev, instead of the sim's own propagated state. Isolates whether
-    the assortment-size collapse in the standard sim is driven by state
-    drift (empirical s_prev ⇒ calibrated assortment) or by pbase/ρ̃
-    miscalibration independently of state.
-    """
+    """State-locked diagnostic sim — feeds empirical state_matrix at (t_prev, f) as s_prev."""
     input:
         "scripts/bbl_forward_simulation_stratified.jl",
         model_frames="data/model_frames.jld2",
@@ -1561,12 +1554,7 @@ rule data_bbl_simulations_state_locked_stratified:
 
 
 rule table_diagnose_sim_assortments_state_locked_stratified:
-    """
-    Same diagnostic as table_diagnose_sim_assortments_stratified, run against
-    the state-locked sim outputs. Side-by-side comparison with the standard
-    sizes/groups/pairs tables answers whether the assortment-size collapse
-    survives when state drift is removed from the sim.
-    """
+    """Same as table_diagnose_sim_assortments_stratified, against the state-locked sim."""
     input:
         "scripts/diagnose_sim_assortments_stratified.jl",
         model_frames="data/model_frames.jld2",
@@ -1591,15 +1579,7 @@ rule table_diagnose_sim_assortments_state_locked_stratified:
 
 
 rule table_diagnose_quantile_calibration_stratified:
-    """
-    In-sample calibration of the deployed state-transition and price-density
-    quantile-grid boosters. For each VK and each τ in Supply.QUANTILE_LEVELS,
-    predicts on the full training X and reports per-(year, quarter, model_year)
-    hit rate (should ≈ τ) and median residual. Also outputs a coverage table
-    showing training-row counts per (year, quarter) so thin cells show up.
-    Cheap first pass — biased optimistic by early-stopping leakage, but any
-    cell with large |cal_err| in-sample is a definite miscalibration.
-    """
+    """In-sample quantile-grid calibration for state_transition and price_density boosters."""
     input:
         "scripts/diagnose_quantile_calibration_stratified.jl",
         model_frames="data/model_frames.jld2",
@@ -1624,16 +1604,7 @@ rule table_diagnose_quantile_calibration_stratified:
 
 
 rule table_diagnose_strata_ablation_stratified:
-    """
-    A/B refit on ~10 symptomatic VKs (biggest p_real − p_sim gaps). For each
-    VK and each target ∈ {intercept, own, log_price}, holds out 20% of rows
-    (stratified by (year, quarter)), then refits two arms on the remaining
-    80%: Arm A = current (no strata on early-stopping split), Arm B =
-    strata = (year, quarter). Scores both on the 20% holdout per τ. Confirms
-    whether strata = (year, quarter) materially improves calibration on the
-    cells the sim is undercalling. Uses Distributed pmap — pass
-    --config processes=N.
-    """
+    """A/B refit on symptomatic VKs: nostrata vs strata=(year,quarter). Distributed."""
     input:
         "scripts/diagnose_strata_ablation_stratified.jl",
         model_frames="data/model_frames.jld2",
@@ -1656,18 +1627,7 @@ rule table_diagnose_strata_ablation_stratified:
 
 
 rule table_diagnose_log_j_shift_stratified:
-    """
-    Per-quarter comparison of total live products J_t (sum of assortment sizes
-    across all dealers) in sim vs observed, with log_j_shift = log(J_sim) −
-    log(J_obs). Hypothesis: the systematic positive intercept bias in
-    diagnose_state_drift_columns_stratified for F-series products is driven by
-    the Ackerberg-Rysman log(J) covariate inside pred_regout — sim's shrunk
-    assortment at quarter t gives sweep_δ a smaller log(J) than training saw,
-    and the AR term shifts predicted δ (and therefore residual_demand's
-    recovered intercept). If |log_j_shift| grows over time in tandem with the
-    intercept drift growth in diagnose_state_drift_summary, this is likely
-    the mechanism.
-    """
+    """Per-quarter J_sim vs J_obs with log_j_shift = log(J_sim) − log(J_obs)."""
     input:
         "scripts/diagnose_log_j_shift_stratified.jl",
         residual_demand="data/residual_demand.jld2",
@@ -1689,13 +1649,7 @@ rule table_diagnose_log_j_shift_stratified:
 
 
 rule table_diagnose_state_drift_stratified:
-    """
-    Per-column drift of simulated state_actual vs observed state_matrix at each
-    (t, f). Each state column tagged by (focal_vk model/MY/extra, coef_type ∈
-    {intercept, own, cross}, partner_vk when cross). Also produces a (quarter ×
-    coef_type × focal_model_year) summary so model-year effects (e.g. a 2016
-    MY blow-up) show up as a row-level signal.
-    """
+    """Per-column drift of sim state_actual vs observed state_matrix, tagged by VK group."""
     input:
         "scripts/diagnose_state_drift_stratified.jl",
         residual_demand="data/residual_demand.jld2",
@@ -1719,23 +1673,7 @@ rule table_diagnose_state_drift_stratified:
 
 
 rule table_diagnose_residual_demand_sensitivity:
-    """
-    Isolates where residual_demand's state-matrix output moves from.
-    Perturbations on observed (t, f) inputs:
-      - rng_reseed_A / rng_reseed_B: re-seed Supply._PRICE_SEEDS with a
-        different MersenneTwister, same assortment and prices (measures the
-        internal translog-OLS sampling noise). bbl_forward_simulation_stratified
-        does NOT re-seed _PRICE_SEEDS from a fixed stream, so any materially
-        nonzero number here means the sim's state matrix uses a different
-        perturbation grid than data/residual_demand.jld2 was built with.
-      - drop_one_trim: ModelDelete one random product from the assortment
-        (sim's assortment typically differs from observed by ~5 trims).
-      - prices_x1.05: PriceMultiply the whole assortment by 1.05 (sim prices
-        drawn from the price density typically live within a few % of obs).
-    Compare the resulting mean/p90/p99 |Δ| per coef_type against the drift
-    magnitudes in diagnose_state_drift_summary — whichever perturbation's
-    magnitude matches the drift is the mechanism we need to fix.
-    """
+    """residual_demand sensitivity to _PRICE_SEEDS reseed, drop_one_trim, and prices_x1.05."""
     input:
         "scripts/diagnose_residual_demand_sensitivity.jl",
         model_frames="data/model_frames.jld2",
@@ -2014,6 +1952,16 @@ rule all_stratified:
         # New data-only outputs (plots not yet in paper)
         "data/bbl_estimates_stratified.jld2",
         "data/nash_bertrand_counterfactual_stratified.jld2",
+        # Diagnostics
+        "tables/diagnose_sim_assortments_sizes_stratified.arrow",
+        "tables/diagnose_sim_assortments_sizes_state_locked_stratified.arrow",
+        "tables/diagnose_quantile_calibration_stratified.arrow",
+        "tables/diagnose_strata_ablation_stratified.arrow",
+        "tables/diagnose_log_j_shift_stratified.arrow",
+        "tables/diagnose_state_drift_summary_stratified.arrow",
+        "tables/diagnose_residual_demand_sensitivity.arrow",
+        "tables/diagnose_booster_splits_compliance_stratified_summary.arrow",
+        "tables/diagnose_state_anticipation_stratified.arrow",
 
 
 rule plot_wtp_distance:

@@ -50,13 +50,7 @@ function (@main)(_)
         kept_set = Set(kept_vks)
         price_table = read_arrow(snakemake.input["price_table"])
 
-        # Deterministically seed Supply._PRICE_SEEDS to the exact same stream
-        # residual_demands.jl uses to build data/residual_demand.jld2. Without
-        # this, bbl_forward_simulation's residual_demand reads state through a
-        # fresh default-RNG perturbation grid, which the sensitivity diagnostic
-        # (tables/diagnose_residual_demand_sensitivity.arrow) showed accounts
-        # for ~all of the cross-coefficient drift and ~40% of own-coefficient
-        # drift in the state matrix.
+        # Match residual_demands.jl's _PRICE_SEEDS stream exactly.
         let rng_seeds = MersenneTwister(20260709)
             Supply._PRICE_SEEDS[] =
                 rand(rng_seeds, Float32, length(kept_vks), Supply.SIM_SIZE) .*
@@ -198,18 +192,19 @@ function (@main)(_)
             grid = bootup_grid(byte_grid, ncols_state + 1)
             grid === nothing || (price_boosters[vk] = grid)
         end
+        # state_transition X layout: [state_{t-1}, log(J_t), quarter_of_year(t)] (+partner on cross).
         st_int_boosters = Dict{VehicleKey, Vector{XGBoost.Booster}}()
         st_own_boosters = Dict{VehicleKey, Vector{XGBoost.Booster}}()
         st_cross_boosters = Dict{VehicleKey, Vector{XGBoost.Booster}}()
         for (vk, (int_grid, own_grid, cross_grid)) in state_transition
-            int_g = bootup_grid(int_grid, ncols_state)
+            int_g = bootup_grid(int_grid, ncols_state + 2)
             int_g === nothing || (st_int_boosters[vk] = int_g)
-            own_g = bootup_grid(own_grid, ncols_state)
+            own_g = bootup_grid(own_grid, ncols_state + 2)
             own_g === nothing || (st_own_boosters[vk] = own_g)
             # Cross grid is optional (all-empty when n_cross < 20 at fit time,
             # or partially-empty when some quantile fits failed): only store
             # if fully populated.
-            cross_g = bootup_grid(cross_grid, ncols_state + 1)
+            cross_g = bootup_grid(cross_grid, ncols_state + 3)
             cross_g === nothing || (st_cross_boosters[vk] = cross_g)
         end
 
@@ -304,11 +299,7 @@ function (@main)(_)
             iota_prev[f] = rand(rng) < get(p_compliant_t0, f, 0.5f0)
         end
 
-        # Diagnostic knob: when state_locked, feed the empirical state at
-        # (t_prev, f) into every booster that reads s_prev. Isolates whether
-        # the sim's assortment collapse is driven by state drift (empirical
-        # state → calibrated assortment ⇒ drift is the whole story) or by
-        # pbase/ρ̃ miscalibration independently of state.
+        # state_locked diagnostic: pin s_prev to empirical state at (t_prev, f).
         empirical_s = Dict{Tuple{QuarterKey, UUID}, Vector{Float32}}()
         if state_locked
             for ((t_k, f_k), i_row) in state_lookup
@@ -435,6 +426,22 @@ function (@main)(_)
                 end
                 finalize(dm_state)
                 assortment_by_dealer[f] = new_assortment
+            end
+
+            # Sim J_t fed into state_transition — AR slope must extrapolate below training J.
+            J_t_sim = sum(length(a) for a in values(assortment_by_dealer); init = 0)
+            log_J_t_sim = Float32(log(max(J_t_sim, 1)))
+            @info "Sim J_t" t J_t_sim log_J_t_sim
+
+            for f in dealers
+                haskey(assortment_by_dealer, f) || continue
+                s_prev = if state_locked
+                    empirical_s[(t_prev, f)]
+                else
+                    state_prev[f]
+                end
+                new_assortment = assortment_by_dealer[f]
+                log_phi = log_phi_by_dealer[f]
 
                 # Expected state s_t via quantile-grid transition boosters.
                 # Draws are inverse-CDF from the 9-knot quantile grid (with
@@ -449,7 +456,13 @@ function (@main)(_)
                     )
                 end
                 state_exp_mat = fill(NaN32, J, J + 1)
-                dm_prev_row = XGBoost.DMatrix(reshape(s_prev, 1, :))
+                x_state_input = Vector{Float32}(undef, ncols_state + 2)
+                @inbounds for i in 1:ncols_state
+                    x_state_input[i] = s_prev[i]
+                end
+                x_state_input[ncols_state + 1] = log_J_t_sim
+                x_state_input[ncols_state + 2] = Float32(t[2])
+                dm_prev_row = XGBoost.DMatrix(reshape(x_state_input, 1, :))
                 for vk in new_assortment
                     j_idx = prod_index[vk]
                     state_exp_mat[j_idx, 1] = draw_scalar_grid(st_int_boosters[vk], dm_prev_row)
@@ -461,9 +474,11 @@ function (@main)(_)
                     haskey(st_cross_boosters, vk) || continue
                     partners = Int[prod_index[vk2] for vk2 in new_assortment if vk2 != vk]
                     isempty(partners) && continue
-                    X_cross = Matrix{Float32}(undef, length(partners), ncols_state + 1)
+                    X_cross = Matrix{Float32}(undef, length(partners), ncols_state + 3)
                     for i in eachindex(partners)
                         X_cross[i, 1:ncols_state] .= s_prev
+                        X_cross[i, ncols_state + 1] = log_J_t_sim
+                        X_cross[i, ncols_state + 2] = Float32(t[2])
                         X_cross[i, end] = Float32(partners[i])
                     end
                     dm_cross = XGBoost.DMatrix(X_cross)

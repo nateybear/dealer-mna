@@ -43,6 +43,12 @@ using Distributed
         for k in tf_keys
     )
 
+    # J_by_t: matches the log(J_t) feature in state_transition training.
+    J_by_t = Dict{QuarterKey, Int}()
+    for tf in tf_keys
+        J_by_t[tf[1]] = get(J_by_t, tf[1], 0) + length(intermed[tf])
+    end
+
     intercept_col(j_idx) = j_idx
     coefficient_col(j_idx, k_idx) = j_idx + k_idx * J
     tlag_of(t) = t[2] == 1 ? (t[1] - 1, 4) : (t[1], t[2] - 1)
@@ -106,7 +112,7 @@ using Distributed
 
     params_shared = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (subsample = 0.8, max_depth = 8, min_child_weight = 5, eta = 0.05, lambda = 1.0),
+        (subsample = 0.8, max_depth = 8, min_child_weight = 1, eta = 0.05, lambda = 1.0),
     )
 
     function panel_for_product(j_idx)
@@ -130,9 +136,12 @@ using Distributed
             rows_t, rows_tlag = panel_for_product(j_idx)
             n = length(rows_t)
             n == 0 && return nothing
-            X = Matrix{Float32}(undef, n, ncols_state)
+            X = Matrix{Float32}(undef, n, ncols_state + 2)
             for r in 1:n
-                X[r, :] .= @view state_matrix[rows_tlag[r], :]
+                X[r, 1:ncols_state] .= @view state_matrix[rows_tlag[r], :]
+                t_r = tf_keys[rows_t[r]][1]
+                X[r, ncols_state + 1] = Float32(log(Float64(J_by_t[t_r])))
+                X[r, ncols_state + 2] = Float32(t_r[2])
             end
             col =
                 target == "intercept" ? intercept_col(j_idx) :

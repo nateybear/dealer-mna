@@ -27,6 +27,13 @@ function (@main)(_)
             for k in tf_keys
         )
 
+        # J_by_t = total kept-VK (t, j, f) triples per quarter, summed across
+        # dealers. Matches the log(J_t) feature in state_transition training.
+        J_by_t = Dict{QuarterKey, Int}()
+        for tf in tf_keys
+            J_by_t[tf[1]] = get(J_by_t, tf[1], 0) + length(intermed[tf])
+        end
+
         price_table = read_arrow(snakemake.input["price_table"])
         vk_to_group = Dict{VehicleKey, Tuple{String, Int64, String}}()
         for row in eachrow(price_table)
@@ -99,9 +106,12 @@ function (@main)(_)
             n = length(rows_t)
             n == 0 && continue
 
-            X_common = Matrix{Float32}(undef, n, ncols_state)
+            X_common = Matrix{Float32}(undef, n, ncols_state + 2)
             for r in 1:n
-                X_common[r, :] .= @view state_matrix[rows_tlag[r], :]
+                X_common[r, 1:ncols_state] .= @view state_matrix[rows_tlag[r], :]
+                t_r = tf_keys[rows_t[r]][1]
+                X_common[r, ncols_state + 1] = Float32(log(Float64(J_by_t[t_r])))
+                X_common[r, ncols_state + 2] = Float32(t_r[2])
             end
             y_int = Float32[state_matrix[rows_t[r], intercept_col(j_idx)] for r in 1:n]
             y_own = Float32[state_matrix[rows_t[r], coefficient_col(j_idx, j_idx)] for r in 1:n]
@@ -118,7 +128,7 @@ function (@main)(_)
                 ("own", own_bytes, y_own),
             )
                 for (qi, τ) in enumerate(τs)
-                    b = bootup(byte_grid[qi], ncols_state)
+                    b = bootup(byte_grid[qi], ncols_state + 2)
                     b === nothing && continue
                     ŷ = XGBoost.predict(b, dm; margin = true)
                     finalize(b)
@@ -146,14 +156,14 @@ function (@main)(_)
             end
             n_cross = length(cross_r)
             if n_cross > 0 && !all(isempty, cross_bytes)
-                X_cross = Matrix{Float32}(undef, n_cross, ncols_state + 1)
+                X_cross = Matrix{Float32}(undef, n_cross, ncols_state + 3)
                 for i in 1:n_cross
-                    X_cross[i, 1:ncols_state] .= @view X_common[cross_r[i], :]
+                    X_cross[i, 1:(ncols_state + 2)] .= @view X_common[cross_r[i], :]
                     X_cross[i, end] = Float32(cross_k[i])
                 end
                 dm_cross = XGBoost.DMatrix(X_cross)
                 for (qi, τ) in enumerate(τs)
-                    b = bootup(cross_bytes[qi], ncols_state + 1)
+                    b = bootup(cross_bytes[qi], ncols_state + 3)
                     b === nothing && continue
                     ŷ = XGBoost.predict(b, dm_cross; margin = true)
                     finalize(b)
