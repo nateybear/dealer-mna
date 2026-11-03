@@ -1590,6 +1590,71 @@ rule table_diagnose_sim_assortments_state_locked_stratified:
         )
 
 
+rule table_diagnose_quantile_calibration_stratified:
+    """
+    In-sample calibration of the deployed state-transition and price-density
+    quantile-grid boosters. For each VK and each τ in Supply.QUANTILE_LEVELS,
+    predicts on the full training X and reports per-(year, quarter, model_year)
+    hit rate (should ≈ τ) and median residual. Also outputs a coverage table
+    showing training-row counts per (year, quarter) so thin cells show up.
+    Cheap first pass — biased optimistic by early-stopping leakage, but any
+    cell with large |cal_err| in-sample is a definite miscalibration.
+    """
+    input:
+        "scripts/diagnose_quantile_calibration_stratified.jl",
+        model_frames="data/model_frames.jld2",
+        residual_demand="data/residual_demand.jld2",
+        price_table="data/price_table.arrow",
+        state_transition="data/state_transition_stratified.jld2",
+        price_densities="data/price_densities_stratified.jld2",
+        sales_targets="data/sales_targets_stratified.jld2",
+        compliance="data/compliance_stratified.arrow",
+    output:
+        calibration="tables/diagnose_quantile_calibration_stratified.arrow",
+        coverage="tables/diagnose_booster_coverage_stratified.arrow",
+    log:
+        "logs/diagnose_quantile_calibration_stratified.log",
+    run:
+        julia(
+            "scripts/diagnose_quantile_calibration_stratified.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule table_diagnose_strata_ablation_stratified:
+    """
+    A/B refit on ~10 symptomatic VKs (biggest p_real − p_sim gaps). For each
+    VK and each target ∈ {intercept, own, log_price}, holds out 20% of rows
+    (stratified by (year, quarter)), then refits two arms on the remaining
+    80%: Arm A = current (no strata on early-stopping split), Arm B =
+    strata = (year, quarter). Scores both on the 20% holdout per τ. Confirms
+    whether strata = (year, quarter) materially improves calibration on the
+    cells the sim is undercalling. Uses Distributed pmap — pass
+    --config processes=N.
+    """
+    input:
+        "scripts/diagnose_strata_ablation_stratified.jl",
+        model_frames="data/model_frames.jld2",
+        residual_demand="data/residual_demand.jld2",
+        price_table="data/price_table.arrow",
+        sales_targets="data/sales_targets_stratified.jld2",
+        compliance="data/compliance_stratified.arrow",
+    output:
+        ablation="tables/diagnose_strata_ablation_stratified.arrow",
+    log:
+        "logs/diagnose_strata_ablation_stratified.log",
+    run:
+        julia(
+            "scripts/diagnose_strata_ablation_stratified.jl",
+            input=input,
+            output=output,
+            log=log,
+            processes=config.get("processes", 1),
+        )
+
+
 rule table_diagnose_log_j_shift_stratified:
     """
     Per-quarter comparison of total live products J_t (sum of assortment sizes
