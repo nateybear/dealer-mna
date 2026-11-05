@@ -1578,6 +1578,50 @@ rule table_diagnose_sim_assortments_state_locked_stratified:
         )
 
 
+rule table_diagnose_state_anticipation_by_vk_stratified:
+    """state_actual − state_expected residuals broken out by focal VK group."""
+    input:
+        "scripts/diagnose_state_anticipation_by_vk_stratified.jl",
+        residual_demand="data/residual_demand.jld2",
+        price_table="data/price_table.arrow",
+        simulations=expand(
+            "data/bbl_simulation_stratified/seed_{seed}.jld2",
+            seed=STRATIFIED_SEEDS,
+        ),
+    output:
+        summary="tables/diagnose_state_anticipation_by_vk_stratified.arrow",
+    log:
+        "logs/diagnose_state_anticipation_by_vk_stratified.log",
+    run:
+        julia(
+            "scripts/diagnose_state_anticipation_by_vk_stratified.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
+rule table_diagnose_log_j_response_stratified:
+    """Median state_transition intercept booster response across log(J) ∈ [7.3, 8.5]."""
+    input:
+        "scripts/diagnose_log_j_response_stratified.jl",
+        model_frames="data/model_frames.jld2",
+        residual_demand="data/residual_demand.jld2",
+        price_table="data/price_table.arrow",
+        state_transition="data/state_transition_stratified.jld2",
+    output:
+        response="tables/diagnose_log_j_response_stratified.arrow",
+    log:
+        "logs/diagnose_log_j_response_stratified.log",
+    run:
+        julia(
+            "scripts/diagnose_log_j_response_stratified.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 rule table_diagnose_quantile_calibration_stratified:
     """In-sample quantile-grid calibration for state_transition and price_density boosters."""
     input:
@@ -1962,6 +2006,8 @@ rule all_stratified:
         "tables/diagnose_residual_demand_sensitivity.arrow",
         "tables/diagnose_booster_splits_compliance_stratified_summary.arrow",
         "tables/diagnose_state_anticipation_stratified.arrow",
+        "tables/diagnose_state_anticipation_by_vk_stratified.arrow",
+        "tables/diagnose_log_j_response_stratified.arrow",
 
 
 rule plot_wtp_distance:
