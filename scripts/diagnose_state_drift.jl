@@ -12,7 +12,7 @@ function (@main)(_)
         tf_keys = rd.tf_keys
         tf_to_row = Dict(k => i for (i, k) in enumerate(tf_keys))
         K = length(kept_vks)
-        ncols = K * (K + 1)
+        ncols = K * Supply.state_matrix_width(K)
         @info "Loaded obs state matrix" K M = length(tf_keys) ncols
 
         price_table = read_arrow(snakemake.input["price_table"])
@@ -108,10 +108,14 @@ function (@main)(_)
             focal_grp = get(vk_to_group, focal_vk, ("unknown", 0, "unknown"))
             coef_type, partner_vk = if k_col == 1
                 ("intercept", nothing)
-            elseif k_col - 1 == j_focal
-                ("own", nothing)
+            elseif k_col <= K + 1
+                partner = k_col - 1
+                partner == j_focal ? ("own_firstorder", nothing) :
+                    ("cross_firstorder", kept_vks[partner])
             else
-                ("cross", kept_vks[k_col - 1])
+                partner = k_col - 1 - K
+                partner == j_focal ? ("own_secondorder", nothing) :
+                    ("cross_interaction", kept_vks[partner])
             end
             partner_grp =
                 partner_vk === nothing ? ("", 0, "") :
@@ -142,7 +146,10 @@ function (@main)(_)
         )
         all_mys = unique(cols.focal_model_year)
         for q in sort(collect(all_quarters))
-            for ct in ("intercept", "own", "cross")
+            for ct in (
+                "intercept", "own_firstorder", "own_secondorder",
+                "cross_firstorder", "cross_interaction",
+            )
                 for my in all_mys
                     mask =
                         (cols.coef_type .== ct) .& (cols.focal_model_year .== my)

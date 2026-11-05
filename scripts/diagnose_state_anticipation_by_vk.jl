@@ -8,7 +8,7 @@ function (@main)(_)
         rd = JLD2.load_object(snakemake.input["residual_demand"])
         kept_vks = rd.kept_vks
         K = length(kept_vks)
-        ncols = K * (K + 1)
+        ncols = K * Supply.state_matrix_width(K)
 
         price_table = read_arrow(snakemake.input["price_table"])
         vk_to_group = Dict{VehicleKey, Tuple{String, Int64, String}}()
@@ -50,10 +50,10 @@ function (@main)(_)
                     k_col = ((c - 1) ÷ K) + 1
                     coef_type = if k_col == 1
                         "intercept"
-                    elseif k_col - 1 == j_focal
-                        "own"
+                    elseif k_col <= K + 1
+                        k_col - 1 == j_focal ? "own_firstorder" : "cross_firstorder"
                     else
-                        "cross"
+                        k_col - 1 - K == j_focal ? "own_secondorder" : "cross_interaction"
                     end
                     vk_focal = kept_vks[j_focal]
                     haskey(vk_to_group, vk_focal) || continue

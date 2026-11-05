@@ -9,10 +9,9 @@ julia_dealers = glob.glob("src/dealers/**/*.jl")
 julia_empirics = glob.glob("src/empirics/**/*.jl")
 
 
-# Number of BBL forward-sim replications for the stratified pipeline. Kept
-# small for fast local cuts; bump for the final run. Every stratified rule
-# that iterates over seeds pulls from here.
-STRATIFIED_SEEDS = range(1, 101)
+# Number of BBL forward-sim replications. Kept small for fast local iteration;
+# bump for the final run.
+BBL_SEEDS = range(1, 51)
 
 
 # Wildcard constraints
@@ -1052,13 +1051,28 @@ rule data_residual_demand:
         )
 
 
+rule table_assortment_probs:
+    input:
+        "scripts/plot_assortment_probs.jl",
+        fords = "data/arrow/fords.arrow",
+        dealer_demographics = "data/dealer_demographics.arrow",
+    output:
+        reg_table="tables/markup_trim_regression.tex",
+        trim_csv="tables/trim_variation_dealer_quarter.csv",
+    log:
+        "logs/plot_assortment_probs.log",
+    run:
+        julia(
+            "scripts/plot_assortment_probs.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
+
 rule data_compliance_estimation:
     """
-    Cross-fit CEM (step 1) + full-data OOS-best-round refit (step 2), with the
-    sales-target booster φ(X) fit jointly each SEM round. The script uses
-    hardcoded data/ paths, so the input/output declarations exist only for
-    Snakemake dependency tracking. Runs with Distributed via `-p N` — set
-    `--config processes=N` to choose the worker count.
+    Compliance estimation: per-trim K-fold splits stratified on is_sold.
     """
     input:
         "scripts/compliance_estimation.jl",
@@ -1087,10 +1101,11 @@ rule data_compliance_estimation:
 
 rule data_price_density_estimation:
     """
-    Per-VehicleKey XGBoost mean and stddev boosters with OOS best-round selection.
-    Now conditions on (state_{t, f}, log φ_{t, f}) — sales-target booster
-    predictions per (t, f). Hardcoded input paths in the script; rule inputs
-    exist for dependency tracking.
+    Nonparametric conditional log-price density via quantile-regression grid
+    (Supply.QUANTILE_LEVELS). Output is Dict{VehicleKey, Vector{Vector{UInt8}}}
+    — one saved booster per quantile per VK. BBL sim samples via
+    Supply.sample_from_quantile_grid (inverse-CDF with linear interpolation).
+    Replaces the mean+var Normal density on the un-suffixed rule.
     """
     input:
         "scripts/price_density_estimation.jl",
@@ -1115,9 +1130,12 @@ rule data_price_density_estimation:
 
 rule data_state_transition_estimation:
     """
-    Per-VehicleKey (α₀, α_own, α_cross) XGBoost boosters for the state
-    transition s_t = g(s_{t-1}). Follows the p_base/ρ̃ pattern: hardcoded
-    input paths, Distributed via `-p N`.
+    Quantile-regression grid variant of data_state_transition_estimation.
+    Fits one booster per level in Supply.QUANTILE_LEVELS for each of the
+    intercept, own, and cross transition targets. Same input universe as the
+    un-suffixed rule (no compliance dependency) but a distinct output file
+    because the format is different (Vector{Vector{UInt8}}³ vs the 6-booster
+    mean/var tuple).
     """
     input:
         "scripts/state_transition_estimation.jl",
@@ -1140,10 +1158,11 @@ rule data_state_transition_estimation:
 
 rule data_bbl_simulation:
     """
-    One BBL forward-simulation sample path from Q1 2017 through Q4 2019.
-    RNG seeded via the `seed` wildcard so Snakemake can fan out across
-    seeds in parallel. Consumes every supply-side estimator + demand
-    counterfactual machinery.
+    Stratified-branch BBL forward simulation. Uses the copied
+    bbl_forward_simulation.jl (not the un-suffixed script) because
+    the price + state-transition density formats differ (quantile grid vs
+    mean+var). Also reads the  compliance/sales_targets/
+    price_densities/state_transition inputs.
     """
     input:
         "scripts/bbl_forward_simulation.jl",
@@ -1170,323 +1189,13 @@ rule data_bbl_simulation:
             log=log,
         )
 
+
 rule data_bbl_simulations:
     input:
-        expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 201))
+        expand("data/bbl_simulation/seed_{seed}.jld2", seed=BBL_SEEDS)
 
 
-rule data_bbl_matrix:
-    """
-    Aggregates the BBL sim seeds into BBLMatrices — one (R, C) pair per
-    (FE type, scenario, seed) triple. Rebuilds the same eviction / usable_vks
-    pruning as bbl_forward_simulation so the BBLIndex's dealer + vehicle
-    columns align with the sim outputs 1:1.
-    """
-    input:
-        "scripts/bbl_matrix.jl",
-        model_frames="data/model_frames.jld2",
-        demand_estimates="data/demand_estimates.jld2",
-        delta_decomp="data/delta_decomposition_regout.jld2",
-        price_densities="data/price_densities.jld2",
-        state_transition="data/state_transition.jld2",
-        simulations=expand("data/bbl_simulation/seed_{seed}.jld2", seed=range(1, 201)),
-    output:
-        "data/bbl_matrix.jld2",
-    log:
-        "logs/bbl_matrix.log",
-    run:
-        julia(
-            "scripts/bbl_matrix.jl",
-            input=input,
-            output=output,
-            log=log,
-        )
-
-
-rule data_bbl_matrix_maps:
-    """
-    Flatten BBLMatrices into memory-mapped Float64 arrays holding
-    (observed − perturbation) diffs, one row per (scenario, tf), one column per
-    sim. bbl_estimation.jl reads these via `Mmap.mmap` and hardcoded paths.
-    """
-    input:
-        "scripts/bbl_matrix_to_map.jl",
-        bbl_matrix="data/bbl_matrix.jld2",
-    output:
-        R="data/bbl_R.map",
-        C_j="data/bbl_C_j.map",
-        C_f="data/bbl_C_f.map",
-        C_t="data/bbl_C_t.map",
-    log:
-        "logs/bbl_matrix_to_map.log",
-    run:
-        julia(
-            "scripts/bbl_matrix_to_map.jl",
-            input=input,
-            output=output,
-            log=log,
-        )
-
-
-rule data_bbl_estimation:
-    """
-    Solve the moment-inequality LP for identified sets on (w, f, t). Consumes
-    the flat .map files produced by data_bbl_matrix_maps.
-    """
-    input:
-        "scripts/bbl_estimation.jl",
-        bbl_matrix="data/bbl_matrix.jld2",
-        R="data/bbl_R.map",
-        C_j="data/bbl_C_j.map",
-        C_f="data/bbl_C_f.map",
-        C_t="data/bbl_C_t.map",
-    output:
-        "data/bbl_estimates.jld2",
-    log:
-        "logs/bbl_estimation.log",
-    run:
-        julia(
-            "scripts/bbl_estimation.jl",
-            input=input,
-            output=output,
-            log=log,
-        )
-
-
-rule table_assortment_probs:
-    input:
-        "scripts/plot_assortment_probs.jl",
-        fords = "data/arrow/fords.arrow",
-        dealer_demographics = "data/dealer_demographics.arrow",
-    output:
-        reg_table="tables/markup_trim_regression.tex",
-        trim_csv="tables/trim_variation_dealer_quarter.csv",
-    log:
-        "logs/plot_assortment_probs.log",
-    run:
-        julia(
-            "scripts/plot_assortment_probs.jl",
-            input=input,
-            output=output,
-            log=log,
-        )
-
-
-rule plot_sales_targets_scatter:
-    input:
-        "scripts/plot_sales_targets_scatter.jl",
-        model_frames="data/model_frames.jld2",
-        state_matrix="data/residual_demand.jld2",
-        compliance="data/compliance.arrow",
-        sales_targets="data/sales_targets.jld2",
-        fords="data/arrow/fords.arrow",
-    output:
-        plot="plots/sales_targets_scatter.png",
-    log:
-        "logs/plot_sales_targets_scatter.log",
-    run:
-        julia(
-            "scripts/plot_sales_targets_scatter.jl",
-            input=input,
-            output=output,
-            log=log,
-        )
-
-rule plot_trim_probabilities:
-    input:
-        "scripts/plot_trim_probabilities.jl",
-        state_matrix="data/residual_demand.jld2",
-        fits="data/compliance_fits_final.jld2",
-        fords="data/arrow/fords.arrow",
-    output:
-        popular_plot="plots/trim_probabilities_popular.png",
-        variation_plot="plots/trim_probabilities_variation.png",
-    log:
-        "logs/plot_trim_probabilities.log",
-    run:
-        julia(
-            "scripts/plot_trim_probabilities.jl",
-            input=input,
-            output=output,
-            log=log,
-        )
-
-rule table_trim_probabilities:
-    input:
-        "scripts/table_trim_probabilities.jl",
-        state_matrix="data/residual_demand.jld2",
-        fits="data/compliance_fits_final.jld2",
-        fords="data/arrow/fords.arrow",
-    output:
-        tex="tables/trim_probabilities.tex",
-        csv="tables/trim_probabilities.csv",
-    log:
-        "logs/table_trim_probabilities.log",
-    run:
-        julia(
-            "scripts/table_trim_probabilities.jl",
-            input=input,
-            output=output,
-            log=log,
-        )
-
-rule plot_mcem_trace:
-    input:
-        "scripts/plot_mcem_trace.jl",
-        mcem_trace="data/compliance_mcem_trace.jld2",
-    output:
-        plot="plots/mcem_trace.png",
-        summary="data/mcem_trace_summary.jld2",
-    log:
-        "logs/plot_mcem_trace.log",
-    run:
-        julia(
-            "scripts/plot_mcem_trace.jl",
-            input=input,
-            output=output,
-            log=log,
-        )
-
-
-# ============================================================================
-# STRATIFIED-FOLD PARALLEL PIPELINE
-# ----------------------------------------------------------------------------
-# Mirrors compliance → price densities → BBL sim → matrix → maps → estimation
-# and every downstream compliance/BBL plot/table, all under `_stratified`
-# suffixed sibling paths. Lets the current pipeline stay live while the
-# stratified re-estimation cooks; swap in with `mv` when validated.
-# See plans/compliance_stratified_folds.md for the design + swap procedure.
-# ============================================================================
-
-
-rule data_compliance_estimation_stratified:
-    """
-    Parallel-track compliance estimation with per-trim K-fold splits stratified
-    on is_sold. Same script structure as data_compliance_estimation; outputs
-    are written under _stratified sibling paths so both estimates coexist.
-    """
-    input:
-        "scripts/compliance_estimation_stratified.jl",
-        dealers_init="data/dealers_init_filtered.jld2",
-        fords="data/arrow/fords.arrow",
-        dealer_demographics="data/dealer_demographics.arrow",
-        model_frames="data/model_frames.jld2",
-        residual_demand="data/residual_demand.jld2",
-    output:
-        compliance="data/compliance_stratified.arrow",
-        fits="data/compliance_fits_stratified.jld2",
-        fits_final="data/compliance_fits_final_stratified.jld2",
-        sales_targets="data/sales_targets_stratified.jld2",
-        mcem_trace="data/compliance_mcem_trace_stratified.jld2",
-    log:
-        "logs/compliance_estimation_stratified.log",
-    run:
-        julia(
-            "scripts/compliance_estimation_stratified.jl",
-            input=input,
-            output=output,
-            log=log,
-            processes=config.get("processes", 1),
-        )
-
-
-rule data_price_density_estimation_stratified:
-    """
-    Nonparametric conditional log-price density via quantile-regression grid
-    (Supply.QUANTILE_LEVELS). Output is Dict{VehicleKey, Vector{Vector{UInt8}}}
-    — one saved booster per quantile per VK. BBL sim samples via
-    Supply.sample_from_quantile_grid (inverse-CDF with linear interpolation).
-    Replaces the mean+var Normal density on the un-suffixed rule.
-    """
-    input:
-        "scripts/price_density_estimation_stratified.jl",
-        model_frames="data/model_frames.jld2",
-        residual_demand="data/residual_demand.jld2",
-        sales_targets="data/sales_targets_stratified.jld2",
-        compliance="data/compliance_stratified.arrow",
-        price_table="data/price_table.arrow",
-    output:
-        price_densities="data/price_densities_stratified.jld2",
-    log:
-        "logs/price_density_estimation_stratified.log",
-    run:
-        julia(
-            "scripts/price_density_estimation_stratified.jl",
-            input=input,
-            output=output,
-            log=log,
-            processes=config.get("processes", 1),
-        )
-
-
-rule data_state_transition_estimation_stratified:
-    """
-    Quantile-regression grid variant of data_state_transition_estimation.
-    Fits one booster per level in Supply.QUANTILE_LEVELS for each of the
-    intercept, own, and cross transition targets. Same input universe as the
-    un-suffixed rule (no compliance dependency) but a distinct output file
-    because the format is different (Vector{Vector{UInt8}}³ vs the 6-booster
-    mean/var tuple).
-    """
-    input:
-        "scripts/state_transition_estimation_stratified.jl",
-        model_frames="data/model_frames.jld2",
-        residual_demand="data/residual_demand.jld2",
-        price_table="data/price_table.arrow",
-    output:
-        state_transition="data/state_transition_stratified.jld2",
-    log:
-        "logs/state_transition_estimation_stratified.log",
-    run:
-        julia(
-            "scripts/state_transition_estimation_stratified.jl",
-            input=input,
-            output=output,
-            log=log,
-            processes=config.get("processes", 1),
-        )
-
-
-rule data_bbl_simulation_stratified:
-    """
-    Stratified-branch BBL forward simulation. Uses the copied
-    bbl_forward_simulation_stratified.jl (not the un-suffixed script) because
-    the price + state-transition density formats differ (quantile grid vs
-    mean+var). Also reads the _stratified compliance/sales_targets/
-    price_densities/state_transition inputs.
-    """
-    input:
-        "scripts/bbl_forward_simulation_stratified.jl",
-        model_frames="data/model_frames.jld2",
-        demand_estimates="data/demand_estimates.jld2",
-        delta_decomp="data/delta_decomposition_regout.jld2",
-        compliance_fits="data/compliance_fits_final_stratified.jld2",
-        sales_targets="data/sales_targets_stratified.jld2",
-        price_densities="data/price_densities_stratified.jld2",
-        state_transition="data/state_transition_stratified.jld2",
-        compliance="data/compliance_stratified.arrow",
-        residual_demand="data/residual_demand.jld2",
-        price_table="data/price_table.arrow",
-    output:
-        sim="data/bbl_simulation_stratified/seed_{seed}.jld2",
-    log:
-        "logs/bbl_forward_simulation_stratified_seed_{seed}.log",
-    run:
-        julia(
-            "scripts/bbl_forward_simulation_stratified.jl",
-            input=input,
-            output=output,
-            wildcards=wildcards,
-            log=log,
-        )
-
-
-rule data_bbl_simulations_stratified:
-    input:
-        expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=STRATIFIED_SEEDS)
-
-
-rule table_diagnose_sim_assortments_stratified:
+rule table_diagnose_sim_assortments:
     """
     Compares simulated assortments against empirical assortments at (t, f).
     Three outputs: per-quarter size means (real vs sim), per-group marginal
@@ -1495,48 +1204,48 @@ rule table_diagnose_sim_assortments_stratified:
     Bernoulli group-firing loses joint structure present in the data.
     """
     input:
-        "scripts/diagnose_sim_assortments_stratified.jl",
+        "scripts/diagnose_sim_assortments.jl",
         model_frames="data/model_frames.jld2",
         price_table="data/price_table.arrow",
-        simulations=expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=STRATIFIED_SEEDS),
+        simulations=expand("data/bbl_simulation/seed_{seed}.jld2", seed=BBL_SEEDS),
     output:
-        sizes="tables/diagnose_sim_assortments_sizes_stratified.arrow",
-        groups="tables/diagnose_sim_assortments_groups_stratified.arrow",
-        pairs="tables/diagnose_sim_assortments_pairs_stratified.arrow",
+        sizes="tables/diagnose_sim_assortments_sizes.arrow",
+        groups="tables/diagnose_sim_assortments_groups.arrow",
+        pairs="tables/diagnose_sim_assortments_pairs.arrow",
     log:
-        "logs/diagnose_sim_assortments_stratified.log",
+        "logs/diagnose_sim_assortments.log",
     run:
         julia(
-            "scripts/diagnose_sim_assortments_stratified.jl",
+            "scripts/diagnose_sim_assortments.jl",
             input=input,
             output=output,
             log=log,
         )
 
 
-rule data_bbl_simulation_state_locked_stratified:
+rule data_bbl_simulation_state_locked:
     """State-locked diagnostic sim — feeds empirical state_matrix at (t_prev, f) as s_prev."""
     input:
-        "scripts/bbl_forward_simulation_stratified.jl",
+        "scripts/bbl_forward_simulation.jl",
         model_frames="data/model_frames.jld2",
         demand_estimates="data/demand_estimates.jld2",
         delta_decomp="data/delta_decomposition_regout.jld2",
-        compliance_fits="data/compliance_fits_final_stratified.jld2",
-        sales_targets="data/sales_targets_stratified.jld2",
-        price_densities="data/price_densities_stratified.jld2",
-        state_transition="data/state_transition_stratified.jld2",
-        compliance="data/compliance_stratified.arrow",
+        compliance_fits="data/compliance_fits_final.jld2",
+        sales_targets="data/sales_targets.jld2",
+        price_densities="data/price_densities.jld2",
+        state_transition="data/state_transition.jld2",
+        compliance="data/compliance.arrow",
         residual_demand="data/residual_demand.jld2",
         price_table="data/price_table.arrow",
     output:
-        sim="data/bbl_simulation_state_locked_stratified/seed_{seed}.jld2",
+        sim="data/bbl_simulation_state_locked/seed_{seed}.jld2",
     log:
-        "logs/bbl_forward_simulation_state_locked_stratified_seed_{seed}.log",
+        "logs/bbl_forward_simulation_state_locked_seed_{seed}.log",
     params:
         state_locked=True,
     run:
         julia(
-            "scripts/bbl_forward_simulation_stratified.jl",
+            "scripts/bbl_forward_simulation.jl",
             input=input,
             output=output,
             wildcards=wildcards,
@@ -1545,171 +1254,102 @@ rule data_bbl_simulation_state_locked_stratified:
         )
 
 
-rule data_bbl_simulations_state_locked_stratified:
+rule data_bbl_simulations_state_locked:
     input:
         expand(
-            "data/bbl_simulation_state_locked_stratified/seed_{seed}.jld2",
-            seed=STRATIFIED_SEEDS,
+            "data/bbl_simulation_state_locked/seed_{seed}.jld2",
+            seed=BBL_SEEDS,
         )
 
 
-rule table_diagnose_sim_assortments_state_locked_stratified:
-    """Same as table_diagnose_sim_assortments_stratified, against the state-locked sim."""
+rule table_diagnose_sim_assortments_state_locked:
+    """Same as table_diagnose_sim_assortments, against the state-locked sim."""
     input:
-        "scripts/diagnose_sim_assortments_stratified.jl",
+        "scripts/diagnose_sim_assortments.jl",
         model_frames="data/model_frames.jld2",
         price_table="data/price_table.arrow",
         simulations=expand(
-            "data/bbl_simulation_state_locked_stratified/seed_{seed}.jld2",
-            seed=STRATIFIED_SEEDS,
+            "data/bbl_simulation_state_locked/seed_{seed}.jld2",
+            seed=BBL_SEEDS,
         ),
     output:
-        sizes="tables/diagnose_sim_assortments_sizes_state_locked_stratified.arrow",
-        groups="tables/diagnose_sim_assortments_groups_state_locked_stratified.arrow",
-        pairs="tables/diagnose_sim_assortments_pairs_state_locked_stratified.arrow",
+        sizes="tables/diagnose_sim_assortments_sizes_state_locked.arrow",
+        groups="tables/diagnose_sim_assortments_groups_state_locked.arrow",
+        pairs="tables/diagnose_sim_assortments_pairs_state_locked.arrow",
     log:
-        "logs/diagnose_sim_assortments_state_locked_stratified.log",
+        "logs/diagnose_sim_assortments_state_locked.log",
     run:
         julia(
-            "scripts/diagnose_sim_assortments_stratified.jl",
+            "scripts/diagnose_sim_assortments.jl",
             input=input,
             output=output,
             log=log,
         )
 
 
-rule table_diagnose_state_anticipation_by_vk_stratified:
+rule table_diagnose_state_anticipation_by_vk:
     """state_actual − state_expected residuals broken out by focal VK group."""
     input:
-        "scripts/diagnose_state_anticipation_by_vk_stratified.jl",
+        "scripts/diagnose_state_anticipation_by_vk.jl",
         residual_demand="data/residual_demand.jld2",
         price_table="data/price_table.arrow",
         simulations=expand(
-            "data/bbl_simulation_stratified/seed_{seed}.jld2",
-            seed=STRATIFIED_SEEDS,
+            "data/bbl_simulation/seed_{seed}.jld2",
+            seed=BBL_SEEDS,
         ),
     output:
-        summary="tables/diagnose_state_anticipation_by_vk_stratified.arrow",
+        summary="tables/diagnose_state_anticipation_by_vk.arrow",
     log:
-        "logs/diagnose_state_anticipation_by_vk_stratified.log",
+        "logs/diagnose_state_anticipation_by_vk.log",
     run:
         julia(
-            "scripts/diagnose_state_anticipation_by_vk_stratified.jl",
+            "scripts/diagnose_state_anticipation_by_vk.jl",
             input=input,
             output=output,
             log=log,
         )
 
 
-rule table_diagnose_log_j_response_stratified:
-    """Median state_transition intercept booster response across log(J) ∈ [7.3, 8.5]."""
-    input:
-        "scripts/diagnose_log_j_response_stratified.jl",
-        model_frames="data/model_frames.jld2",
-        residual_demand="data/residual_demand.jld2",
-        price_table="data/price_table.arrow",
-        state_transition="data/state_transition_stratified.jld2",
-    output:
-        response="tables/diagnose_log_j_response_stratified.arrow",
-    log:
-        "logs/diagnose_log_j_response_stratified.log",
-    run:
-        julia(
-            "scripts/diagnose_log_j_response_stratified.jl",
-            input=input,
-            output=output,
-            log=log,
-        )
-
-
-rule table_diagnose_quantile_calibration_stratified:
-    """In-sample quantile-grid calibration for state_transition and price_density boosters."""
-    input:
-        "scripts/diagnose_quantile_calibration_stratified.jl",
-        model_frames="data/model_frames.jld2",
-        residual_demand="data/residual_demand.jld2",
-        price_table="data/price_table.arrow",
-        state_transition="data/state_transition_stratified.jld2",
-        price_densities="data/price_densities_stratified.jld2",
-        sales_targets="data/sales_targets_stratified.jld2",
-        compliance="data/compliance_stratified.arrow",
-    output:
-        calibration="tables/diagnose_quantile_calibration_stratified.arrow",
-        coverage="tables/diagnose_booster_coverage_stratified.arrow",
-    log:
-        "logs/diagnose_quantile_calibration_stratified.log",
-    run:
-        julia(
-            "scripts/diagnose_quantile_calibration_stratified.jl",
-            input=input,
-            output=output,
-            log=log,
-        )
-
-
-rule table_diagnose_strata_ablation_stratified:
-    """A/B refit on symptomatic VKs: nostrata vs strata=(year,quarter). Distributed."""
-    input:
-        "scripts/diagnose_strata_ablation_stratified.jl",
-        model_frames="data/model_frames.jld2",
-        residual_demand="data/residual_demand.jld2",
-        price_table="data/price_table.arrow",
-        sales_targets="data/sales_targets_stratified.jld2",
-        compliance="data/compliance_stratified.arrow",
-    output:
-        ablation="tables/diagnose_strata_ablation_stratified.arrow",
-    log:
-        "logs/diagnose_strata_ablation_stratified.log",
-    run:
-        julia(
-            "scripts/diagnose_strata_ablation_stratified.jl",
-            input=input,
-            output=output,
-            log=log,
-            processes=config.get("processes", 1),
-        )
-
-
-rule table_diagnose_log_j_shift_stratified:
+rule table_diagnose_log_j_shift:
     """Per-quarter J_sim vs J_obs with log_j_shift = log(J_sim) − log(J_obs)."""
     input:
-        "scripts/diagnose_log_j_shift_stratified.jl",
+        "scripts/diagnose_log_j_shift.jl",
         residual_demand="data/residual_demand.jld2",
         simulations=expand(
-            "data/bbl_simulation_stratified/seed_{seed}.jld2",
-            seed=STRATIFIED_SEEDS,
+            "data/bbl_simulation/seed_{seed}.jld2",
+            seed=BBL_SEEDS,
         ),
     output:
-        summary="tables/diagnose_log_j_shift_stratified.arrow",
+        summary="tables/diagnose_log_j_shift.arrow",
     log:
-        "logs/diagnose_log_j_shift_stratified.log",
+        "logs/diagnose_log_j_shift.log",
     run:
         julia(
-            "scripts/diagnose_log_j_shift_stratified.jl",
+            "scripts/diagnose_log_j_shift.jl",
             input=input,
             output=output,
             log=log,
         )
 
 
-rule table_diagnose_state_drift_stratified:
+rule table_diagnose_state_drift:
     """Per-column drift of sim state_actual vs observed state_matrix, tagged by VK group."""
     input:
-        "scripts/diagnose_state_drift_stratified.jl",
+        "scripts/diagnose_state_drift.jl",
         residual_demand="data/residual_demand.jld2",
         price_table="data/price_table.arrow",
         simulations=expand(
-            "data/bbl_simulation_stratified/seed_{seed}.jld2",
-            seed=STRATIFIED_SEEDS,
+            "data/bbl_simulation/seed_{seed}.jld2",
+            seed=BBL_SEEDS,
         ),
     output:
-        columns="tables/diagnose_state_drift_columns_stratified.arrow",
-        summary="tables/diagnose_state_drift_summary_stratified.arrow",
+        columns="tables/diagnose_state_drift_columns.arrow",
+        summary="tables/diagnose_state_drift_summary.arrow",
     log:
-        "logs/diagnose_state_drift_stratified.log",
+        "logs/diagnose_state_drift.log",
     run:
         julia(
-            "scripts/diagnose_state_drift_stratified.jl",
+            "scripts/diagnose_state_drift.jl",
             input=input,
             output=output,
             log=log,
@@ -1740,7 +1380,7 @@ rule table_diagnose_residual_demand_sensitivity:
         )
 
 
-rule table_diagnose_booster_splits_compliance_stratified:
+rule table_diagnose_booster_splits_compliance:
     """
     Inspects every split node in the distilled compliance boosters and
     reports whether the numeric threshold is trivial on non-missing feature
@@ -1750,24 +1390,24 @@ rule table_diagnose_booster_splits_compliance_stratified:
     max_depth just buys more missingness partitions.
     """
     input:
-        "scripts/diagnose_booster_splits_compliance_stratified.jl",
-        compliance_fits_final="data/compliance_fits_final_stratified.jld2",
+        "scripts/diagnose_booster_splits_compliance.jl",
+        compliance_fits_final="data/compliance_fits_final.jld2",
         residual_demand="data/residual_demand.jld2",
     output:
-        detailed="tables/diagnose_booster_splits_compliance_stratified_detailed.arrow",
-        summary="tables/diagnose_booster_splits_compliance_stratified_summary.arrow",
+        detailed="tables/diagnose_booster_splits_compliance_detailed.arrow",
+        summary="tables/diagnose_booster_splits_compliance_summary.arrow",
     log:
-        "logs/diagnose_booster_splits_compliance_stratified.log",
+        "logs/diagnose_booster_splits_compliance.log",
     run:
         julia(
-            "scripts/diagnose_booster_splits_compliance_stratified.jl",
+            "scripts/diagnose_booster_splits_compliance.jl",
             input=input,
             output=output,
             log=log,
         )
 
 
-rule table_diagnose_state_anticipation_stratified:
+rule table_diagnose_state_anticipation:
     """
     Diagnostic on the "correct anticipation + mean-zero shock" model:
     scans every forward-sim seed and reports mean(state_actual - state_expected)
@@ -1776,40 +1416,37 @@ rule table_diagnose_state_anticipation_stratified:
     systematic offset that leaks into state_prev carry-forward.
     """
     input:
-        "scripts/diagnose_state_anticipation_stratified.jl",
-        simulations=expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=STRATIFIED_SEEDS),
+        "scripts/diagnose_state_anticipation.jl",
+        simulations=expand("data/bbl_simulation/seed_{seed}.jld2", seed=BBL_SEEDS),
     output:
-        diagnostic="tables/diagnose_state_anticipation_stratified.arrow",
+        diagnostic="tables/diagnose_state_anticipation.arrow",
     log:
-        "logs/diagnose_state_anticipation_stratified.log",
+        "logs/diagnose_state_anticipation.log",
     run:
         julia(
-            "scripts/diagnose_state_anticipation_stratified.jl",
+            "scripts/diagnose_state_anticipation.jl",
             input=input,
             output=output,
             log=log,
         )
 
 
-rule data_bbl_matrix_stratified:
+rule data_bbl_matrix:
     """
-    Reuses scripts/bbl_matrix.jl unchanged: it only reads the KEYS of
-    price_densities and state_transition (for eviction / usable_vks), never
-    the value format, so it works with both the quantile-grid stratified
-    outputs and the un-suffixed mean+var outputs.
+    Builds the BBL design tensors from price_densities and state_transition.
     """
     input:
         "scripts/bbl_matrix.jl",
         model_frames="data/model_frames.jld2",
         demand_estimates="data/demand_estimates.jld2",
         delta_decomp="data/delta_decomposition_regout.jld2",
-        price_densities="data/price_densities_stratified.jld2",
-        state_transition="data/state_transition_stratified.jld2",
-        simulations=expand("data/bbl_simulation_stratified/seed_{seed}.jld2", seed=STRATIFIED_SEEDS),
+        price_densities="data/price_densities.jld2",
+        state_transition="data/state_transition.jld2",
+        simulations=expand("data/bbl_simulation/seed_{seed}.jld2", seed=BBL_SEEDS),
     output:
-        "data/bbl_matrix_stratified.jld2",
+        "data/bbl_matrix.jld2",
     log:
-        "logs/bbl_matrix_stratified.log",
+        "logs/bbl_matrix.log",
     run:
         julia(
             "scripts/bbl_matrix.jl",
@@ -1819,17 +1456,17 @@ rule data_bbl_matrix_stratified:
         )
 
 
-rule data_bbl_matrix_maps_stratified:
+rule data_bbl_matrix_maps:
     input:
         "scripts/bbl_matrix_to_map.jl",
-        bbl_matrix="data/bbl_matrix_stratified.jld2",
+        bbl_matrix="data/bbl_matrix.jld2",
     output:
-        R="data/bbl_R_stratified.map",
-        C_j="data/bbl_C_j_stratified.map",
-        C_f="data/bbl_C_f_stratified.map",
-        C_t="data/bbl_C_t_stratified.map",
+        R="data/bbl_R.map",
+        C_j="data/bbl_C_j.map",
+        C_f="data/bbl_C_f.map",
+        C_t="data/bbl_C_t.map",
     log:
-        "logs/bbl_matrix_to_map_stratified.log",
+        "logs/bbl_matrix_to_map.log",
     run:
         julia(
             "scripts/bbl_matrix_to_map.jl",
@@ -1839,37 +1476,37 @@ rule data_bbl_matrix_maps_stratified:
         )
 
 
-rule data_bbl_estimation_stratified:
+rule data_bbl_estimation:
     """
-    bbl_estimation_stratified.jl hardcodes the _stratified matrix + map paths
+    bbl_estimation.jl hardcodes the  matrix + map paths
     (mirrors bbl_estimation.jl's hardcoded reads via Mmap.mmap). Also reads
     data/arrow/fords.arrow to compute sales-share weights for the best/worst
     counterfactual solves, and data/model_frames.jld2 for price_scale (the
     dollars-to-std-price divisor used at demand-estimation load time).
     """
     input:
-        "scripts/bbl_estimation_stratified.jl",
-        bbl_matrix="data/bbl_matrix_stratified.jld2",
-        R="data/bbl_R_stratified.map",
-        C_j="data/bbl_C_j_stratified.map",
-        C_f="data/bbl_C_f_stratified.map",
-        C_t="data/bbl_C_t_stratified.map",
+        "scripts/bbl_estimation.jl",
+        bbl_matrix="data/bbl_matrix.jld2",
+        R="data/bbl_R.map",
+        C_j="data/bbl_C_j.map",
+        C_f="data/bbl_C_f.map",
+        C_t="data/bbl_C_t.map",
         fords="data/arrow/fords.arrow",
         model_frames="data/model_frames.jld2",
     output:
-        "data/bbl_estimates_stratified.jld2",
+        "data/bbl_estimates.jld2",
     log:
-        "logs/bbl_estimation_stratified.log",
+        "logs/bbl_estimation.log",
     run:
         julia(
-            "scripts/bbl_estimation_stratified.jl",
+            "scripts/bbl_estimation.jl",
             input=input,
             output=output,
             log=log,
         )
 
 
-rule data_nash_bertrand_counterfactual_stratified:
+rule data_nash_bertrand_counterfactual:
     """
     Nash-Bertrand price equilibrium under best_case and worst_case marginal-cost
     scenarios from the BBL identified set. Repricing is restricted to observed
@@ -1882,14 +1519,14 @@ rule data_nash_bertrand_counterfactual_stratified:
         model_frames="data/model_frames.jld2",
         demand_estimates="data/demand_estimates.jld2",
         delta_decomp="data/delta_decomposition_regout.jld2",
-        bbl_estimates="data/bbl_estimates_stratified.jld2",
-        bbl_matrix="data/bbl_matrix_stratified.jld2",
-        price_densities="data/price_densities_stratified.jld2",
-        state_transition="data/state_transition_stratified.jld2",
+        bbl_estimates="data/bbl_estimates.jld2",
+        bbl_matrix="data/bbl_matrix.jld2",
+        price_densities="data/price_densities.jld2",
+        state_transition="data/state_transition.jld2",
     output:
-        counterfactual="data/nash_bertrand_counterfactual_stratified.jld2",
+        counterfactual="data/nash_bertrand_counterfactual.jld2",
     log:
-        "logs/nash_bertrand_counterfactual_stratified.log",
+        "logs/nash_bertrand_counterfactual.log",
     run:
         julia(
             "scripts/nash_bertrand_counterfactual.jl",
@@ -1899,18 +1536,18 @@ rule data_nash_bertrand_counterfactual_stratified:
         )
 
 
-rule plot_sales_targets_scatter_stratified:
+rule plot_sales_targets_scatter:
     input:
         "scripts/plot_sales_targets_scatter.jl",
         model_frames="data/model_frames.jld2",
         state_matrix="data/residual_demand.jld2",
-        compliance="data/compliance_stratified.arrow",
-        sales_targets="data/sales_targets_stratified.jld2",
+        compliance="data/compliance.arrow",
+        sales_targets="data/sales_targets.jld2",
         fords="data/arrow/fords.arrow",
     output:
-        plot="plots/sales_targets_scatter_stratified.png",
+        plot="plots/sales_targets_scatter.png",
     log:
-        "logs/plot_sales_targets_scatter_stratified.log",
+        "logs/plot_sales_targets_scatter.log",
     run:
         julia(
             "scripts/plot_sales_targets_scatter.jl",
@@ -1920,17 +1557,17 @@ rule plot_sales_targets_scatter_stratified:
         )
 
 
-rule plot_trim_probabilities_stratified:
+rule plot_trim_probabilities:
     input:
         "scripts/plot_trim_probabilities.jl",
         state_matrix="data/residual_demand.jld2",
-        fits="data/compliance_fits_final_stratified.jld2",
+        fits="data/compliance_fits_final.jld2",
         fords="data/arrow/fords.arrow",
     output:
-        popular_plot="plots/trim_probabilities_popular_stratified.png",
-        variation_plot="plots/trim_probabilities_variation_stratified.png",
+        popular_plot="plots/trim_probabilities_popular.png",
+        variation_plot="plots/trim_probabilities_variation.png",
     log:
-        "logs/plot_trim_probabilities_stratified.log",
+        "logs/plot_trim_probabilities.log",
     run:
         julia(
             "scripts/plot_trim_probabilities.jl",
@@ -1940,17 +1577,17 @@ rule plot_trim_probabilities_stratified:
         )
 
 
-rule table_trim_probabilities_stratified:
+rule table_trim_probabilities:
     input:
         "scripts/table_trim_probabilities.jl",
         state_matrix="data/residual_demand.jld2",
-        fits="data/compliance_fits_final_stratified.jld2",
+        fits="data/compliance_fits_final.jld2",
         fords="data/arrow/fords.arrow",
     output:
-        tex="tables/trim_probabilities_stratified.tex",
-        csv="tables/trim_probabilities_stratified.csv",
+        tex="tables/trim_probabilities.tex",
+        csv="tables/trim_probabilities.csv",
     log:
-        "logs/table_trim_probabilities_stratified.log",
+        "logs/table_trim_probabilities.log",
     run:
         julia(
             "scripts/table_trim_probabilities.jl",
@@ -1960,15 +1597,15 @@ rule table_trim_probabilities_stratified:
         )
 
 
-rule plot_mcem_trace_stratified:
+rule plot_mcem_trace:
     input:
         "scripts/plot_mcem_trace.jl",
-        mcem_trace="data/compliance_mcem_trace_stratified.jld2",
+        mcem_trace="data/compliance_mcem_trace.jld2",
     output:
-        plot="plots/mcem_trace_stratified.png",
-        summary="data/mcem_trace_summary_stratified.jld2",
+        plot="plots/mcem_trace.png",
+        summary="data/mcem_trace_summary.jld2",
     log:
-        "logs/plot_mcem_trace_stratified.log",
+        "logs/plot_mcem_trace.log",
     run:
         julia(
             "scripts/plot_mcem_trace.jl",
@@ -1978,35 +1615,30 @@ rule plot_mcem_trace_stratified:
         )
 
 
-rule all_stratified:
+rule all_structural:
     """
-    Convenience aggregator: builds every stratified artifact the JMP paper
-    uses, plus the newest data-only outputs (BBL estimates + Nash–Bertrand
-    counterfactual) whose plots are not yet in the paper. The manual
-    `trim_probabilities_featured_stratified.png` is produced by hand and
-    is intentionally omitted.
+    Builds every structural artifact the JMP paper uses, plus the BBL
+    estimates and Nash–Bertrand counterfactual whose plots aren't yet in the
+    paper. The manual `trim_probabilities_featured.png` is omitted.
     """
     input:
         # Paper artifacts
-        "tables/trim_probabilities_stratified.tex",
-        "plots/mcem_trace_stratified.png",
-        "plots/sales_targets_scatter_stratified.png",
-        "plots/trim_probabilities_popular_stratified.png",
-        "plots/trim_probabilities_variation_stratified.png",
+        "tables/trim_probabilities.tex",
+        "plots/mcem_trace.png",
+        "plots/sales_targets_scatter.png",
+        "plots/trim_probabilities_popular.png",
+        "plots/trim_probabilities_variation.png",
         # New data-only outputs (plots not yet in paper)
-        "data/bbl_estimates_stratified.jld2",
-        "data/nash_bertrand_counterfactual_stratified.jld2",
+        "data/bbl_estimates.jld2",
+        "data/nash_bertrand_counterfactual.jld2",
         # Diagnostics
-        "tables/diagnose_sim_assortments_sizes_stratified.arrow",
-        "tables/diagnose_quantile_calibration_stratified.arrow",
-        "tables/diagnose_strata_ablation_stratified.arrow",
-        "tables/diagnose_log_j_shift_stratified.arrow",
-        "tables/diagnose_state_drift_summary_stratified.arrow",
+        "tables/diagnose_sim_assortments_sizes.arrow",
+        "tables/diagnose_log_j_shift.arrow",
+        "tables/diagnose_state_drift_summary.arrow",
         "tables/diagnose_residual_demand_sensitivity.arrow",
-        "tables/diagnose_booster_splits_compliance_stratified_summary.arrow",
-        "tables/diagnose_state_anticipation_stratified.arrow",
-        "tables/diagnose_state_anticipation_by_vk_stratified.arrow",
-        "tables/diagnose_log_j_response_stratified.arrow",
+        "tables/diagnose_booster_splits_compliance_summary.arrow",
+        "tables/diagnose_state_anticipation.arrow",
+        "tables/diagnose_state_anticipation_by_vk.arrow",
 
 
 rule plot_wtp_distance:

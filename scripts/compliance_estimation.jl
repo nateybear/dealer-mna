@@ -8,6 +8,7 @@ using Distributed
     using LoggingExtras
     using LinearAlgebra
     using LogExpFunctions
+    using Random
     using StatsBase: mean, cov, quantile
     using Distributions: Bernoulli, Beta
     import .Supply: selectunique
@@ -16,69 +17,36 @@ using Distributed
 
     DEMOS = Empirics.DEFAULT_DEMOGRAPHICS
 
-    # K-fold cross-fitting for honest p_base and ρ̃; both share the fold map.
-    K = 3
+    K = 2
 
-    # Alternating fits of (p_base, ρ̃) within each M-step fold. Iterate until
-    # ‖Δρ̃_tr‖_∞ < tolerance, capped by MAX_INNER_SWEEPS.
-    MAX_INNER_SWEEPS = 20
-    Ρ̃_TOL = 1.0f-3
+    MAX_INNER_SWEEPS = 250
+    Ρ̃_TOL = 1.0f-4
+    NUM_ROUND_STEP1 = 20
 
-    # Number of boosting rounds in the step-1 cross-fit. Step 2's final refit
-    # picks its own num_round per booster via Supply.fit_xgb_custom_oos.
-    NUM_ROUND_STEP1 = 6
+    Ρ̃_INIT = 0.20f0
 
-    # Numeric floor for log(π) / log(1-π) in the E-step log-odds.
-    Π_FLOOR = 1.0f-3
+    Π_FLOOR = 1.0f-6
 
-    # Stochastic EM: hard latent labels z_dt are sampled from the E-step posterior
-    # Bernoulli(γ_dt) each round, and the M-step's XGBoost boosters fit p_base on
-    # sampled noncomplier cells (z=0) and ρ̃ on sampled complier cells (z=1). π is
-    # sampled from its Beta(A_PRIOR + Σz, A_PRIOR + N − Σz) conditional posterior.
-    # After BURN_IN warmup rounds, the E-step's γ_dt is accumulated across the
-    # remaining N_TOTAL − BURN_IN rounds; the posterior mean is written out.
-    # The Bernoulli noise on z is what prevents deterministic collapse to π=0 or
-    # π=1: even at γ=0.99, ~1% of rounds sample z=0, so p_base stays anchored.
-    N_TOTAL = 100
-    BURN_IN = 30
+    N_TOTAL = 20
+    BURN_IN = 10
 
-    # ρ̃ booster overrides:
-    #   base_score = −1.5 → σ(−1.5) ≈ 0.182 → initial ρ̃ ≈ 0.02 + 0.98·0.182 ≈ 0.20
-    #     under the floored parameterization. A warm start matters because at low
-    #     π the ρ̃ booster's per-group training set is tiny (~5 rows) and XGBoost
-    #     often can't move ρ̃ from base_score at all; a starting value near the
-    #     plausible complier lift means "no signal" already fits real compilers,
-    #     so the E-step assigns them nonzero γ and the sampler gets more z=1 data.
-    #   lambda = 0.5 relaxes leaf-value shrinkage so the booster can respond
-    #     to the sparse training signal when it exists.
     RHO_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (base_score = -3.0, lambda = 5.0f-1, max_depth = 4, eta = 0.1),
+        (base_score = -0.5, lambda = 5.0f-1, max_depth = 8, eta = 0.1),
     )
 
-    # Slight capacity bump over XGB_DEFAULT_PARAMS (max_depth 3→4, eta 0.15→0.1)
-    # so p_base can fit modest nonlinearity. Compliance-side; kept small because
-    # the per-group cross-fit training set is thin (~5 rows per group after the
-    # z=1 restriction bites) and the outer EM sampler amplifies overfitting.
     PBASE_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
-        (max_depth = 4, eta = 0.1),
+        (max_depth = 8, lambda = 5.0f-1, eta = 0.1),
     )
 
-    # Floor / cap on the Bernoulli sampling probability for z_dt. Even at
-    # γ ≈ 0 or γ ≈ 1, we guarantee a small fraction of each class is sampled,
-    # so both the p_base (fit on all cells) and ρ̃ (fit on z=1 subset) boosters
-    # always have training data. Without this, the sampler can ratchet into
-    # the π=0 or π=1 boundary where one branch loses its training set entirely.
-    Z_CLAMP = 0.05f0
+    Z_CLAMP = 0.001f0
 
     demand_model = Demand.DemandModel(; JLD2.load_object("data/model_frames.jld2")...)
 
-    state_matrix = JLD2.load_object("data/residual_demand.jld2")
+    _rd = JLD2.load_object("data/residual_demand.jld2")
+    state_matrix = _rd.matrix
 
-    # Whitens dealer demographics. p_base no longer reads these — kept so the
-    # demographic columns retain their conventional standardized form for any
-    # downstream consumer.
     function prepare_dealers!(dealer_demographics)
         M = Matrix(dealer_demographics[!, DEMOS])
         M .-= mean(M, dims = 1)
@@ -87,10 +55,8 @@ using Distributed
         return nothing
     end
 
-    @memoize function state_lookup()
-        intermed = Supply.tf_to_j_lookup(demand_model)
-        return Dict(k => i for (i, k) in enumerate(keys(intermed)))
-    end
+    @memoize state_lookup() =
+        Dict(k => i for (i, k) in enumerate(_rd.tf_keys))
 
     function X_matrix(cars)
         nrows = nrow(cars)
@@ -148,10 +114,7 @@ A_PRIOR=10
 function (@main)(_)
     Dealers.load_from_disk!("data/dealers_init_filtered.jld2")
     fords = read_arrow("data/arrow/fords.arrow")
-    # kept_trims, model_year ≤ 2019, and the Date(2020) upper bound are applied
-    # upstream in load_model_frames; fords.arrow itself is not pre-filtered, so
-    # any (model, 2020, extra) rows here get stranded as compliance_fits
-    # entries that BBL's vk_to_group never queries.
+    # kept_trims and model_year ≤ 2019 are applied upstream in load_model_frames.
     @info "Loaded fords" n_rows = nrow(fords)
 
     dealer_demographics = semijoin(
@@ -163,10 +126,6 @@ function (@main)(_)
     select!(panel, :dealer_uid, :t, :model, :model_year, :extra, :is_sold)
     subset!(panel, :t => ByRow(≥(Date(2017))))
 
-    # Drop rows whose lagged (dealer, quarter) state row is missing — X_matrix
-    # indexes state_matrix at t−1 to match the sim's `s_prev`-based inference
-    # in bbl_forward_simulation.jl:299 (feature-timestep symmetry). Mirrors
-    # the same guard applied to agg_master below.
     subset!(
         panel,
         [:t, :dealer_uid] => ByRow(
@@ -179,13 +138,6 @@ function (@main)(_)
 
     compliance = selectunique(panel, [:dealer_uid, :t])
 
-    # Aggregate dealer-quarter panel for the φ (sales-target) booster. q_{f,t}
-    # is the total-units count from make_dealer_quarter; X_agg indexes
-    # state_matrix at t−1 (matches sales_target_estimation.jl semantics) and
-    # appends the sampled ι_{f,t−1} as the last column each round. Cells whose
-    # t−1 state row is unknown (dealer's first quarter of activity) get
-    # dropped from the aggregate panel — the E-step then simply omits the
-    # (q − φ)/τ contribution for those cells.
     dq = select(Supply.make_dealer_quarter(fords), :dealer_uid, :t, :total_units => :q)
     agg_master = innerjoin(compliance, dq, on = [:dealer_uid, :t])
     subset!(
@@ -201,45 +153,32 @@ function (@main)(_)
 
     n_agg = nrow(agg_master)
     ncols_state = size(state_matrix, 2)
-    # Layout: [state_matrix[t-1], quarter_of_year(t)]. The trailing column is a
-    # calendar signal so the φ booster can absorb the Q1/Q4 shift caused by
-    # two-model-year overlap (see filteryears in src/supply/panel.jl) rather
-    # than forcing that variation into the state-feature dimensions. ι_lag
-    # gets hcat'd on each M-step round below.
     X_agg_base = Matrix{Float32}(undef, n_agg, ncols_state + 1)
     for (i, r) in enumerate(eachrow(agg_master))
         tlag = r.t - Quarter(1)
         quarter = (Dates.year(tlag), Dates.quarterofyear(tlag))
-        X_agg_base[i, 1:ncols_state] .= @view state_matrix[state_lookup()[(quarter, r.dealer_uid)], :]
+        X_agg_base[i, 1:ncols_state] .= @view state_matrix[
+            state_lookup()[(quarter, r.dealer_uid)], :,
+        ]
         X_agg_base[i, end] = Float32(Dates.quarterofyear(r.t))
     end
     q_agg = Float32.(agg_master.q)
 
-    # τ fixed at 0.5·std(q). No grid search, no per-round update.
     τ = Float32(0.5 * std(q_agg))
     @info "τ fixed for sales-target booster" τ mean_q = mean(q_agg) std_q = std(q_agg) n_agg_rows =
         n_agg
 
-    # φ booster overrides — mirror sales_target_estimation.jl's params.
-    # base_score = log(mean(q)) so exp(f) starts at mean(q).
     PHI_XGB_PARAMS = merge(
         Supply.XGB_DEFAULT_PARAMS,
         (
             base_score = Float64(log(mean(q_agg))),
-            max_depth = 4,
+            max_depth = 8,
             min_child_weight = 1,
             lambda = 1.0,
             eta = 0.1,
         ),
     )
 
-    # Initialize γ_dt as the empirical CDF value of next-quarter sales count:
-    # cells whose dealer sells many cars at t+1 get high γ_dt, cells with low
-    # next-quarter sales get low γ_dt. Compliance persists across quarters, so
-    # next-quarter sales are a leading indicator of current-quarter compliance
-    # — and, crucially, γ now carries state-informative variation from round 1,
-    # which is what the M-step needs to fit distinct p_base(x) and ρ̃(x).
-    # Cells at the last observed quarter (no t+1) fall back to γ = 0.5.
     sales_by_dt = combine(groupby(panel, [:dealer_uid, :t]), :is_sold => sum => :n_sold)
     sales_lookup = Dict((r.dealer_uid, r.t) => r.n_sold for r in eachrow(sales_by_dt))
     next_sold = Float32[
@@ -254,20 +193,11 @@ function (@main)(_)
         1 -
         sum(mask) / length(mask)
 
-    # global fold assignment so each (dealer, t) is in the same fold across
-    # every vehicle's p_base and ρ̃ boosters and matches its E-step prediction.
-    fold_map = Dict(
-        (row.dealer_uid, row.t) => mod(hash((row.dealer_uid, row.t)), K) + 1 for
-        row in eachrow(compliance)
-    )
-
     gdf = groupby(panel, [:model, :model_year, :extra])
 
     M_step = Dict()
     E_step = empty!(copy(compliance))
 
-    # Initial hard z sample from the ecdf-initialized γ. Everything downstream
-    # (M-step, π update) treats compliance.p_compliant as the sampled z_dt ∈ {0,1}.
     compliance.p_compliant .= Float32.(
         rand.(Bernoulli.(clamp.(compliance.p_compliant, Z_CLAMP, 1 - Z_CLAMP)))
     )
@@ -276,15 +206,9 @@ function (@main)(_)
     π_samples = Float64[]
     n_kept = 0
 
-    # φ̂ posterior accumulator (aggregate panel rows) and last-round booster
-    # bytes, saved into data/sales_targets.jld2 at the end.
     φ̂_accum = zeros(Float64, n_agg)
     phi_booster_bytes = UInt8[]
 
-    # Full MCEM trace — recorded unconditionally every round (including
-    # burn-in), saved to data/compliance_mcem_trace.jld2 for the paper's
-    # burn-in / mixing diagnostics. gamma_trace columns align with the
-    # `compliance` row order; phi_hat_trace columns align with `agg_master`.
     pi_trace = Vector{Float64}(undef, N_TOTAL)
     gamma_trace = Matrix{Float32}(undef, N_TOTAL, nrow(compliance))
     phi_hat_trace = Matrix{Float32}(undef, N_TOTAL, n_agg)
@@ -292,12 +216,13 @@ function (@main)(_)
     for i in 1:N_TOTAL
         @info "Starting round $i"
         @everywhere GC.gc(true)
-        # π ~ Beta(A_PRIOR + Σz, A_PRIOR + N − Σz) — Gibbs sample, not MAP mode.
         π = clamp(
-            rand(Beta(
-                Float64(A_PRIOR + sum(compliance.p_compliant)),
-                Float64(A_PRIOR + nrow(compliance) - sum(compliance.p_compliant)),
-            )),
+            rand(
+                Beta(
+                    Float64(A_PRIOR + sum(compliance.p_compliant)),
+                    Float64(A_PRIOR + nrow(compliance) - sum(compliance.p_compliant)),
+                ),
+            ),
             Float64(Π_FLOOR),
             1 - Float64(Π_FLOOR),
         )
@@ -307,7 +232,10 @@ function (@main)(_)
                     X = X_matrix(cars)
                     y_all = Float32.(cars.is_sold)
                     γ_all = Float32.(cars.p_compliant)
-                    folds = [fold_map[(c.dealer_uid, c.t)] for c in eachrow(cars)]
+
+                    (; model, model_year, extra) = cars[1, :]
+                    rng_trim = Xoshiro(hash((model, model_year, extra)))
+                    folds = Supply._stratified_kfold(y_all, K, rng_trim)
 
                     pbase_bytes = Vector{Vector{UInt8}}(undef, K)
                     rho_bytes = Vector{Vector{UInt8}}(undef, K)
@@ -323,7 +251,7 @@ function (@main)(_)
                         dm_tr = XGBoost.DMatrix(X_tr)
                         XGBoost.setinfo!(dm_tr, "label", y_tr)
 
-                        ρ̃_tr = fill(Supply.RHO_MIN, n_tr)
+                        ρ̃_tr = fill(Ρ̃_INIT, n_tr)
                         saved_p_bytes = UInt8[]
                         saved_r_bytes = UInt8[]
                         last_sweep = 0
@@ -332,9 +260,19 @@ function (@main)(_)
                             last_sweep = sweep
                             ρ̃_prev = copy(ρ̃_tr)
 
+                            # don't go too flexible too early
+                            num_rounds = min(NUM_ROUND_STEP1, sweep)
+
+                            max_depth = if sweep < 10
+                                min(2^sweep, PBASE_XGB_PARAMS.max_depth)
+                            else
+                                PBASE_XGB_PARAMS.max_depth
+                            end
+
                             booster_p = Supply.fit_xgb_custom(
-                                dm_tr; num_round = NUM_ROUND_STEP1,
-                                params = PBASE_XGB_PARAMS,
+                                dm_tr; num_round = num_rounds,
+                                params = merge(PBASE_XGB_PARAMS, (; max_depth)),
+                                xgb_model = saved_p_bytes,
                             ) do ŷ
                                 grad = Vector{Float32}(undef, n_tr)
                                 hess = Vector{Float32}(undef, n_tr)
@@ -345,17 +283,12 @@ function (@main)(_)
                                 end
                                 return grad, hess
                             end
-                            p_tr =
-                                logistic.(XGBoost.predict(booster_p, dm_tr; margin = true))
+                            p_tr = logistic.(XGBoost.predict(booster_p, dm_tr; margin = true))
                             saved_p_bytes = copy(
                                 XGBoost.save(booster_p, Vector{UInt8}; format = "ubj")
                             )
                             finalize(booster_p)
 
-                            # ρ̃ fit: restricted to sampled complier rows (z=1). z=0
-                            # rows have γ=0, which zeroes both grad and hess in
-                            # rho_grad_hess — feeding them to XGBoost would dilute
-                            # split candidates without contributing information.
                             complier_local = findall(==(1.0f0), γ_tr)
                             if isempty(complier_local)
                                 saved_r_bytes = UInt8[]
@@ -368,10 +301,17 @@ function (@main)(_)
                                 dm_tr_c = XGBoost.DMatrix(X_tr_c)
                                 XGBoost.setinfo!(dm_tr_c, "label", y_tr_c)
 
+                                max_depth = if sweep < 10
+                                    min(2^sweep, RHO_XGB_PARAMS.max_depth)
+                                else
+                                    RHO_XGB_PARAMS.max_depth
+                                end
+
                                 booster_r = Supply.fit_xgb_custom(
                                     dm_tr_c;
-                                    num_round = NUM_ROUND_STEP1,
-                                    params = RHO_XGB_PARAMS,
+                                    num_round = num_rounds,
+                                    params = merge(RHO_XGB_PARAMS, (; max_depth)),
+                                    xgb_model = saved_r_bytes,
                                 ) do ŷ
                                     grad = Vector{Float32}(undef, n_tr_c)
                                     hess = Vector{Float32}(undef, n_tr_c)
@@ -402,9 +342,12 @@ function (@main)(_)
                         finalize(dm_tr)
                     end
 
-                    (; model, model_year, extra) = cars[1, :]
+                    cell_fold_map = Dict{Tuple{UUID, Date}, Int}(
+                        (c.dealer_uid, c.t) => folds[i] for
+                        (i, c) in enumerate(eachrow(cars))
+                    )
                     return (model, model_year, extra) =>
-                        (pbase_bytes, rho_bytes, sweep_counts)
+                        (pbase_bytes, rho_bytes, sweep_counts, cell_fold_map)
                 end
                 mapreduce(
                     Dict,
@@ -413,7 +356,8 @@ function (@main)(_)
                     init = Dict{
                         Tuple{String, Int64, String},
                         Tuple{
-                            Vector{Vector{UInt8}}, Vector{Vector{UInt8}}, Vector{Int}
+                            Vector{Vector{UInt8}}, Vector{Vector{UInt8}}, Vector{Int},
+                            Dict{Tuple{UUID, Date}, Int},
                         },
                     }(),
                 )
@@ -423,9 +367,6 @@ function (@main)(_)
             all_sweeps, [0.1, 0.5, 0.9]
         ) hit_cap = sum(==(MAX_INNER_SWEEPS), all_sweeps) total = length(all_sweeps)
 
-        # φ booster M-step: fit on aggregate (d,t) panel. ι label is the sampled
-        # z_{f,t}; ι_lag column is the sampled z_{f,t−1} (0 for cells whose
-        # t−1 is not in the compliance table). Log link on φ so exp(margin) > 0.
         sampled_lookup = Dict(
             (r.dealer_uid, r.t) => r.p_compliant for r in eachrow(compliance)
         )
@@ -434,7 +375,7 @@ function (@main)(_)
             r in eachrow(agg_master)
         ]
         ι_lag_agg = Float32[
-            Float32(get(sampled_lookup, (r.dealer_uid, r.t - Quarter(1)), 0.0f0) > 0.5f0) for
+            Float32(rand() < get(sampled_lookup, (r.dealer_uid, r.t - Quarter(1)), 0.0f0)) for
             r in eachrow(agg_master)
         ]
         X_agg = hcat(X_agg_base, ι_lag_agg)
@@ -476,28 +417,27 @@ function (@main)(_)
         ]
         E_results = pmap(eachrow(E_step); batch_size = 100) do r
             cars = subset(panel, :dealer_uid => ByRow(==(r.dealer_uid)), :t => ByRow(==(r.t)))
-            k = fold_map[(r.dealer_uid, r.t)]
 
-            # All cars at this (d,t) share the same state row, so a single-row
-            # DMatrix suffices for every per-vehicle booster prediction.
             dm = XGBoost.DMatrix(X_matrix(cars[[1], :]))
             booster = XGBoost.Booster(dm)
 
             cars.p_base = map(eachrow(cars)) do (; model, model_year, extra)
-                pbase_bytes = M_step[(model, model_year, extra)][1][k]
+                trim_info = M_step[(model, model_year, extra)]
+                k = trim_info[4][(r.dealer_uid, r.t)]
+                pbase_bytes = trim_info[1][k]
                 XGBoost.load!(booster, pbase_bytes)
                 f_raw = only(XGBoost.predict(booster, dm; margin = true))
-                clamp(logistic(f_raw), 1e-12, 1 - 1e-12)
+                return clamp(logistic(f_raw), 1e-12, 1 - 1e-12)
             end
 
             cars.ρ_tilde = map(eachrow(cars)) do (; model, model_year, extra)
-                rho_bytes = M_step[(model, model_year, extra)][2][k]
-                # Empty rho_bytes ⇒ this fold had no sampled compliers; fall
-                # back to the ρ̃_min floor (minimum lift under the parameterization).
+                trim_info = M_step[(model, model_year, extra)]
+                k = trim_info[4][(r.dealer_uid, r.t)]
+                rho_bytes = trim_info[2][k]
                 isempty(rho_bytes) && return Float64(Supply.RHO_MIN)
                 XGBoost.load!(booster, rho_bytes)
                 g_raw = only(XGBoost.predict(booster, dm; margin = true))
-                clamp(Supply.rho_from_margin(g_raw), 1e-12, 1 - 1e-12)
+                return clamp(Supply.rho_from_margin(g_raw), 1e-12, 1 - 1e-12)
             end
 
             finalize(booster)
@@ -513,10 +453,6 @@ function (@main)(_)
             ll_noncomplier = let (; is_sold, p_base) = cars
                 sum(@. is_sold * log(p_base) + (1 - is_sold) * log(1 - p_base))
             end
-            # Aggregate log-odds contribution from the sales-target booster:
-            # log P(q|z=1) − log P(q|z=0) = (q − φ)/τ under the discriminative
-            # sigmoid factorization. NaN phi_hat means this cell was dropped
-            # from the aggregate panel (t−1 state unknown); contribution = 0.
             phi_contrib = isnan(r.phi_hat) ? 0.0 : (r.q_agg - r.phi_hat) / τ
             p_compliant = softmax(
                 [log(π) + ll_complier + phi_contrib, log(1 - π) + ll_noncomplier]
@@ -536,13 +472,10 @@ function (@main)(_)
         E_step.p_compliant = [r.p_compliant for r in E_results]
         log_e_step_diagnostics(E_results)
 
-        # Full trace — recorded every round so the paper can plot burn-in.
         pi_trace[i] = π
         gamma_trace[i, :] .= E_step.p_compliant
         phi_hat_trace[i, :] .= φ_pred
 
-        # Accumulate γ posterior mean after burn-in; also snapshot π's trace
-        # and the φ̂ predictions across aggregate-panel rows.
         if i > BURN_IN
             γ_accum .+= E_step.p_compliant
             push!(π_samples, π)
@@ -550,10 +483,6 @@ function (@main)(_)
             n_kept += 1
         end
 
-        # Hand hard sampled labels z_dt ~ Bern(γ_dt) to the next round's M-step
-        # and π update. Sampling probability is clamped to [Z_CLAMP, 1-Z_CLAMP]
-        # so neither branch's booster can lose its training set even when γ
-        # drifts near a boundary.
         compliance.p_compliant .= Float32.(
             rand.(Bernoulli.(clamp.(E_step.p_compliant, Z_CLAMP, 1 - Z_CLAMP)))
         )
@@ -572,18 +501,9 @@ function (@main)(_)
             posterior_γ = Float32.(γ_accum ./ max(n_kept, 1))
             E_step.p_compliant = posterior_γ
             compliance.p_compliant .= posterior_γ
-            # Drop the aggregate scratch columns before persisting compliance —
-            # data/compliance.arrow schema stays what downstream expects.
             Arrow.write("data/compliance.arrow", select(E_step, Not(:q_agg, :phi_hat)))
             JLD2.save_object("data/compliance_fits.jld2", M_step)
-            # Last-round φ booster bytes + fixed τ. Same layout as
-            # sales_target_estimation.jl's output so downstream consumers
-            # (price_density_estimation, bbl_forward_simulation) don't change.
             JLD2.save_object("data/sales_targets.jld2", (phi_booster_bytes, τ))
-            # Full MCEM trace for paper burn-in diagnostics. Row i of each
-            # trace is the sample at round i; columns of gamma_trace align
-            # with `dealer_uid`/`t`, and columns of phi_hat_trace align with
-            # `agg_dealer_uid`/`agg_t`.
             JLD2.save_object(
                 "data/compliance_mcem_trace.jld2",
                 (;
@@ -599,124 +519,85 @@ function (@main)(_)
                 ),
             )
 
-            @info "Step 2: full-data refit with OOS early stopping"
+            @info "Step 2: distill K-fold ensemble into single boosters"
+            # ρ̃ distillation restricts to the top-π̂ complier subset — matches
+            # step 1's ρ̃ fit which trained only on γ==1 rows, and the sim's
+            # ρ̃ query only fires when iota_prev == 1.
+            π_hat = Float64(mean(π_samples))
+            γ_cutoff = Float32(quantile(compliance.p_compliant, 1 - π_hat))
+            @info "Step 2 γ threshold" π_hat γ_cutoff frac_compliers = mean(
+                compliance.p_compliant .>= γ_cutoff
+            )
+            distill_params = merge(
+                Supply.XGB_DEFAULT_PARAMS,
+                (
+                    objective = "reg:squarederror",
+                    base_score = 0.0,
+                    max_depth = 5,
+                    eta = 0.1,
+                    lambda = 1.0,
+                ),
+            )
             final_M_step =
                 let mapped = pmap(collect(gdf)) do cars
                         cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
                         X = X_matrix(cars)
-                        y_all = Float32.(cars.is_sold)
-                        γ_all = Float32.(cars.p_compliant)
-                        n = length(y_all)
+                        n = nrow(cars)
+                        group_key = (
+                            cars[1, :model], cars[1, :model_year], cars[1, :extra]
+                        )
+                        pbase_folds = M_step[group_key][1]
+                        rho_folds = M_step[group_key][2]
+                        K = length(pbase_folds)
 
-                        ρ̃ = fill(Supply.RHO_MIN, n)
-                        pbase_bytes = UInt8[]
-                        rho_bytes = UInt8[]
-                        best_round_p = 0
-                        best_round_r = 0
-
-                        for sweep in 1:MAX_INNER_SWEEPS
-                            ρ̃_prev = copy(ρ̃)
-
-                            booster_p, br_p = Supply.fit_xgb_custom_oos(
-                                idxs ->
-                                    let m = length(idxs),
-                                        y_s = y_all[idxs],
-                                        γ_s = γ_all[idxs],
-                                        ρ̃_s = ρ̃[idxs]
-
-                                        ŷ -> begin
-                                            grad = Vector{Float32}(undef, m)
-                                            hess = Vector{Float32}(undef, m)
-                                            @inbounds for j in 1:m
-                                                grad[j], hess[j] = Supply.pbase_grad_hess(
-                                                    ŷ[j], y_s[j], γ_s[j], ρ̃_s[j]
-                                                )
-                                            end
-                                            return grad, hess
-                                        end
-                                    end,
-                                idxs ->
-                                    let m = length(idxs),
-                                        y_s = y_all[idxs],
-                                        γ_s = γ_all[idxs],
-                                        ρ̃_s = ρ̃[idxs]
-
-                                        ŷ -> begin
-                                            nll = 0.0
-                                            @inbounds for j in 1:m
-                                                nll += Supply.pbase_nll(
-                                                    ŷ[j], y_s[j], γ_s[j], ρ̃_s[j]
-                                                )
-                                            end
-                                            return nll / m
-                                        end
-                                    end,
-                                X,
-                                y_all;
-                                max_round = 50,
-                                patience = 5,
-                                params = PBASE_XGB_PARAMS,
-                            )
-                            pbase_bytes = copy(
-                                XGBoost.save(booster_p, Vector{UInt8}; format = "ubj")
-                            )
-                            best_round_p = br_p
-
-                            dm_full = XGBoost.DMatrix(X)
-                            p = logistic.(XGBoost.predict(booster_p, dm_full; margin = true))
-                            finalize(booster_p)
-
-                            booster_r, br_r = Supply.fit_xgb_custom_oos(
-                                idxs ->
-                                    let m = length(idxs),
-                                        y_s = y_all[idxs],
-                                        γ_s = γ_all[idxs],
-                                        p_s = p[idxs]
-
-                                        ŷ -> begin
-                                            grad = Vector{Float32}(undef, m)
-                                            hess = Vector{Float32}(undef, m)
-                                            @inbounds for j in 1:m
-                                                grad[j], hess[j] = Supply.rho_grad_hess(
-                                                    ŷ[j], y_s[j], γ_s[j], p_s[j]
-                                                )
-                                            end
-                                            return grad, hess
-                                        end
-                                    end,
-                                idxs ->
-                                    let m = length(idxs),
-                                        y_s = y_all[idxs],
-                                        γ_s = γ_all[idxs],
-                                        p_s = p[idxs]
-
-                                        ŷ -> begin
-                                            nll = 0.0
-                                            @inbounds for j in 1:m
-                                                nll += Supply.rho_nll(
-                                                    ŷ[j], y_s[j], γ_s[j], p_s[j]
-                                                )
-                                            end
-                                            return nll / m
-                                        end
-                                    end,
-                                X,
-                                y_all;
-                                max_round = 50,
-                                patience = 5,
-                                params = RHO_XGB_PARAMS,
-                            )
-                            ρ̃ .= Supply.rho_from_margin.(XGBoost.predict(booster_r, dm_full; margin = true))
-                            rho_bytes = copy(XGBoost.save(booster_r, Vector{UInt8}; format = "ubj"))
-                            best_round_r = br_r
-                            finalize(booster_r)
-                            finalize(dm_full)
-
-                            maximum(abs, ρ̃ .- ρ̃_prev) < Ρ̃_TOL && break
+                        dm = XGBoost.DMatrix(X)
+                        f_avg = zeros(Float32, n)
+                        g_avg = zeros(Float32, n)
+                        n_rho_folds = 0
+                        booster = XGBoost.Booster(dm)
+                        for k in 1:K
+                            XGBoost.load!(booster, pbase_folds[k])
+                            f_avg .+= XGBoost.predict(booster, dm; margin = true)
+                            if !isempty(rho_folds[k])
+                                XGBoost.load!(booster, rho_folds[k])
+                                g_avg .+= XGBoost.predict(booster, dm; margin = true)
+                                n_rho_folds += 1
+                            end
                         end
+                        f_avg ./= K
+                        n_rho_folds > 0 && (g_avg ./= n_rho_folds)
+                        finalize(booster)
+
+                        booster_p = Supply.fit_regression(
+                            dm, f_avg; num_round = 100, params = distill_params
+                        )
+                        pbase_bytes = copy(
+                            XGBoost.save(booster_p, Vector{UInt8}; format = "ubj")
+                        )
+                        finalize(booster_p)
+
+                        complier_local = findall(cars.p_compliant .>= γ_cutoff)
+                        rho_bytes = if n_rho_folds > 0 && !isempty(complier_local)
+                            dm_c = XGBoost.DMatrix(X[complier_local, :])
+                            booster_r = Supply.fit_regression(
+                                dm_c, g_avg[complier_local];
+                                num_round = 100, params = distill_params,
+                            )
+                            bytes = copy(
+                                XGBoost.save(booster_r, Vector{UInt8}; format = "ubj")
+                            )
+                            finalize(booster_r)
+                            finalize(dm_c)
+                            bytes
+                        else
+                            UInt8[]
+                        end
+                        finalize(dm)
 
                         (; model, model_year, extra) = cars[1, :]
-                        @info "  refit" model model_year extra best_round_p best_round_r
+                        @info "  distill" model model_year extra n_rho_folds K n_compliers = length(
+                            complier_local
+                        ) n_total = n
                         return (model, model_year, extra) => (pbase_bytes, rho_bytes)
                     end
                     mapreduce(

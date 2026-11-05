@@ -11,18 +11,18 @@ import Base: size  # disambiguate against Cleaner.size (re-exported via DealerMn
 
 BLAS.set_num_threads(1)
 
-# Coordinated uniform price multipliers applied to a dealer's whole assortment,
-# separate from the per-product `_PRICE_SEEDS` used to fit residual demand.
-# These shift ALL prices together → probes substitution to the outside good,
-# which per-product independent wiggles absorb into within-dealer cross-substitution.
-const COORDINATED_SHIFTS = Float32[0.75, 0.9, 0.95, 0.98, 0.99, 1.01, 1.02, 1.05, 1.1, 1.25]
+# Coordinated uniform shifts live in Supply.COORDINATED_SHIFTS (single source of
+# truth shared with bbl_matrix.jl and bbl_estimation.jl). Rebind as a
+# local const for the tight sim loops that reference it.
+const COORDINATED_SHIFTS = Supply.COORDINATED_SHIFTS
 
 function (@main)(_)
     snakemake!()
     with_logging() do
         seed = parse(Int, snakemake.wildcards["seed"])
         rng = MersenneTwister(seed)
-        @info "BBL forward simulation" seed
+        state_locked = get(snakemake.params, "state_locked", false)
+        @info "BBL forward simulation" seed state_locked
 
         # -----------------------------------------------------------------------------
         # Load
@@ -39,8 +39,23 @@ function (@main)(_)
         price_densities = JLD2.load_object(snakemake.input["price_densities"])
         state_transition = JLD2.load_object(snakemake.input["state_transition"])
         compliance_arrow = read_arrow(snakemake.input["compliance"])
-        state_matrix_obs = JLD2.load_object(snakemake.input["residual_demand"])
+        _rd = JLD2.load_object(snakemake.input["residual_demand"])
+        state_matrix_obs = _rd.matrix
+        # kept_vks / tf_keys are the canonical column / row ordering baked
+        # into state_matrix_obs. `products` and `state_lookup` below key off
+        # these — not the demand model's Dict-order — so every downstream
+        # slice into state_matrix_obs, state_exp_mat, and residual_demand
+        # outputs lines up.
+        kept_vks = _rd.kept_vks
+        kept_set = Set(kept_vks)
         price_table = read_arrow(snakemake.input["price_table"])
+
+        # Match residual_demands.jl's _PRICE_SEEDS stream exactly.
+        let rng_seeds = MersenneTwister(20260709)
+            Supply._PRICE_SEEDS[] =
+                rand(rng_seeds, Float32, length(kept_vks), Supply.SIM_SIZE) .*
+                0.3f0 .+ 0.85f0
+        end
 
         # -----------------------------------------------------------------------------
         # Evict products whose dealer_uid or vehicleid has no identifiable FE in
@@ -77,14 +92,23 @@ function (@main)(_)
             bad_vk && (n_evicted_vehicleid += 1)
         end
         Supply.invalidate_tf_to_j_lookup!()
+        # Re-sweep δ per quarter under the Ackerberg-Rysman correction: J_t
+        # shrunk, and pred_regout is trained with log(J) as a covariate. Every
+        # persistent ModelDelete block must be followed by a full sweep — the
+        # per-tweak δ shift is only the linear PriceMultiply offset, never the
+        # AR log(J) re-fit.
+        for t_sweep in unique(k[1] for k in keys(cf.model.product_lookup.tjf))
+            Demand.sweep_δ!(cf, t_sweep)
+        end
+        Demand.refresh!(cf)
         @info "Evicted singleton-FE tuples from DemandModel" n_evicted n_evicted_dealer n_evicted_vehicleid
 
         # -----------------------------------------------------------------------------
         # Indices and lookups
         # -----------------------------------------------------------------------------
         intermed = Supply.tf_to_j_lookup(model)
-        state_lookup = Dict(k => i for (i, k) in enumerate(keys(intermed)))
-        products = collect(keys(model.product_lookup.j))
+        state_lookup = Dict(k => i for (i, k) in enumerate(_rd.tf_keys))
+        products = kept_vks
         J = length(products)
         prod_index = Dict(p => i for (i, p) in enumerate(products))
         ncols_state = size(state_matrix_obs, 2)
@@ -129,28 +153,63 @@ function (@main)(_)
         # +2 = quarter_of_year(t) + ι_lag; must match X_agg column count in
         # scripts/compliance_estimation.jl where the booster is trained.
         sales_booster = bootup(sales_bytes, ncols_state + 2)
-        price_mean_boosters = Dict{VehicleKey, XGBoost.Booster}()
-        price_var_boosters = Dict{VehicleKey, XGBoost.Booster}()
-        for (vk, (mean_bytes, var_bytes)) in price_densities
-            price_mean_boosters[vk] = bootup(mean_bytes, ncols_state + 1)
-            price_var_boosters[vk] = bootup(var_bytes, ncols_state + 1)
-        end
-        st_int_mean_boosters = Dict{VehicleKey, XGBoost.Booster}()
-        st_int_var_boosters = Dict{VehicleKey, XGBoost.Booster}()
-        st_own_mean_boosters = Dict{VehicleKey, XGBoost.Booster}()
-        st_own_var_boosters = Dict{VehicleKey, XGBoost.Booster}()
-        st_cross_mean_boosters = Dict{VehicleKey, XGBoost.Booster}()
-        st_cross_var_boosters = Dict{VehicleKey, XGBoost.Booster}()
-        for (vk, tup) in state_transition
-            im_b, iv_b, om_b, ov_b, cm_b, cv_b = tup
-            st_int_mean_boosters[vk] = bootup(im_b, ncols_state)
-            st_int_var_boosters[vk] = bootup(iv_b, ncols_state)
-            st_own_mean_boosters[vk] = bootup(om_b, ncols_state)
-            st_own_var_boosters[vk] = bootup(ov_b, ncols_state)
-            if !isempty(cm_b)
-                st_cross_mean_boosters[vk] = bootup(cm_b, ncols_state + 1)
-                st_cross_var_boosters[vk] = bootup(cv_b, ncols_state + 1)
+        # Quantile-grid densities: one Vector{XGBoost.Booster} per VK per
+        # target, aligned to Supply.QUANTILE_LEVELS. If any quantile in a grid
+        # is empty (best_round == 0 fits at training time, can't be
+        # serialized), we treat the whole grid as unusable and drop the VK
+        # from that family — the usable_vks intersection below filters
+        # accordingly. Base-score-only stub boosters would predict 0.5 for
+        # every quantile, giving nonsense draws.
+        Q = length(Supply.QUANTILE_LEVELS)
+        # If any quantile in the grid is empty (best_round == 0 at fit time —
+        # XGBoost couldn't beat the marginal-quantile base score), fill it from
+        # the nearest non-empty neighbor. Nearest-neighbor keeps the CDF
+        # monotone under inverse-CDF sampling, and preserves VKs that would
+        # otherwise get dropped for a single weak tail booster. Only bail if
+        # every quantile is empty (fit was truly unfittable).
+        function bootup_grid(byte_vecs::Vector{Vector{UInt8}}, ncols::Int)
+            any(!isempty, byte_vecs) || return nothing
+            grid = Vector{XGBoost.Booster}(undef, length(byte_vecs))
+            for i in eachindex(byte_vecs)
+                src = i
+                if isempty(byte_vecs[i])
+                    best_d = typemax(Int)
+                    for j in eachindex(byte_vecs)
+                        isempty(byte_vecs[j]) && continue
+                        d = abs(j - i)
+                        if d < best_d
+                            best_d = d
+                            src = j
+                        end
+                    end
+                end
+                grid[i] = bootup(byte_vecs[src], ncols)
             end
+            return grid
+        end
+        price_boosters = Dict{VehicleKey, Vector{XGBoost.Booster}}()
+        for (vk, byte_grid) in price_densities
+            grid = bootup_grid(byte_grid, ncols_state + 1)
+            grid === nothing || (price_boosters[vk] = grid)
+        end
+        # state_transition: 5 families per VK — int/own_fo/own_so on state_prev;
+        # cross_fo/cross_int on state_prev + partner id.
+        st_int_boosters = Dict{VehicleKey, Vector{XGBoost.Booster}}()
+        st_own_fo_boosters = Dict{VehicleKey, Vector{XGBoost.Booster}}()
+        st_own_so_boosters = Dict{VehicleKey, Vector{XGBoost.Booster}}()
+        st_cross_fo_boosters = Dict{VehicleKey, Vector{XGBoost.Booster}}()
+        st_cross_int_boosters = Dict{VehicleKey, Vector{XGBoost.Booster}}()
+        for (vk, nt) in state_transition
+            int_g = bootup_grid(nt.intercept, ncols_state)
+            int_g === nothing || (st_int_boosters[vk] = int_g)
+            own_fo_g = bootup_grid(nt.own_firstorder, ncols_state)
+            own_fo_g === nothing || (st_own_fo_boosters[vk] = own_fo_g)
+            own_so_g = bootup_grid(nt.own_secondorder, ncols_state)
+            own_so_g === nothing || (st_own_so_boosters[vk] = own_so_g)
+            cross_fo_g = bootup_grid(nt.cross_firstorder, ncols_state + 1)
+            cross_fo_g === nothing || (st_cross_fo_boosters[vk] = cross_fo_g)
+            cross_int_g = bootup_grid(nt.cross_interaction, ncols_state + 1)
+            cross_int_g === nothing || (st_cross_int_boosters[vk] = cross_int_g)
         end
 
         # -----------------------------------------------------------------------------
@@ -170,11 +229,19 @@ function (@main)(_)
         # would be in-season at Q4 of the last year but their vehicleid isn't
         # in regout.fe (2020 data is incomplete), so sweep_δ! → pred_regout
         # would return `missing` and blow up on Float64 conversion.
+        @info "Booster-family populations" n_price = length(price_boosters) n_st_int = length(
+            st_int_boosters
+        ) n_st_own_fo = length(st_own_fo_boosters) n_st_own_so = length(
+            st_own_so_boosters
+        ) n_st_cross_fo = length(st_cross_fo_boosters) n_st_cross_int = length(
+            st_cross_int_boosters
+        ) n_j = length(model.product_lookup.j)
+
         usable_vks = intersect(
-            Set(keys(price_mean_boosters)),
-            Set(keys(price_var_boosters)),
-            Set(keys(st_int_mean_boosters)),
-            Set(keys(st_own_mean_boosters)),
+            Set(keys(price_boosters)),
+            Set(keys(st_int_boosters)),
+            Set(keys(st_own_fo_boosters)),
+            Set(keys(st_own_so_boosters)),
             Set(keys(model.product_lookup.j)),
         )
         filter!(vk -> vk[3] <= max_model_year, usable_vks)
@@ -214,6 +281,10 @@ function (@main)(_)
             n_evicted_usable += 1
         end
         Supply.invalidate_tf_to_j_lookup!()
+        for t_sweep in unique(k[1] for k in keys(cf.model.product_lookup.tjf))
+            Demand.sweep_δ!(cf, t_sweep)
+        end
+        Demand.refresh!(cf)
         intermed = Supply.tf_to_j_lookup(model)
         @info "Evicted non-usable VKs from DemandModel" n_evicted_usable
 
@@ -233,6 +304,19 @@ function (@main)(_)
         for f in dealers
             state_prev[f] = Vector{Float32}(view(state_matrix_obs, state_lookup[(t₀, f)], :))
             iota_prev[f] = rand(rng) < get(p_compliant_t0, f, 0.5f0)
+        end
+
+        # state_locked diagnostic: pin s_prev to empirical state at (t_prev, f).
+        empirical_s = Dict{Tuple{QuarterKey, UUID}, Vector{Float32}}()
+        if state_locked
+            for ((t_k, f_k), i_row) in state_lookup
+                empirical_s[(t_k, f_k)] = Vector{Float32}(
+                    view(state_matrix_obs, i_row, :)
+                )
+            end
+            @info "State-locked mode: feeding empirical s_prev into boosters" n_tf = length(
+                empirical_s
+            )
         end
 
         outputs = Dict{Tuple{QuarterKey, UUID}, NamedTuple}()
@@ -273,7 +357,8 @@ function (@main)(_)
         # -----------------------------------------------------------------------------
         # Simulation loop Q2 2017 → Q4 2019
         # -----------------------------------------------------------------------------
-        for t in T[2:end]
+        for (i_t, t) in enumerate(T[2:end])
+            t_prev = T[i_t]
             @info "Simulating period" t
 
             phi_by_dealer = Dict{UUID, Float32}()
@@ -283,7 +368,13 @@ function (@main)(_)
             prices_by_dealer = Dict{UUID, Vector{Float32}}()  # parallel to assortment
 
             for f in dealers
-                s_prev = state_prev[f]
+                s_prev = if state_locked
+                    key_prev = (t_prev, f)
+                    haskey(empirical_s, key_prev) || continue
+                    empirical_s[key_prev]
+                else
+                    state_prev[f]
+                end
                 ι_prev_f32 = Float32(iota_prev[f])
 
                 # Sales target φ_t = f(state_{t-1}, quarter_of_year(t), ι_{t-1}).
@@ -315,12 +406,7 @@ function (@main)(_)
                         logistic(only(XGBoost.predict(pb_boost, dm_state; margin = true))),
                         1e-8, 1 - 1e-8,
                     )
-                    # Match training: ρ̃ = RHO_MIN + (1 − RHO_MIN)·σ(g_r) via
-                    # Supply.rho_from_margin (src/supply/xgboost.jl:286). Plain
-                    # σ(g_r) + clamp diverges from the link the booster was
-                    # optimized under. Groups with no fitted rho_booster get
-                    # ρ̃ = RHO_MIN, mirroring compliance_estimation.jl:496.
-                    p_sale = if iota_prev[f]
+                    is_sold = if iota_prev[f]
                         ρ̃ = if haskey(rho_boosters, group)
                             clamp(
                                 Supply.rho_from_margin(
@@ -335,11 +421,11 @@ function (@main)(_)
                         else
                             Float32(Supply.RHO_MIN)
                         end
-                        p_base + (1 - p_base) * ρ̃
+                        (rand(rng) < p_base) || (rand(rng) < ρ̃)
                     else
-                        p_base
+                        rand(rng) < p_base
                     end
-                    if rand(rng) < p_sale
+                    if is_sold
                         for vk in get(group_to_vks, group, VehicleKey[])
                             push!(new_assortment, vk)
                         end
@@ -348,29 +434,26 @@ function (@main)(_)
                 finalize(dm_state)
                 assortment_by_dealer[f] = new_assortment
 
-                # Expected state s_t via transition boosters (dealer's belief).
-                # Derived from s_prev and new_assortment only — doesn't need cf
-                # to be mutated, so we compute it before applying tweaks. This
-                # matters because ModelAdd(price=p) below takes the drawn price
-                # directly and skips the hausman_fn lookup that would otherwise
-                # NaN out for (t, j, f) triples not in training data.
-                # Cross-elasticity predictions batched across partners per focal
-                # product — one DMatrix per (vk, all partners) instead of one
-                # per partner.
-                draw_normal(μ, var) = μ + sqrt(max(Float32(var), 0.0f0)) * Float32(randn(rng))
-                state_exp_mat = fill(NaN32, J, J + 1)
+                # Expected state s_t via quantile-grid transition boosters.
+                function draw_scalar_grid(grid, dm)
+                    weights_idxs = Supply.sample_from_quantile_grid(rng)
+                    return sum(
+                        w * only(XGBoost.predict(grid[i], dm; margin = true)) for
+                        (w, i) in weights_idxs
+                    )
+                end
+                state_exp_mat = fill(NaN32, J, Supply.state_matrix_width(J))
                 dm_prev_row = XGBoost.DMatrix(reshape(s_prev, 1, :))
                 for vk in new_assortment
                     j_idx = prod_index[vk]
-                    μ_int = Float32(only(XGBoost.predict(st_int_mean_boosters[vk], dm_prev_row)))
-                    v_int = Float32(only(XGBoost.predict(st_int_var_boosters[vk], dm_prev_row)))
-                    state_exp_mat[j_idx, 1] = draw_normal(μ_int, v_int)
-                    μ_own = Float32(only(XGBoost.predict(st_own_mean_boosters[vk], dm_prev_row)))
-                    v_own = Float32(only(XGBoost.predict(st_own_var_boosters[vk], dm_prev_row)))
-                    state_exp_mat[j_idx, j_idx + 1] = draw_normal(μ_own, v_own)
-                    # Cross booster is optional (empty in training for VKs that
-                    # never had a co-carried partner) — skip cross terms if missing.
-                    haskey(st_cross_mean_boosters, vk) || continue
+                    state_exp_mat[j_idx, Supply.intercept_col()] =
+                        draw_scalar_grid(st_int_boosters[vk], dm_prev_row)
+                    state_exp_mat[j_idx, Supply.firstorder_col(j_idx)] =
+                        draw_scalar_grid(st_own_fo_boosters[vk], dm_prev_row)
+                    state_exp_mat[j_idx, Supply.quadratic_col(J, j_idx)] =
+                        draw_scalar_grid(st_own_so_boosters[vk], dm_prev_row)
+                    haskey(st_cross_fo_boosters, vk) || continue
+                    haskey(st_cross_int_boosters, vk) || continue
                     partners = Int[prod_index[vk2] for vk2 in new_assortment if vk2 != vk]
                     isempty(partners) && continue
                     X_cross = Matrix{Float32}(undef, length(partners), ncols_state + 1)
@@ -379,10 +462,13 @@ function (@main)(_)
                         X_cross[i, end] = Float32(partners[i])
                     end
                     dm_cross = XGBoost.DMatrix(X_cross)
-                    cross_μ = XGBoost.predict(st_cross_mean_boosters[vk], dm_cross)
-                    cross_v = XGBoost.predict(st_cross_var_boosters[vk], dm_cross)
+                    cross_fo_grid = st_cross_fo_boosters[vk]
+                    cross_int_grid = st_cross_int_boosters[vk]
                     for (i, k_idx) in enumerate(partners)
-                        state_exp_mat[j_idx, k_idx + 1] = draw_normal(cross_μ[i], cross_v[i])
+                        state_exp_mat[j_idx, Supply.firstorder_col(k_idx)] =
+                            draw_scalar_grid(cross_fo_grid, view(dm_cross, i:i, :))
+                        state_exp_mat[j_idx, Supply.quadratic_col(J, k_idx)] =
+                            draw_scalar_grid(cross_int_grid, view(dm_cross, i:i, :))
                     end
                     finalize(dm_cross)
                 end
@@ -390,15 +476,12 @@ function (@main)(_)
                 state_expected_flat = reshape(state_exp_mat, :)
                 state_expected_by_dealer[f] = state_expected_flat
 
-                # Sample prices — price density conditions on (s_t_expected, log φ_t).
+                # Sample prices — quantile-grid density on (s_t_expected, log φ_t).
                 x_price_common = vcat(state_expected_flat, Float32(log_phi))
                 dm_price = XGBoost.DMatrix(reshape(x_price_common, 1, :))
                 drawn_prices = Vector{Float32}(undef, length(new_assortment))
                 for (i, vk) in enumerate(new_assortment)
-                    log_p_mean = only(XGBoost.predict(price_mean_boosters[vk], dm_price))
-                    log_p_var = only(XGBoost.predict(price_var_boosters[vk], dm_price))
-                    log_p_stddev = sqrt(max(Float32(log_p_var), 0.0f0))
-                    log_p = log_p_mean + log_p_stddev * Float32(randn(rng))
+                    log_p = draw_scalar_grid(price_boosters[vk], dm_price)
                     drawn_prices[i] = Float32(exp(log_p))
                 end
                 finalize(dm_price)
@@ -445,6 +528,9 @@ function (@main)(_)
 
             # Phase 2: q_t, ι_t, actual state
             for f in dealers
+                # Under state_locked, Phase 1 skips (t, f) when empirical
+                # state is missing — carry that skip into Phase 2.
+                haskey(assortment_by_dealer, f) || continue
                 # Dealer drew an empty assortment (every compliance-group
                 # Bernoulli fired 0). Treat as "sat this quarter out": carry
                 # state_prev / iota_prev forward, record an empty-assortment
@@ -475,7 +561,7 @@ function (@main)(_)
                 new_iota = rand(rng) < p_iota
 
                 s_actual, pert_prices, pert_demands = Supply.residual_demand(
-                    cf, f, t; return_draws = true
+                    cf, f, t; return_draws = true, products = kept_vks
                 )
 
                 # `assortment_by_dealer[f]` and `prices_by_dealer[f]` are in

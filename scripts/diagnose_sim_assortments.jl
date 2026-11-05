@@ -11,7 +11,7 @@ function (@main)(_)
         )
         price_table = read_arrow(snakemake.input["price_table"])
 
-        # Mirrors bbl_forward_simulation_stratified.jl:96–104.
+        # Mirrors bbl_forward_simulation.jl:96–104.
         vk_to_group = Dict{VehicleKey, Tuple{String, Int64, String}}()
         for row in eachrow(price_table)
             vk = (row.make, row.model, row.model_year, Float32(row.trim_rank))
@@ -42,7 +42,7 @@ function (@main)(_)
         end
 
         # Seed period's sim assortment equals the real one by construction
-        # (bbl_forward_simulation_stratified.jl:259). Skip it — nothing to compare.
+        # (bbl_forward_simulation.jl:259). Skip it — nothing to compare.
         all_ts = Set{QuarterKey}(t for ((t, _f), _) in sim_by_tf)
         t0 = minimum(all_ts)
 

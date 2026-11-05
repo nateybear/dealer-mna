@@ -2,17 +2,16 @@ using DealerMnA
 using DataFrames
 using Statistics: mean
 
-# Flat index in the column-major J × (J+1) residual-demand matrix →
-# :intercept (column 1) / :own (diagonal, c = r+1) / :cross (everywhere else).
+# Flat index in column-major J × (2J+1) residual-demand matrix → class.
 function classify_cell(flat_idx::Int, J::Int)
     r = ((flat_idx - 1) % J) + 1
     c = ((flat_idx - 1) ÷ J) + 1
     if c == 1
         return :intercept
-    elseif c == r + 1
-        return :own
+    elseif c <= J + 1
+        return c - 1 == r ? :own_firstorder : :cross_firstorder
     else
-        return :cross
+        return c - 1 - J == r ? :own_secondorder : :cross_interaction
     end
 end
 
@@ -46,9 +45,9 @@ function (@main)(_)
 
                 L = length(nt.state_expected)
                 @assert length(nt.state_actual) == L
-                # J*(J+1) = L → J = (-1 + √(1 + 4L)) / 2
-                J = round(Int, (-1 + sqrt(1 + 4L)) / 2)
-                @assert J * (J + 1) == L "state vector length $L not J*(J+1)"
+                # J*(2J+1) = L → J = (-1 + √(1 + 8L)) / 4
+                J = round(Int, (-1 + sqrt(1 + 8L)) / 4)
+                @assert J * (2J + 1) == L "state vector length $L not J*(2J+1)"
 
                 y, q = t
                 for i in 1:L

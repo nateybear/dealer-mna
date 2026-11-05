@@ -5,7 +5,14 @@ using DataFrames
 using DataStructures
 
 const _PRICE_SEEDS = Ref{Matrix{Float32}}()
-const SIM_SIZE = 50
+const SIM_SIZE = 100
+
+# K × (2K+1) layout: col 1 intercept; cols 2..K+1 first-order α_{ik} (partner k, k=i is own);
+# cols K+2..2K+1 quadratic β_{ik} (k=i is own-sq, k≠i is cross interaction).
+@inline intercept_col() = 1
+@inline firstorder_col(k::Integer) = 1 + k
+@inline quadratic_col(K::Integer, k::Integer) = 1 + K + k
+@inline state_matrix_width(K::Integer) = 2K + 1
 
 # Coordinated uniform price multipliers applied to a dealer's whole assortment
 # in BBL forward simulation. Single source of truth — bbl_forward_simulation
@@ -94,7 +101,8 @@ function residual_demand(
     invalidate_tf_to_j_lookup!()
     products = products === nothing ? collect(keys(cf.model.product_lookup.j)) : products
     prod_pos = Dict(p => i for (i, p) in enumerate(products))
-    out = fill(NaN32, (length(products), length(products) + 1))
+    K = length(products)
+    out = fill(NaN32, (K, state_matrix_width(K)))
 
     delete_handles = NamedTuple[]
     if keep !== nothing
@@ -105,9 +113,6 @@ function residual_demand(
         end
         isempty(delete_handles) || invalidate_tf_to_j_lookup!()
     end
-    # If the (t, f) has no live products (empty original assortment, or all
-    # non-kept and just ModelDelete'd), the SIM_SIZE loop degenerates and `out`
-    # stays all-NaN. Callers should treat NaN as "dealer sat out."
     carried_products = get(tf_to_j_lookup(cf), (quarter, dealer_uid), VehicleKey[])
 
     prices = zeros(SIM_SIZE, length(carried_products))
@@ -128,39 +133,48 @@ function residual_demand(
         end
     end
 
-    # Snapshot the raw price/demand levels before the log transform, in case
-    # the caller wants them for BBL moment formation.
     raw_prices = return_draws ? copy(prices) : nothing
     raw_demands = return_draws ? copy(demands) : nothing
 
     demands .= log.(demands)
     prices .= log.(prices)
 
-    # Preallocate the design matrix outside the per-product loop. Column 1 is the
-    # intercept (constant 1s); columns 2:(N_d+1) hold either log(p_k) (k = focal)
-    # or log(p_k)·log(p_focal) (k ≠ focal). Only the interacted columns change
-    # between iterations, so we scribble in-place.
+    # Translog with cross-first-order + own-sq (omits non-focal cross-cross to keep rank ≤ SIM_SIZE).
     N_d = length(product_idxs)
-    X = Matrix{Float64}(undef, SIM_SIZE, N_d + 1)
+    X = Matrix{Float64}(undef, SIM_SIZE, 2N_d + 1)
     fill!(view(X, :, 1), 1.0)
+    @inbounds for k in 1:N_d
+        col = view(X, :, 1 + k)
+        @simd for r in 1:SIM_SIZE
+            col[r] = prices[r, k]
+        end
+    end
     for (i, j) in enumerate(product_idxs)
         lp_i = view(prices, :, i)
-        @inbounds for k in 1:N_d
-            col = view(X, :, k + 1)
-            if k == i
-                @simd for r in 1:SIM_SIZE
-                    col[r] = prices[r, k]
-                end
-            else
-                @simd for r in 1:SIM_SIZE
-                    col[r] = prices[r, k] * lp_i[r]
-                end
+        own_sq_col_X = N_d + 2
+        @inbounds @simd for r in 1:SIM_SIZE
+            X[r, own_sq_col_X] = lp_i[r] * lp_i[r]
+        end
+        col_offset = N_d + 2
+        for kk in 1:N_d
+            kk == i && continue
+            col_offset += 1
+            col = view(X, :, col_offset)
+            @inbounds @simd for r in 1:SIM_SIZE
+                col[r] = prices[r, kk] * lp_i[r]
             end
         end
         α = X \ view(demands, :, i)
-        out[j, 1] = α[1]
+        out[j, intercept_col()] = α[1]
         @inbounds for (kk, jj) in enumerate(product_idxs)
-            out[j, jj + 1] = α[kk + 1]
+            out[j, firstorder_col(jj)] = α[1 + kk]
+        end
+        out[j, quadratic_col(K, j)] = α[N_d + 2]
+        col_offset = N_d + 2
+        for (kk, jj) in enumerate(product_idxs)
+            kk == i && continue
+            col_offset += 1
+            out[j, quadratic_col(K, jj)] = α[col_offset]
         end
     end
 

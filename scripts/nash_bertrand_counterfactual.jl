@@ -29,7 +29,7 @@ function (@main)(_)
         price_scale = Float64(model.price_scale)
 
         # -----------------------------------------------------------------------------
-        # Step 1a: singleton-FE eviction (mirrors bbl_forward_simulation_stratified.jl).
+        # Step 1a: singleton-FE eviction (mirrors bbl_forward_simulation.jl).
         # sweep_δ! per quarter afterward (AR correction).
         # -----------------------------------------------------------------------------
         fe_df = cf.regout.fe
