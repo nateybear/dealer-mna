@@ -1998,7 +1998,6 @@ rule all_stratified:
         "data/nash_bertrand_counterfactual_stratified.jld2",
         # Diagnostics
         "tables/diagnose_sim_assortments_sizes_stratified.arrow",
-        "tables/diagnose_sim_assortments_sizes_state_locked_stratified.arrow",
         "tables/diagnose_quantile_calibration_stratified.arrow",
         "tables/diagnose_strata_ablation_stratified.arrow",
         "tables/diagnose_log_j_shift_stratified.arrow",
