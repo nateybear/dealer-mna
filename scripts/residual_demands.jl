@@ -70,7 +70,7 @@ function (@main)(_)
     @info "Residual demand" nworkers = nworkers() K n_tfs = length(tf_keys) n_all_vks = length(
         model.product_lookup.j
     )
-    out = Matrix{Float32}(undef, length(tf_keys), K * (K + 1))
+    out = Matrix{Float32}(undef, length(tf_keys), K * Supply.state_matrix_width(K))
     fitted = pmap(compute_row, 1:length(tf_keys))
     for (i, row) in enumerate(fitted)
         out[i, :] .= row
