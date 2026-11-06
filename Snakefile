@@ -1624,10 +1624,12 @@ rule all_structural:
     input:
         # Paper artifacts
         "tables/trim_probabilities.tex",
+        "tables/demand.tex",
         "plots/mcem_trace.png",
         "plots/sales_targets_scatter.png",
         "plots/trim_probabilities_popular.png",
         "plots/trim_probabilities_variation.png",
+        "plots/wtp_distance.png",
         # New data-only outputs (plots not yet in paper)
         "data/bbl_estimates.jld2",
         "data/nash_bertrand_counterfactual.jld2",
@@ -1660,6 +1662,28 @@ rule plot_wtp_distance:
             output=output,
             log=log,
         )
+
+
+rule table_demand:
+    """Coefficient estimates + median own-price elasticity for the demand model."""
+    input:
+        "scripts/table_demand.jl",
+        model_frames="data/model_frames.jld2",
+        demand_estimates="data/demand_estimates.jld2",
+        demand_se="tables/demand_standard_errors.csv",
+        delta_decomp="data/delta_decomposition_regout.jld2",
+    output:
+        table="tables/demand.tex",
+    log:
+        "logs/table_demand.log",
+    run:
+        julia(
+            "scripts/table_demand.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
 
 rule toy_model:
     input:
