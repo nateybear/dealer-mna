@@ -269,9 +269,14 @@ function (@main)(_)
                                 PBASE_XGB_PARAMS.max_depth
                             end
 
+                            # Lower eta past the initial ramp for stable accumulation.
+                            eta_sweep = sweep < 10 ? PBASE_XGB_PARAMS.eta : 0.05f0
+
                             booster_p = Supply.fit_xgb_custom(
                                 dm_tr; num_round = num_rounds,
-                                params = merge(PBASE_XGB_PARAMS, (; max_depth)),
+                                params = merge(
+                                    PBASE_XGB_PARAMS, (; max_depth, eta = eta_sweep)
+                                ),
                                 xgb_model = saved_p_bytes,
                             ) do ŷ
                                 grad = Vector{Float32}(undef, n_tr)
@@ -307,10 +312,14 @@ function (@main)(_)
                                     RHO_XGB_PARAMS.max_depth
                                 end
 
+                                eta_sweep = sweep < 10 ? RHO_XGB_PARAMS.eta : 0.05f0
+
                                 booster_r = Supply.fit_xgb_custom(
                                     dm_tr_c;
                                     num_round = num_rounds,
-                                    params = merge(RHO_XGB_PARAMS, (; max_depth)),
+                                    params = merge(
+                                        RHO_XGB_PARAMS, (; max_depth, eta = eta_sweep)
+                                    ),
                                     xgb_model = saved_r_bytes,
                                 ) do ŷ
                                     grad = Vector{Float32}(undef, n_tr_c)
@@ -531,13 +540,15 @@ function (@main)(_)
             distill_params = merge(
                 Supply.XGB_DEFAULT_PARAMS,
                 (
-                    objective = "reg:squarederror",
+                    objective = "reg:pseudohubererror",
                     base_score = 0.0,
-                    max_depth = 5,
+                    max_depth = 8,
                     eta = 0.1,
                     lambda = 1.0,
                 ),
             )
+            distill_num_round = 300
+            distill_huber_delta = 0.25
             final_M_step =
                 let mapped = pmap(collect(gdf)) do cars
                         cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
@@ -569,36 +580,50 @@ function (@main)(_)
                         finalize(booster)
 
                         booster_p = Supply.fit_regression(
-                            dm, f_avg; num_round = 100, params = distill_params
+                            dm, f_avg;
+                            num_round = distill_num_round, params = distill_params,
+                            loss = :huber, huber_slope = distill_huber_delta,
                         )
                         pbase_bytes = copy(
                             XGBoost.save(booster_p, Vector{UInt8}; format = "ubj")
                         )
+                        pred_p = XGBoost.predict(booster_p, dm; margin = true)
+                        ss_tot_p = sum((f_avg .- mean(f_avg)) .^ 2)
+                        r2_p = ss_tot_p > 0 ?
+                            Float32(1 - sum((f_avg .- pred_p) .^ 2) / ss_tot_p) : NaN32
                         finalize(booster_p)
 
                         complier_local = findall(cars.p_compliant .>= γ_cutoff)
-                        rho_bytes = if n_rho_folds > 0 && !isempty(complier_local)
+                        rho_bytes, r2_r = if n_rho_folds > 0 && !isempty(complier_local)
                             dm_c = XGBoost.DMatrix(X[complier_local, :])
+                            target = g_avg[complier_local]
                             booster_r = Supply.fit_regression(
-                                dm_c, g_avg[complier_local];
-                                num_round = 100, params = distill_params,
+                                dm_c, target;
+                                num_round = distill_num_round, params = distill_params,
+                                loss = :huber, huber_slope = distill_huber_delta,
                             )
                             bytes = copy(
                                 XGBoost.save(booster_r, Vector{UInt8}; format = "ubj")
                             )
+                            pred_r = XGBoost.predict(booster_r, dm_c; margin = true)
+                            ss_tot_r = sum((target .- mean(target)) .^ 2)
+                            r2 = ss_tot_r > 0 ?
+                                Float32(1 - sum((target .- pred_r) .^ 2) / ss_tot_r) :
+                                NaN32
                             finalize(booster_r)
                             finalize(dm_c)
-                            bytes
+                            (bytes, r2)
                         else
-                            UInt8[]
+                            (UInt8[], NaN32)
                         end
                         finalize(dm)
 
                         (; model, model_year, extra) = cars[1, :]
                         @info "  distill" model model_year extra n_rho_folds K n_compliers = length(
                             complier_local
-                        ) n_total = n
-                        return (model, model_year, extra) => (pbase_bytes, rho_bytes)
+                        ) n_total = n r2_pbase = r2_p r2_rho = r2_r
+                        return (model, model_year, extra) =>
+                            (pbase_bytes, rho_bytes, r2_p, r2_r)
                     end
                     mapreduce(
                         Dict,
@@ -606,11 +631,25 @@ function (@main)(_)
                         mapped,
                         init = Dict{
                             Tuple{String, Int64, String},
-                            Tuple{Vector{UInt8}, Vector{UInt8}},
+                            Tuple{Vector{UInt8}, Vector{UInt8}, Float32, Float32},
                         }(),
                     )
                 end
-            JLD2.save_object("data/compliance_fits_final.jld2", final_M_step)
+            r2_pbases = Float32[v[3] for v in values(final_M_step) if !isnan(v[3])]
+            r2_rhos = Float32[v[4] for v in values(final_M_step) if !isnan(v[4])]
+            @info "Distill R² (pbase)" n = length(r2_pbases) mean_ = mean(r2_pbases) q = quantile(
+                r2_pbases, [0.1, 0.5, 0.9]
+            ) min_ = minimum(r2_pbases)
+            if !isempty(r2_rhos)
+                @info "Distill R² (rho)" n = length(r2_rhos) mean_ = mean(r2_rhos) q = quantile(
+                    r2_rhos, [0.1, 0.5, 0.9]
+                ) min_ = minimum(r2_rhos)
+            end
+            # Strip R² scalars — downstream consumers expect the 2-tuple format.
+            final_M_step_out = Dict{
+                Tuple{String, Int64, String}, Tuple{Vector{UInt8}, Vector{UInt8}},
+            }(k => (v[1], v[2]) for (k, v) in final_M_step)
+            JLD2.save_object("data/compliance_fits_final.jld2", final_M_step_out)
             return nothing
         end
     end

@@ -39,12 +39,31 @@ end
 function fit_regression(
     dm::XGBoost.DMatrix, y::AbstractVector;
     num_round::Int, params = XGB_DEFAULT_PARAMS,
+    loss::Symbol = :squared, huber_slope::Float64 = 1.0,
 )
     y_f32 = Float32.(y)
-    n = length(y_f32)
-    hess = ones(Float32, n)
-    return fit_xgb_custom(dm; num_round, params) do ŷ
-        return ŷ .- y_f32, hess
+    if loss === :squared
+        n = length(y_f32)
+        hess = ones(Float32, n)
+        return fit_xgb_custom(dm; num_round, params) do ŷ
+            return ŷ .- y_f32, hess
+        end
+    elseif loss === :absolute || loss === :huber
+        obj = loss === :absolute ? "reg:absoluteerror" : "reg:pseudohubererror"
+        native = merge(params, (; objective = obj))
+        loss === :huber && (native = merge(native, (; huber_slope)))
+        XGBoost.setinfo!(dm, "label", y_f32)
+        b = with_logger(NullLogger()) do
+            XGBoost.Booster(dm; native...)
+        end
+        for _ in 1:num_round
+            with_logger(NullLogger()) do
+                XGBoost.updateone!(b, dm)
+            end
+        end
+        return b
+    else
+        throw(ArgumentError("fit_regression: unknown loss $loss"))
     end
 end
 
