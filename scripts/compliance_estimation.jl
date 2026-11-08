@@ -19,7 +19,7 @@ using Distributed
 
     K = 2
 
-    MAX_INNER_SWEEPS = 250
+    MAX_INNER_SWEEPS = 150
     Ρ̃_TOL = 1.0f-4
     NUM_ROUND_STEP1 = 20
 
