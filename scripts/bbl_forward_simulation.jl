@@ -199,16 +199,19 @@ function (@main)(_)
         st_own_so_boosters = Dict{VehicleKey, Vector{XGBoost.Booster}}()
         st_cross_fo_boosters = Dict{VehicleKey, Vector{XGBoost.Booster}}()
         st_cross_int_boosters = Dict{VehicleKey, Vector{XGBoost.Booster}}()
+        # state_transition X also carries a K-dim 0/1 indicator over kept_vks for
+        # the *current* assortment (post pbase-draw), so the booster can specialize
+        # the translog intercept/own/cross coefs on which products share the shelf.
         for (vk, nt) in state_transition
-            int_g = bootup_grid(nt.intercept, ncols_state)
+            int_g = bootup_grid(nt.intercept, ncols_state + J)
             int_g === nothing || (st_int_boosters[vk] = int_g)
-            own_fo_g = bootup_grid(nt.own_firstorder, ncols_state)
+            own_fo_g = bootup_grid(nt.own_firstorder, ncols_state + J)
             own_fo_g === nothing || (st_own_fo_boosters[vk] = own_fo_g)
-            own_so_g = bootup_grid(nt.own_secondorder, ncols_state)
+            own_so_g = bootup_grid(nt.own_secondorder, ncols_state + J)
             own_so_g === nothing || (st_own_so_boosters[vk] = own_so_g)
-            cross_fo_g = bootup_grid(nt.cross_firstorder, ncols_state + 1)
+            cross_fo_g = bootup_grid(nt.cross_firstorder, ncols_state + J + 1)
             cross_fo_g === nothing || (st_cross_fo_boosters[vk] = cross_fo_g)
-            cross_int_g = bootup_grid(nt.cross_interaction, ncols_state + 1)
+            cross_int_g = bootup_grid(nt.cross_interaction, ncols_state + J + 1)
             cross_int_g === nothing || (st_cross_int_boosters[vk] = cross_int_g)
         end
 
@@ -443,7 +446,20 @@ function (@main)(_)
                     )
                 end
                 state_exp_mat = fill(NaN32, J, Supply.state_matrix_width(J))
-                dm_prev_row = XGBoost.DMatrix(reshape(s_prev, 1, :))
+                # X layout for state_transition: [s_prev, assortment_indicator]
+                # (+partner on cross). assortment_indicator[k] = 1 iff kept_vks[k]
+                # is in new_assortment.
+                x_prev_row = Vector{Float32}(undef, ncols_state + J)
+                @inbounds for i in 1:ncols_state
+                    x_prev_row[i] = s_prev[i]
+                end
+                @inbounds for k in 1:J
+                    x_prev_row[ncols_state + k] = 0.0f0
+                end
+                for vk in new_assortment
+                    x_prev_row[ncols_state + prod_index[vk]] = 1.0f0
+                end
+                dm_prev_row = XGBoost.DMatrix(reshape(x_prev_row, 1, :))
                 for vk in new_assortment
                     j_idx = prod_index[vk]
                     state_exp_mat[j_idx, Supply.intercept_col()] =
@@ -456,9 +472,9 @@ function (@main)(_)
                     haskey(st_cross_int_boosters, vk) || continue
                     partners = Int[prod_index[vk2] for vk2 in new_assortment if vk2 != vk]
                     isempty(partners) && continue
-                    X_cross = Matrix{Float32}(undef, length(partners), ncols_state + 1)
+                    X_cross = Matrix{Float32}(undef, length(partners), ncols_state + J + 1)
                     for i in eachindex(partners)
-                        X_cross[i, 1:ncols_state] .= s_prev
+                        X_cross[i, 1:(ncols_state + J)] .= x_prev_row
                         X_cross[i, end] = Float32(partners[i])
                     end
                     dm_cross = XGBoost.DMatrix(X_cross)

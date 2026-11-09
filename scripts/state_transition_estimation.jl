@@ -73,9 +73,18 @@ using Distributed
         end
 
         ncols_state = size(state_matrix, 2)
-        X_common = Matrix{Float32}(undef, n, ncols_state)
+        # X_common = [state_{t-1}, current-assortment 0/1 indicator over kept_vks].
+        # Intercept/own/cross coefs are mechanical functions of what's on the
+        # shelf at t via the translog denominator; conditioning on it lets the
+        # booster specialize instead of averaging over the state_{t-1}-conditional
+        # assortment distribution.
+        X_common = Matrix{Float32}(undef, n, ncols_state + J)
         for r in 1:n
-            X_common[r, :] .= @view state_matrix[rows_tlag[r], :]
+            X_common[r, 1:ncols_state] .= @view state_matrix[rows_tlag[r], :]
+            X_common[r, (ncols_state + 1):end] .= 0.0f0
+            for k_idx in carried[r]
+                X_common[r, ncols_state + k_idx] = 1.0f0
+            end
         end
 
         y_int = Float32[state_matrix[rows_t[r], flat_intercept(j_idx)] for r in 1:n]
@@ -96,9 +105,9 @@ using Distributed
             end
         end
         n_cross = length(cross_r)
-        X_cross = Matrix{Float32}(undef, n_cross, ncols_state + 1)
+        X_cross = Matrix{Float32}(undef, n_cross, ncols_state + J + 1)
         for i in 1:n_cross
-            X_cross[i, 1:ncols_state] .= @view X_common[cross_r[i], :]
+            X_cross[i, 1:(ncols_state + J)] .= @view X_common[cross_r[i], :]
             X_cross[i, end] = Float32(cross_k[i])
         end
 
