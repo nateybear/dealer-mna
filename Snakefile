@@ -1625,6 +1625,8 @@ rule all_structural:
         # Paper artifacts
         "tables/trim_probabilities.tex",
         "tables/demand.tex",
+        "tables/trim_variation.tex",
+        "tables/markup_trim_regression.tex",
         "plots/mcem_trace.png",
         "plots/sales_targets_scatter.png",
         "plots/trim_probabilities_popular.png",
