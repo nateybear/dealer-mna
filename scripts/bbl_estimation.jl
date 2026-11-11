@@ -441,6 +441,8 @@ function (@main)(_)
     c_unweighted, start_vals = @fetch solve_bound!(MIN_SENSE, sum(ϵ .^ 2))
     @info "Unweighted feasibility done" c_unweighted
 
+    set_start_values!(start_vals)
+
     w_start = start_vals[1:n_j]
     f_start = start_vals[(n_j + 1):(n_j + n_f)]
     t_start = start_vals[(n_j + n_f + 1):(n_j + n_f + n_t)]
@@ -452,6 +454,7 @@ function (@main)(_)
     while true
         @info "Calculating c weights iteration $i"
         c_weighted_new, start_vals_weighted = @fetch solve_bound!(MIN_SENSE, weighted_sse_obj(σ))
+        set_start_values!(start_vals_weighted)
         w_start = start_vals_weighted[1:n_j]
         f_start = start_vals_weighted[(n_j + 1):(n_j + n_f)]
         t_start = start_vals_weighted[(n_j + n_f + 1):(n_j + n_f + n_t)]
