@@ -457,11 +457,17 @@ function (@main)(_)
         f_start = start_vals_weighted[(n_j + 1):(n_j + n_f)]
         t_start = start_vals_weighted[(n_j + n_f + 1):(n_j + n_f + n_t)]
         σ = @fetch compute_moment_sigmas(w_start, f_start, t_start)
-        if abs(c_weighted - c_weighted_new) < 1e-4
+        c_change = abs(c_weighted - c_weighted_new)
+        if c_change < 1e-2
             break
         end
+        @info "c weights" c_weighted c_weighted_new c_change σ
         i += 1
         c_weighted = c_weighted_new
+        if i ≥ 10
+            @warn "stopping after 10 iterations"
+            break
+        end
     end
     @info "Weighted feasibility done" c_weighted c_unweighted ratio_c =
         c_weighted / max(c_unweighted, eps())
