@@ -5,7 +5,7 @@ using Distributed
 # used in main
 macro fetchinit(args...)
     exprs = [:($(esc(a)) = @fetch $(esc(a))) for a in args]
-    quote
+    return quote
         $(exprs...)
     end
 end
@@ -52,7 +52,7 @@ end
     const N_TOTAL = N_LOCAL + N_SHIFTS
 
     n_tf = length(index.tf_rows)
-    n_col = 100                                 # BBL sim replications; matches Snakefile expand range
+    n_col = 50                                 # BBL sim replications; matches Snakefile expand range
     n_j = length(index.vehicle_cols)
     n_f = length(index.dealer_cols)
     n_t = 4
@@ -191,17 +191,18 @@ end
     # Row i inside block bi's stripe corresponds to (tf_idx, k) via
     #   tf_idx = ((i-1) mod n_tf) + 1, k = ((i-1) ÷ n_tf) + 1.
     # k = rank position for sorted blocks, raw scenario index for raw blocks.
-    row_meta = let meta = Vector{NamedTuple{(:block, :t, :k), Tuple{Symbol, Demand.QuarterKey, Int}}}()
-        for (bi, (name, n_scen, _lo, _hi, _sorted)) in enumerate(block_specs)
-            for i in 1:(n_tf * n_scen)
-                tf_idx = ((i - 1) % n_tf) + 1
-                k = ((i - 1) ÷ n_tf) + 1
-                tf = index.tf_rows[tf_idx]
-                push!(meta, (block = name, t = tf[1], k = k))
+    row_meta =
+        let meta = Vector{NamedTuple{(:block, :t, :k), Tuple{Symbol, Demand.QuarterKey, Int}}}()
+            for (bi, (name, n_scen, _lo, _hi, _sorted)) in enumerate(block_specs)
+                for i in 1:(n_tf * n_scen)
+                    tf_idx = ((i - 1) % n_tf) + 1
+                    k = ((i - 1) ÷ n_tf) + 1
+                    tf = index.tf_rows[tf_idx]
+                    push!(meta, (block = name, t = tf[1], k = k))
+                end
             end
+            meta
         end
-        meta
-    end
 
     function solve_bound!(sense, obj)
         set_objective_sense(model, sense)
@@ -209,7 +210,7 @@ end
         model_copy = copy(model)
         JuMP.set_optimizer(model_copy, KNITRO.Optimizer)
         set_attribute(model_copy, "linsolver", 7)
-	set_silent(model_copy)
+        set_silent(model_copy)
         optimize!(model_copy)
         assert_is_solved_and_feasible(model_copy)
         return objective_value(model_copy), value.(all_variables(model_copy))
@@ -327,14 +328,18 @@ end
         return ranked, n_binding, max_ε
     end
 
-    format_binding_summary(bindings) = isempty(bindings) ? "-" :
-        join(
-            (
-                "$(k[1]) $(k[2][1])Q$(k[2][2]):$(v)"
-                for (k, v) in Iterators.take(bindings, 3)
-            ),
-            ", ",
-        )
+    format_binding_summary(bindings) =
+        if isempty(bindings)
+            "-"
+        else
+            join(
+                (
+                    "$(k[1]) $(k[2][1])Q$(k[2][2]):$(v)"
+                    for (k, v) in Iterators.take(bindings, 3)
+                ),
+                ", ",
+            )
+        end
 
     # Per-j / per-f / per-quarter-of-year sales-share vectors aligned to
     # index.vehicle_cols / index.dealer_cols / 1:4. Restricted to the BBL
@@ -386,8 +391,10 @@ end
         f_weights = Float64[get(dealer_share, f, 0.0) for f in index.dealer_cols]
         t_weights = Float64[q_share[q] for q in 1:4]
         avg_price_dollars = price_n > 0 ? price_sum / price_n : NaN
-	med_price_dollars = median(skipmissing(filtered.vehsalesprice))
-        return w_weights, f_weights, t_weights, n_total, avg_price_dollars, med_price_dollars, price_n
+        med_price_dollars = median(skipmissing(filtered.vehsalesprice))
+        return w_weights,
+        f_weights, t_weights, n_total, avg_price_dollars, med_price_dollars,
+        price_n
     end
 
     # Build the sales-weighted mean marginal-cost objective as a JuMP AffExpr.
@@ -439,25 +446,35 @@ function (@main)(_)
     f_start = start_vals[(n_j + 1):(n_j + n_f)]
     t_start = start_vals[(n_j + n_f + 1):(n_j + n_f + n_t)]
 
-    @info "Step 2: per-moment σ at unweighted feasibility solution"
+    @info "Step 2: weighted feasibility"
+    c_weighted = start_vals_weighted = Inf
     σ = @fetch compute_moment_sigmas(w_start, f_start, t_start)
-    let σ_sorted = sort(σ)
-        n = length(σ_sorted)
-        @info "σ summary" σ_min = σ_sorted[1] σ_q10 = σ_sorted[max(1, n ÷ 10)] σ_median = σ_sorted[max(1, n ÷ 2)] σ_q90 = σ_sorted[max(1, 9 * n ÷ 10)] σ_max = σ_sorted[end] n_below_floor = count(<(1e-8), σ)
+    i = 1
+    while true
+        @info "Calculating c weights iteration $i"
+        c_weighted_new, start_vals_weighted = @fetch solve_bound!(MIN_SENSE, weighted_sse_obj(σ))
+        w_start = start_vals_weighted[1:n_j]
+        f_start = start_vals_weighted[(n_j + 1):(n_j + n_f)]
+        t_start = start_vals_weighted[(n_j + n_f + 1):(n_j + n_f + n_t)]
+        σ = @fetch compute_moment_sigmas(w_start, f_start, t_start)
+        if abs(c_weighted - c_weighted_new) < 1e-4
+            break
+        end
+        i += 1
+        c_weighted = c_weighted_new
     end
-
-    @info "Step 3: weighted feasibility"
-    c_weighted, start_vals_weighted = @fetch solve_bound!(MIN_SENSE, weighted_sse_obj(σ))
-    @info "Weighted feasibility done" c_weighted c_unweighted ratio_c = c_weighted / max(c_unweighted, eps())
+    @info "Weighted feasibility done" c_weighted c_unweighted ratio_c =
+        c_weighted / max(c_unweighted, eps())
 
     @everywhere workers() set_start_values!($start_vals_weighted)
     @everywhere workers() add_weighted_sse_constraint!($c_weighted, $σ)
     @everywhere workers() set_sigma_for_diag!($σ)
 
-    @info "Step 4: sales-weighted best/worst counterfactual solves"
-    w_weights, f_weights, t_weights, n_sales, avg_price_dollars, med_price_dollars, n_priced =
-        @fetch compute_sales_weights()
-    @info "Sales-weight summary" n_sales n_priced n_vks_with_share = count(>(0), w_weights) n_dealers_with_share = count(>(0), f_weights) w_share_sum = sum(w_weights) f_share_sum = sum(f_weights) t_share_sum = sum(t_weights)
+    @info "Step 3: sales-weighted best/worst counterfactual solves"
+    w_weights, f_weights, t_weights, n_sales, avg_price_dollars, med_price_dollars, n_priced = @fetch compute_sales_weights()
+    @info "Sales-weight summary" n_sales n_priced n_vks_with_share = count(>(0), w_weights) n_dealers_with_share = count(
+        >(0), f_weights
+    ) w_share_sum = sum(w_weights) f_share_sum = sum(f_weights) t_share_sum = sum(t_weights)
 
     # price_scale = std(observed prices) at demand-estimation load time. Read
     # directly from model_frames.jld2 without materializing the full DemandModel.
@@ -468,8 +485,10 @@ function (@main)(_)
 
     best_case = @fetch solve_extreme_case(MIN_SENSE, w_weights, f_weights, t_weights)
     worst_case = @fetch solve_extreme_case(MAX_SENSE, w_weights, f_weights, t_weights)
-    @info "Best case (min sales-weighted marginal cost)" obj = best_case.obj n_binding = best_case.n_binding top = best_case.top_str
-    @info "Worst case (max sales-weighted marginal cost)" obj = worst_case.obj n_binding = worst_case.n_binding top = worst_case.top_str
+    @info "Best case (min sales-weighted marginal cost)" obj = best_case.obj n_binding =
+        best_case.n_binding top = best_case.top_str
+    @info "Worst case (max sales-weighted marginal cost)" obj = worst_case.obj n_binding =
+        worst_case.n_binding top = worst_case.top_str
 
     # # Sales-weighted markup range: avg_price − mc, bounded by best/worst mc.
     # # (best_case has the LOWEST mc → LARGEST implied markup; worst_case is the
