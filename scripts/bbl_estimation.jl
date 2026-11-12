@@ -274,7 +274,6 @@ end
         JuMP.set_optimizer(model_copy, KNITRO.Optimizer)
         set_attribute(model_copy, "linsolver", 7)
         set_attribute(model_copy, "linsolver_numthreads", Threads.nthreads())
-        set_attribute(model_copy, "ms_enable", 1)
         optimize!(model_copy)
         assert_is_solved_and_feasible(model_copy)
         all_vals = value.(all_variables(model_copy))
@@ -468,7 +467,7 @@ function (@main)(_)
         @info "c weights" c_weighted c_weighted_new c_change σ
         i += 1
         c_weighted = c_weighted_new
-        if i ≥ 10
+        if i ≥ 3
             @warn "stopping after 10 iterations"
             break
         end
