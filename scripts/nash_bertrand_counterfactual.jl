@@ -88,6 +88,39 @@ function (@main)(_)
         @info "Non-usable VK eviction complete" n_evicted_usable n_usable_vks = length(usable_vks)
 
         # -----------------------------------------------------------------------------
+        # Step 1c: evict VKs whose BBL w estimate hits the identified-set bounds in
+        # either scenario — those w's are LP corner solutions with no identifying
+        # signal and shouldn't drive counterfactual prices.
+        # -----------------------------------------------------------------------------
+        hitsbounds(x) = isapprox(x, 0.25, atol = 1e-3) || isapprox(x, 10, atol = 1e-3)
+        unidentified_vks = Set{VehicleKey}()
+        for (i, vk) in enumerate(index.vehicle_cols)
+            w_worst = estimates.worst_case.w[i]
+            w_best = estimates.best_case.w[i]
+            (hitsbounds(w_worst) || hitsbounds(w_best)) || continue
+            push!(unidentified_vks, vk)
+        end
+        @info "Unidentified VKs flagged" n = length(unidentified_vks) total = length(
+            index.vehicle_cols,
+        )
+
+        n_evicted_unid = 0
+        for (tjf_key, _) in collect(pairs(cf.model.product_lookup.tjf))
+            (t_key, j_key, f_key) = tjf_key
+            j_key ∈ unidentified_vks || continue
+            h = apply!(
+                cf, Demand.ModelDelete(vehicle = j_key, quarter = t_key, dealer_uid = f_key),
+            )
+            ismissing(h) || (n_evicted_unid += 1)
+        end
+        Supply.invalidate_tf_to_j_lookup!()
+        for t_sweep in unique(k[1] for k in keys(cf.model.product_lookup.tjf))
+            Demand.sweep_δ!(cf, t_sweep)
+        end
+        Demand.refresh!(cf)
+        @info "Unidentified VK eviction complete" n_evicted_unid
+
+        # -----------------------------------------------------------------------------
         # Snapshot observed prices for every remaining (t, j, f) triple, in a fixed
         # panel_meta ordering that both scenarios' results align to. product_info[.].p
         # holds the ORIGINAL observed price (PriceChange does not overwrite it), so
@@ -97,7 +130,7 @@ function (@main)(_)
         # mixed pairs would break the J-matrix / mc dimension match since
         # expected_demand returns over the full assortment.
         bbl_dealer_set = Set(index.dealer_cols)
-        bbl_vk_set = Set(index.vehicle_cols)
+        bbl_vk_set = setdiff(Set(index.vehicle_cols), unidentified_vks)
         in_bbl_universe(f, js) = f ∈ bbl_dealer_set && all(j -> j ∈ bbl_vk_set, js)
 
         panel_meta = Tuple{QuarterKey, VehicleKey, UUID}[]
