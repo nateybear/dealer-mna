@@ -211,6 +211,8 @@ end
         JuMP.set_optimizer(model_copy, KNITRO.Optimizer)
         set_attribute(model_copy, "linsolver", 7)
         set_attribute(model_copy, "linsolver_numthreads", Threads.nthreads())
+        set_attribute(model_copy, "ms_enable", 1)
+        set_attribute(model_copy, "ms_numthreads", 2)
         optimize!(model_copy)
         assert_is_solved_and_feasible(model_copy)
         return objective_value(model_copy), value.(all_variables(model_copy))
@@ -223,7 +225,12 @@ end
     add_weighted_sse_constraint!(c, σ) =
         @constraint(model, sum((1 / max(σ[i], SIGMA_FLOOR)^2) * ϵ[i]^2 for i in 1:length(ϵ)) ≤ c)
 
-    set_start_values!(v) = set_start_value.(all_variables(model), v)
+    set_start_values!(v) =
+        let vars = all_variables(model)
+            @threads for i in eachindex(v)
+                set_start_value(vars[i], v[i])
+            end
+        end
 
     # Per-moment σ under (w, f, t) start values. Reproduces the per-block
     # accumulate_ranked pattern but tracks per-sim values instead of averaging,
@@ -234,7 +241,7 @@ end
             n_rows = n_tf * n_scen
             s_sum = zeros(Float64, n_rows)
             s_sq = zeros(Float64, n_rows)
-            for s in 1:n_col
+            @threads for s in 1:n_col
                 R_slice = R_map[lo:hi, s]
                 Cj_slice = C_j_map[lo:hi, s, :]
                 Cf_slice = C_f_map[lo:hi, s, :]
