@@ -248,7 +248,9 @@ end
         JuMP.set_optimizer(model_copy, KNITRO.Optimizer)
         set_attribute(model_copy, "linsolver", 7)
         set_attribute(model_copy, "linsolver_numthreads", Threads.nthreads())
-        set_time_limit_sec(model_copy, MIP_MAXTIME)
+        # set_time_limit_sec maps to param 1163, which the installed libknitro doesn't know
+        set_attribute(model_copy, "maxtime_real", MIP_MAXTIME)
+        set_attribute(model_copy, "mip_maxtime_real", MIP_MAXTIME)
         optimize!(model_copy)
         ts = termination_status(model_copy)
         primal_status(model_copy) == FEASIBLE_POINT ||
