@@ -75,7 +75,7 @@ end
 
     block_specs = (
         (:local_sorted, N_LOCAL, local_map_lo, local_map_hi, true),
-        (:local_raw, N_LOCAL, local_map_lo, local_map_hi, false),
+        #(:local_raw, N_LOCAL, local_map_lo, local_map_hi, false),
         (:coord_sorted, N_SHIFTS, coord_map_lo, coord_map_hi, true),
         (:coord_raw, N_SHIFTS, coord_map_lo, coord_map_hi, false),
     )
