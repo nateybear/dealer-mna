@@ -2,6 +2,8 @@ using DealerMnA
 using .Demand
 
 using SparseArrays
+using Mmap
+using Statistics: quantile
 
 import Lazy: iterated
 
@@ -35,9 +37,13 @@ struct BBLIndex
     tf_row_index::Dict{Tuple{QuarterKey, UUID}, Int}
     dealer_col_index::Dict{UUID, Int}
     vehicle_col_index::Dict{VehicleKey, Int}
+    # Hockey-stick kink candidates, rows aligned to vehicle_cols, cols to KINK_QUANTILES.
+    kink_grid::Matrix{Float32}
+    kink_obj_weights::Matrix{Float64}
+    kink_dmax::Vector{Float32}
 end
 
-function BBLIndex(dealers::AbstractVector{UUID}, usable_vks)
+function BBLIndex(dealers::AbstractVector{UUID}, usable_vks, kink_by_vk)
     tf_rows = [(t, f) for t in T_START for f in dealers]
     dealer_cols = collect(dealers)
     vehicle_cols = sort(collect(usable_vks))
@@ -50,7 +56,38 @@ function BBLIndex(dealers::AbstractVector{UUID}, usable_vks)
         Dict(k => i for (i, k) in enumerate(tf_rows)),
         Dict(k => i for (i, k) in enumerate(dealer_cols)),
         Dict(k => i for (i, k) in enumerate(vehicle_cols)),
+        permutedims(reduce(hcat, [kink_by_vk[j].grid for j in vehicle_cols])),
+        permutedims(reduce(hcat, [kink_by_vk[j].obj_weights for j in vehicle_cols])),
+        Float32[kink_by_vk[j].dmax for j in vehicle_cols],
     )
+end
+
+# Candidate kinks from observed-price expected demand over the full 2017–2019 window.
+# obj_weights[k] = Σ D·max(D − θ_k, 0)² / Σ_all D: the D-weighted average kink penalty.
+function kink_stats(cf, dealers, usable_vks, T)
+    D_by_vk = Dict{VehicleKey, Vector{Float32}}(j => Float32[] for j in usable_vks)
+    lookup = Supply.tf_to_j_lookup(cf)
+    for t in T, f in dealers
+        js = get(lookup, (t, f), VehicleKey[])
+        isempty(js) && continue
+        q = expected_demand(cf, f, t)
+        for (i, j) in enumerate(js)
+            haskey(D_by_vk, j) && push!(D_by_vk[j], Float32(q[i]))
+        end
+    end
+    K = length(Supply.KINK_QUANTILES)
+    total_D = sum(sum, values(D_by_vk))
+    out = Dict{VehicleKey, NamedTuple}()
+    for (j, Ds) in D_by_vk
+        if isempty(Ds)
+            out[j] = (grid = fill(Inf32, K), obj_weights = zeros(K), dmax = 0.0f0)
+            continue
+        end
+        grid = Float32.(quantile(Ds, Supply.KINK_QUANTILES))
+        obj_weights = [sum(D * max(D - θ, 0.0f0)^2 for D in Ds) / total_D for θ in grid]
+        out[j] = (grid = grid, obj_weights = obj_weights, dmax = Float32(quantile(Ds, 0.99)))
+    end
+    return out
 end
 
 # Outer matrix structure:
@@ -71,7 +108,7 @@ struct BBLMatrices
     C_j::Matrix{M}
 end
 
-function BBLMatrices(idx::BBLIndex, simulations)
+function BBLMatrices(idx::BBLIndex, simulations; C_h_map = nothing)
     ### construction helpers
     # Row 1        = observed policy
     # Rows 2..1+N_SCENARIOS       = per-product independent local perturbations (residual demand seeds)
@@ -136,6 +173,14 @@ function BBLMatrices(idx::BBLIndex, simulations)
         (j_lookup, R_j, C_j),
     )
 
+    n_tf = length(idx.tf_rows)
+    n_h = length(idx.vehicle_cols) * size(idx.kink_grid, 2)
+    H_obs = zeros(Float32, n_tf, n_h)
+    H_pert = zeros(Float32, n_tf, n_h)
+    scen_lookups = vcat(
+        [cf_lookup(n) for n in 1:N_SCENARIOS], [coord_lookup(n) for n in 1:N_SHIFTS]
+    )
+
     for (isim, simfile) in enumerate(simulations)
         sim = JLD2.load_object(simfile)
         for tf in idx.tf_rows
@@ -161,8 +206,45 @@ function BBLMatrices(idx::BBLIndex, simulations)
                 end
             end
         end
+
+        # Kink columns go straight to disk as obs − pert, same row layout as the other maps.
+        C_h_map === nothing && continue
+        fill!(H_obs, 0.0f0)
+        for tf in idx.tf_rows
+            aggregate_kink!(H_obs, idx, tf, sim, policy_lookup)
+        end
+        for (iscen, lookup) in enumerate(scen_lookups)
+            fill!(H_pert, 0.0f0)
+            for tf in idx.tf_rows
+                aggregate_kink!(H_pert, idx, tf, sim, lookup)
+            end
+            C_h_map[((iscen - 1) * n_tf + 1):(iscen * n_tf), isim, :] .= H_obs .- H_pert
+        end
+        @info "kink columns written" isim
     end
     return BBLMatrices(idx, R_f, C_f, R_t, C_t, R_j, C_j)
+end
+
+# Coefficient on v_jk = γ·z_jk: −Σ_fwd β^fwd · D · max(D − θ_jk, 0)², same sign convention
+# as aggregate!'s C. kink_grid rows are ascending, so stop at the first inactive kink.
+function aggregate_kink!(H::AbstractMatrix, idx::BBLIndex, tf, sim, scenario_lookup)
+    (t, f) = tf
+    row = idx.tf_row_index[tf]
+    K = size(idx.kink_grid, 2)
+    for (fwd, new_t) in enumerate(first(iterated(increment, t), 5))
+        disc = Float32(β^(fwd - 1))
+        outcome = sim[(new_t, f)]
+        for (i_j, j) in enumerate(outcome.assortment)
+            _, D = scenario_lookup(i_j, outcome)
+            jc = idx.vehicle_col_index[j]
+            for k in 1:K
+                r = D - idx.kink_grid[jc, k]
+                r > 0 || break
+                H[row, (jc - 1) * K + k] -= disc * D * r^2
+            end
+        end
+    end
+    return nothing
 end
 
 # for a given (t,f) tuple, walk forward a year and add it's contribution to our average W (from BBL)
@@ -283,7 +365,11 @@ function (@main)(_)
             usable_vks
         )
 
-        idx = BBLIndex(dealers, usable_vks)
+        kink_by_vk = kink_stats(cf, dealers, usable_vks, T)
+        idx = BBLIndex(dealers, usable_vks, kink_by_vk)
+        @info "Kink grid" K = size(idx.kink_grid, 2) n_no_obs = count(isinf, idx.kink_grid[:, 1]) median_lowest_kink = quantile(
+            filter(isfinite, idx.kink_grid[:, 1]), 0.5
+        ) obj_weight_sum_lowest = sum(idx.kink_obj_weights[:, 1])
 
         # Fail loud if the sim is missing any (t, f) the forward walk in
         # `aggregate!` will read. Check the union of walk_forward(tf, 5) —
@@ -302,7 +388,18 @@ function (@main)(_)
             error("Regenerate sim files: snakemake -F data/bbl_simulation/seed_{1..100}.jld2")
         end
 
-        JLD2.save_object(snakemake.output[1], BBLMatrices(idx, snakemake.input["simulations"]))
+        sims = snakemake.input["simulations"]
+        n_scen = N_SCENARIOS + N_SHIFTS
+        n_h = length(idx.vehicle_cols) * size(idx.kink_grid, 2)
+        mats = open(snakemake.output["C_h"], "w+") do io
+            C_h_map = Mmap.mmap(
+                io, Array{Float32, 3}, (length(idx.tf_rows) * n_scen, length(sims), n_h)
+            )
+            m = BBLMatrices(idx, sims; C_h_map)
+            Mmap.sync!(C_h_map)
+            m
+        end
+        JLD2.save_object(snakemake.output["matrix"], mats)
     end
     return nothing
 end

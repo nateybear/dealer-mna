@@ -63,6 +63,11 @@ end
     C_f_map = Mmap.mmap("data/bbl_C_f.map", Array{Float64, 3}, (n_row, n_col, n_f))
     C_t_map = Mmap.mmap("data/bbl_C_t.map", Array{Float64, 3}, (n_row, n_col, n_t))
 
+    # Hockey-stick kink columns, (j, k) ↦ (j − 1)·K + k, written by bbl_matrix.jl.
+    K = size(index.kink_grid, 2)
+    n_h = n_j * K
+    C_h_map = Mmap.mmap("data/bbl_C_h.map", Array{Float32, 3}, (n_row, n_col, n_h))
+
     # Block spec: (name, n_scen, map_row_lo, map_row_hi, sorted)
     # - local×sorted:   attacks noise cancellation (rank-k averaged across sims has consistent E[·] ≠ 0)
     # - local×raw:      cheap extra constraint; disciplines sampling error
@@ -84,6 +89,7 @@ end
     Cj_blocks = [zeros(Float64, n_tf * spec[2], n_j) for spec in block_specs]
     Cf_blocks = [zeros(Float64, n_tf * spec[2], n_f) for spec in block_specs]
     Ct_blocks = [zeros(Float64, n_tf * spec[2], n_t) for spec in block_specs]
+    Ch_blocks = [zeros(Float64, n_tf * spec[2], n_h) for spec in block_specs]
 
     @info "Accumulating 4 moment blocks" n_col n_tf N_LOCAL N_SHIFTS
     for s in 1:n_col
@@ -111,6 +117,11 @@ end
                     @view(Ct_blocks[bi][:, j]), @view(C_t_map[lo:hi, s, j]), perms, n_tf, n_scen
                 )
             end
+            for c in 1:n_h
+                accumulate_ranked!(
+                    @view(Ch_blocks[bi][:, c]), @view(C_h_map[lo:hi, s, c]), perms, n_tf, n_scen
+                )
+            end
         end
     end
     for bi in eachindex(block_specs)
@@ -118,6 +129,7 @@ end
         Cj_blocks[bi] ./= n_col
         Cf_blocks[bi] ./= n_col
         Ct_blocks[bi] ./= n_col
+        Ch_blocks[bi] ./= n_col
     end
 
     # SparseMatrixCSC is column-major; store the transpose so nzrange(_, i)
@@ -125,6 +137,8 @@ end
     Cj_sps = [sparse(C') for C in Cj_blocks]
     Cf_sps = [sparse(C') for C in Cf_blocks]
     Ct_sps = [sparse(C') for C in Ct_blocks]
+    Ch_sps = [sparse(C') for C in Ch_blocks]
+    Ch_blocks = nothing
 
     # Recession-cone check across the stacked constraint set: for the polytope
     # {θ : Cθ ≥ -R}, `min θ_k` is unbounded below iff column k is ≤ 0 across
@@ -167,14 +181,31 @@ end
     n_moments = sum(length(R_blocks[bi]) for bi in eachindex(block_specs))
     @variable(model, ϵ[1:n_moments] ≥ 0)
 
+    # Hockey stick: z picks at most one kink per product, v = γ·z via McCormick (exact for
+    # binary z). γ̄ caps the penalty at the 99th-pct demand under the lowest kink at the w
+    # upper bound.
+    kink_span = maximum(
+        index.kink_dmax[jj] - index.kink_grid[jj, 1] for
+        jj in 1:n_j if isfinite(index.kink_grid[jj, 1])
+    )
+    const γ̄ = 10 / max(kink_span, 1.0f-3)^2
+    @variable(model, 0 <= γ <= γ̄)
+    @variable(model, z[1:n_h], Bin)
+    @variable(model, 0 <= v[1:n_h] <= γ̄)
+    @constraint(model, v .<= γ̄ .* z)
+    @constraint(model, v .<= γ)
+    @constraint(model, v .>= γ .- γ̄ .* (1 .- z))
+    @constraint(model, [jj in 1:n_j], sum(z[((jj - 1) * K + 1):(jj * K)]) <= 1)
+
     total_constraints = sum(length(R) for R in R_blocks)
-    @info "Adding LP constraints" total_constraints per_block = [length(R) for R in R_blocks]
+    @info "Adding moment constraints" total_constraints per_block = [length(R) for R in R_blocks] n_h γ̄
     ϵ_rest = ϵ
     for bi in eachindex(block_specs)
         R_b = R_blocks[bi]
         Cj_sp = Cj_sps[bi]
         Cf_sp = Cf_sps[bi]
         Ct_sp = Ct_sps[bi]
+        Ch_sp = Ch_sps[bi]
         for i in 1:length(R_b)
             global ϵ_rest
             ϵ_i, ϵ_rest = Iterators.peel(ϵ_rest)
@@ -183,6 +214,7 @@ end
             add_sparse_row!(expr, Cj_sp, i, w, s)
             add_sparse_row!(expr, Cf_sp, i, f, s)
             add_sparse_row!(expr, Ct_sp, i, t, s)
+            add_sparse_row!(expr, Ch_sp, i, v, s)
             @constraint(model, expr + ϵ_i ≥ 0)
         end
     end
@@ -204,16 +236,45 @@ end
             meta
         end
 
-    function solve_bound!(sense, obj)
+    const MIP_MAXTIME = 2 * 3600.0
+
+    # Solves a copy of `model`. Returns (obj, all_vals, named values, dual bound, rel gap).
+    # When the time limit hits, the dual bound — not the incumbent — is the conservative
+    # identified-set limit.
+    function solve_copy(sense, obj)
         set_objective_sense(model, sense)
         set_objective_function(model, obj)
         model_copy = copy(model)
         JuMP.set_optimizer(model_copy, KNITRO.Optimizer)
         set_attribute(model_copy, "linsolver", 7)
         set_attribute(model_copy, "linsolver_numthreads", Threads.nthreads())
+        set_time_limit_sec(model_copy, MIP_MAXTIME)
         optimize!(model_copy)
-        assert_is_solved_and_feasible(model_copy)
-        return objective_value(model_copy), value.(all_variables(model_copy))
+        ts = termination_status(model_copy)
+        primal_status(model_copy) == FEASIBLE_POINT ||
+            error("No feasible solution: termination_status = $ts")
+        bound, gap = try
+            objective_bound(model_copy), relative_gap(model_copy)
+        catch e
+            @warn "MIP bound/gap unavailable from solver" exception = e
+            NaN, NaN
+        end
+        ts ∈ (OPTIMAL, LOCALLY_SOLVED) || @warn "Solve stopped early" ts bound gap
+        named = (;
+            w = value.(model_copy[:w]),
+            f = value.(model_copy[:f]),
+            t = value.(model_copy[:t]),
+            ϵ = value.(model_copy[:ϵ]),
+            γ = value(model_copy[:γ]),
+            z = value.(model_copy[:z]),
+            v = value.(model_copy[:v]),
+        )
+        return objective_value(model_copy), value.(all_variables(model_copy)), named, bound, gap
+    end
+
+    function solve_bound!(sense, obj)
+        obj_val, all_vals, named, _, _ = solve_copy(sense, obj)
+        return obj_val, all_vals, named
     end
 
     add_sse_constraint!(c) = @constraint(model, sum(ϵ .^ 2) ≤ c)
@@ -228,8 +289,10 @@ end
     # Per-moment σ under (w, f, t) start values. Reproduces the per-block
     # accumulate_ranked pattern but tracks per-sim values instead of averaging,
     # so we can compute std over sims of the constraint LHS at start_vals.
-    function compute_moment_sigmas(w_start, f_start, t_start)
+    function compute_moment_sigmas(w_start, f_start, t_start, v_start)
         flat = Float64[]
+        # At most one active kink per product, so this skips nearly all of C_h.
+        active_h = findall(x -> abs(x) > 1e-12, v_start)
         for (bi, (name, n_scen, lo, hi, sorted)) in enumerate(block_specs)
             n_rows = n_tf * n_scen
             s_sum = zeros(Float64, n_rows)
@@ -241,6 +304,9 @@ end
                 Ct_slice = C_t_map[lo:hi, s, :]
                 vals_raw = R_slice .+ Cj_slice * w_start .+
                            Cf_slice * f_start .+ Ct_slice * t_start
+                for c in active_h
+                    vals_raw .+= v_start[c] .* @view(C_h_map[lo:hi, s, c])
+                end
                 perms = if sorted
                     [
                         sortperm(@view R_slice[tf_idx .+ (0:(n_scen - 1)) .* n_tf])
@@ -268,18 +334,8 @@ end
     # used by the constraint-attribution diagnostic to identify which rows pin
     # each solved bound.
     function solve_bound_with_epsilons!(sense, obj)
-        set_objective_sense(model, sense)
-        set_objective_function(model, obj)
-        model_copy = copy(model)
-        JuMP.set_optimizer(model_copy, KNITRO.Optimizer)
-        set_attribute(model_copy, "linsolver", 7)
-        set_attribute(model_copy, "linsolver_numthreads", Threads.nthreads())
-        optimize!(model_copy)
-        assert_is_solved_and_feasible(model_copy)
-        all_vals = value.(all_variables(model_copy))
-        # Variable ordering: w (n_j), f (n_f), t (n_t), ε (n_moments).
-        ε_vals = all_vals[(n_j + n_f + n_t + 1):end]
-        return objective_value(model_copy), all_vals, ε_vals
+        obj_val, all_vals, named, _, _ = solve_copy(sense, obj)
+        return obj_val, all_vals, named.ϵ
     end
 end
 
@@ -416,50 +472,64 @@ end
             t_weights[k] == 0 && continue
             add_to_expression!(expr, t_weights[k], model[:t][k])
         end
+        # D-weighted average kink penalty; kink_obj_weights is already normalized per unit.
+        for jj in 1:n_j, k in 1:K
+            ow = index.kink_obj_weights[jj, k]
+            ow == 0 && continue
+            add_to_expression!(expr, ow, model[:v][(jj - 1) * K + k])
+        end
         return expr
     end
 
     # One-shot best/worst counterfactual solve: build the sales-weighted
-    # objective, run the LP, attribute binding constraints, and return a
+    # objective, run the MIQCP, attribute binding constraints, and return a
     # self-contained NamedTuple (all master-side references only).
     function solve_extreme_case(sense, w_weights, f_weights, t_weights)
         obj = sales_weighted_objective(w_weights, f_weights, t_weights)
-        obj_val, all_vals, εs = solve_bound_with_epsilons!(sense, obj)
-        bindings, n_binding, max_ε = attribute_binding(εs)
+        obj_val, _, named, obj_bound, mip_gap = solve_copy(sense, obj)
+        bindings, n_binding, max_ε = attribute_binding(named.ϵ)
         top_str = format_binding_summary(bindings)
+        kink_k = Int[
+            something(findfirst(>(0.5), named.z[((jj - 1) * K + 1):(jj * K)]), 0) for
+            jj in 1:n_j
+        ]
+        θ = Float32[k == 0 ? Inf32 : index.kink_grid[jj, k] for (jj, k) in enumerate(kink_k)]
+        kinked = [(vk = index.vehicle_cols[jj], θ = θ[jj]) for jj in 1:n_j if kink_k[jj] > 0]
+        named.γ ≥ 0.99 * γ̄ && @warn "γ at its cap; raise γ̄" γ = named.γ γ̄
         return (;
-            obj = obj_val,
-            w = all_vals[1:n_j],
-            f = all_vals[(n_j + 1):(n_j + n_f)],
-            t = all_vals[(n_j + n_f + 1):(n_j + n_f + n_t)],
+            obj = obj_val, obj_bound, mip_gap,
+            w = named.w, f = named.f, t = named.t,
+            γ = named.γ, γ_cap = γ̄, kink_k, θ, kinked,
             bindings, n_binding, max_ε, top_str,
         )
     end
 end
 
 function (@main)(_)
-    @info "Step 1: unweighted feasibility" total_constraints n_j n_f n_t
-    c_unweighted, start_vals = @fetch solve_bound!(MIN_SENSE, sum(ϵ .^ 2))
-    @info "Unweighted feasibility done" c_unweighted
+    @info "Step 0: linear-cost feasibility (no kinks), warm-start incumbent" total_constraints n_j n_f n_t
+    @everywhere workers() fix.(model[:z], 0; force = true)
+    c_linear, start_vals_linear, _ = @fetch solve_bound!(MIN_SENSE, sum(ϵ .^ 2))
+    @everywhere workers() unfix.(model[:z])
+    @everywhere workers() set_start_values!($start_vals_linear)
+    @info "Linear-cost feasibility done" c_linear
+
+    @info "Step 1: unweighted feasibility"
+    c_unweighted, start_vals, sv = @fetch solve_bound!(MIN_SENSE, sum(ϵ .^ 2))
+    @info "Unweighted feasibility done" c_unweighted c_linear γ = sv.γ n_kinks = count(>(0.5), sv.z)
 
     set_start_values!(start_vals)
 
-    w_start = start_vals[1:n_j]
-    f_start = start_vals[(n_j + 1):(n_j + n_f)]
-    t_start = start_vals[(n_j + n_f + 1):(n_j + n_f + n_t)]
-
     @info "Step 2: weighted feasibility"
     c_weighted = start_vals_weighted = Inf
-    σ = @fetch compute_moment_sigmas(w_start, f_start, t_start)
+    σ = @fetch compute_moment_sigmas(sv.w, sv.f, sv.t, sv.v)
     i = 1
     while true
         @info "Calculating c weights iteration $i"
-        c_weighted_new, start_vals_weighted = @fetch solve_bound!(MIN_SENSE, weighted_sse_obj(σ))
+        c_weighted_new, start_vals_weighted, sv = @fetch solve_bound!(
+            MIN_SENSE, weighted_sse_obj(σ)
+        )
         set_start_values!(start_vals_weighted)
-        w_start = start_vals_weighted[1:n_j]
-        f_start = start_vals_weighted[(n_j + 1):(n_j + n_f)]
-        t_start = start_vals_weighted[(n_j + n_f + 1):(n_j + n_f + n_t)]
-        σ = @fetch compute_moment_sigmas(w_start, f_start, t_start)
+        σ = @fetch compute_moment_sigmas(sv.w, sv.f, sv.t, sv.v)
         c_change = abs(c_weighted - c_weighted_new)
         if c_change < 1e-2
             break
@@ -494,10 +564,11 @@ function (@main)(_)
 
     best_case = @fetch solve_extreme_case(MIN_SENSE, w_weights, f_weights, t_weights)
     worst_case = @fetch solve_extreme_case(MAX_SENSE, w_weights, f_weights, t_weights)
-    @info "Best case (min sales-weighted marginal cost)" obj = best_case.obj n_binding =
-        best_case.n_binding top = best_case.top_str
-    @info "Worst case (max sales-weighted marginal cost)" obj = worst_case.obj n_binding =
-        worst_case.n_binding top = worst_case.top_str
+    for (name, sol) in (("Best case (min", best_case), ("Worst case (max", worst_case))
+        @info "$name sales-weighted marginal cost)" obj = sol.obj obj_bound = sol.obj_bound mip_gap =
+            sol.mip_gap γ = sol.γ γ_cap = sol.γ_cap n_kinked = length(sol.kinked) kinked =
+            sol.kinked n_binding = sol.n_binding top = sol.top_str
+    end
 
     # # Sales-weighted markup range: avg_price − mc, bounded by best/worst mc.
     # # (best_case has the LOWEST mc → LARGEST implied markup; worst_case is the
@@ -547,7 +618,7 @@ function (@main)(_)
             best_case, worst_case,
             w_weights, f_weights, t_weights, n_sales,
             avg_price_dollars, med_price_dollars, price_scale,
-            c_weighted, σ,
+            c_linear, c_unweighted, c_weighted, σ,
         ),
     )
     return nothing
