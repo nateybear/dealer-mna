@@ -223,12 +223,7 @@ end
     add_weighted_sse_constraint!(c, σ) =
         @constraint(model, sum((1 / max(σ[i], SIGMA_FLOOR)^2) * ϵ[i]^2 for i in 1:length(ϵ)) ≤ c)
 
-    set_start_values!(v) =
-        let vars = all_variables(model)
-            @threads for i in eachindex(v)
-                set_start_value(vars[i], v[i])
-            end
-        end
+    set_start_values!(v) = set_start_value.(all_variables(model), v)
 
     # Per-moment σ under (w, f, t) start values. Reproduces the per-block
     # accumulate_ranked pattern but tracks per-sim values instead of averaging,
