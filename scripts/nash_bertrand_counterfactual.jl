@@ -92,7 +92,8 @@ function (@main)(_)
         # either scenario — those w's are LP corner solutions with no identifying
         # signal and shouldn't drive counterfactual prices.
         # -----------------------------------------------------------------------------
-        hitsbounds(x) = isapprox(x, 0.25, atol = 1e-3) || isapprox(x, 10, atol = 1e-3)
+        hitsbounds(x) =
+            isapprox(x, 0.25, atol = 1e-3) || isapprox(x, 10, atol = 1e-3) || isapprox(x, 0)
         unidentified_vks = Set{VehicleKey}()
         for (i, vk) in enumerate(index.vehicle_cols)
             w_worst = estimates.worst_case.w[i]
@@ -101,7 +102,7 @@ function (@main)(_)
             push!(unidentified_vks, vk)
         end
         @info "Unidentified VKs flagged" n = length(unidentified_vks) total = length(
-            index.vehicle_cols,
+            index.vehicle_cols
         )
 
         n_evicted_unid = 0
@@ -109,7 +110,7 @@ function (@main)(_)
             (t_key, j_key, f_key) = tjf_key
             j_key ∈ unidentified_vks || continue
             h = apply!(
-                cf, Demand.ModelDelete(vehicle = j_key, quarter = t_key, dealer_uid = f_key),
+                cf, Demand.ModelDelete(vehicle = j_key, quarter = t_key, dealer_uid = f_key)
             )
             ismissing(h) || (n_evicted_unid += 1)
         end
@@ -150,7 +151,7 @@ function (@main)(_)
         @info "Panel restricted to BBL universe" n_skipped_tf
         panel_key_to_idx = Dict(pm => i for (i, pm) in enumerate(panel_meta))
         @info "Panel snapshot" n_triples = length(panel_meta) n_tf_pairs = length(
-            Supply.tf_to_j_lookup(cf),
+            Supply.tf_to_j_lookup(cf)
         )
 
         # Read the CURRENT (post-tweak) price for a (t, j, f) triple from
@@ -177,7 +178,7 @@ function (@main)(_)
             t_vec = scenario.t
             return function (quarter::QuarterKey, vk::VehicleKey, dealer_uid::UUID)
                 return Float32(
-                    w_vec[vk_pos[vk]] + f_vec[dealer_pos[dealer_uid]] + t_vec[quarter[2]],
+                    w_vec[vk_pos[vk]] + f_vec[dealer_pos[dealer_uid]] + t_vec[quarter[2]]
                 )
             end
         end
@@ -208,7 +209,7 @@ function (@main)(_)
                         apply!(
                             cf,
                             Demand.PriceChange(
-                                vehicle = j, quarter = t, dealer_uid = f, price = p_new,
+                                vehicle = j, quarter = t, dealer_uid = f, price = p_new
                             ),
                         )
                     end
@@ -248,11 +249,11 @@ function (@main)(_)
                 apply!(
                     cf,
                     Demand.PriceChange(
-                        vehicle = j, quarter = t, dealer_uid = f, price = p_observed[i],
+                        vehicle = j, quarter = t, dealer_uid = f, price = p_observed[i]
                     ),
                 )
             end
-            Demand.refresh!(cf)
+            return Demand.refresh!(cf)
         end
 
         # -----------------------------------------------------------------------------
@@ -270,7 +271,12 @@ function (@main)(_)
             avg_gap_std = sum(weights .* gap)
             avg_p_NB_std = sum(weights .* p_NB)
             avg_p_obs_std = sum(weights .* p_observed)
-            @info "$name results" avg_gap_std avg_gap_dollars = avg_gap_std * price_scale avg_p_NB_dollars = avg_p_NB_std * price_scale avg_p_obs_dollars = avg_p_obs_std * price_scale mean_gap_frac = mean(gap ./ max.(p_observed, 1.0f-8)) q_gap_25 = quantile(gap, 0.25) q_gap_50 = quantile(gap, 0.5) q_gap_75 = quantile(gap, 0.75) converged
+            @info "$name results" avg_gap_std avg_gap_dollars = avg_gap_std * price_scale avg_p_NB_dollars =
+                avg_p_NB_std * price_scale avg_p_obs_dollars = avg_p_obs_std * price_scale mean_gap_frac = mean(
+                gap ./ max.(p_observed, 1.0f-8)
+            ) q_gap_25 = quantile(gap, 0.25) q_gap_50 = quantile(gap, 0.5) q_gap_75 = quantile(
+                gap, 0.75
+            ) converged
             return (;
                 p_observed = copy(p_observed),
                 p_NB, q_NB,
@@ -294,7 +300,7 @@ function (@main)(_)
             ),
         )
         @info "Wrote Nash-Bertrand counterfactual" path = snakemake.output["counterfactual"] n_triples = length(
-            panel_meta,
+            panel_meta
         )
     end
     return nothing
