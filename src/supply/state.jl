@@ -23,7 +23,7 @@ const COORDINATED_SHIFTS = Float32[0.75, 0.9, 0.95, 0.98, 0.99, 1.01, 1.02, 1.05
 
 # Candidate dealer capacities θ_f = κ·Q̄_f (Q̄_f = highest observed quarterly sales). Ascending:
 # aggregate_overload! stops at the first κ with no overload.
-const CAPACITY_MULTIPLES = Float32[0.8, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5]
+const CAPACITY_MULTIPLES = Float32.(0.7:0.05:1.2)
 
 """
     tf_to_j_lookup(model_or_cf) → OrderedDict{(QuarterKey, UUID), Vector{VehicleKey}}
@@ -128,7 +128,7 @@ function residual_demand(
             tweak = PriceMultiply(;
                 dealer_uid, quarter, vehicle = products[j], by = _PRICE_SEEDS[][j, i]
             )
-            apply!(cf, tweak)
+            return apply!(cf, tweak)
         end
         prices[i, :] .= [only(h.old_prices) * h.by for h in handles]
         demands[i, :] .= expected_demand(cf, dealer_uid, quarter)
