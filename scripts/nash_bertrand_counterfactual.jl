@@ -165,10 +165,10 @@ function (@main)(_)
         end
 
         # -----------------------------------------------------------------------------
-        # Cost lookups for a scenario NamedTuple (from bbl_estimates). w / θ align to
-        # index.vehicle_cols, f to index.dealer_cols, t to quarter_of_year. Per-unit
-        # cost c(q) = w + f + t + γ·r², r = max(q − θ_j, 0); the FOC needs marginal
-        # cost of total cost c(q)·q, i.e. c(q) + q·c′(q) = w + f + t + γ·(r² + 2q·r).
+        # Cost lookups for a scenario NamedTuple (from bbl_estimates). w aligns to
+        # index.vehicle_cols, f and capacity to index.dealer_cols, t to quarter_of_year.
+        # Dealer total cost Σ_j base_j·q_j + (γ/2)·r², r = max(Q − θ_f, 0), Q = Σ_j q_j,
+        # θ_f = κ·capacity_f; every product's marginal cost is base_j + γ·r.
         # -----------------------------------------------------------------------------
         vk_pos = Dict(vk => i for (i, vk) in enumerate(index.vehicle_cols))
         dealer_pos = Dict(f => i for (i, f) in enumerate(index.dealer_cols))
@@ -176,18 +176,17 @@ function (@main)(_)
             w_vec = scenario.w
             f_vec = scenario.f
             t_vec = scenario.t
-            θ_vec = scenario.θ
             γ = Float32(scenario.γ)
             base(quarter, vk, dealer_uid) =
-                w_vec[vk_pos[vk]] + f_vec[dealer_pos[dealer_uid]] + t_vec[quarter[2]]
-            kink(vk, q) = max(q - θ_vec[vk_pos[vk]], 0.0f0)
-            mc_average(quarter, vk, dealer_uid, q) =
-                Float32(base(quarter, vk, dealer_uid) + γ * kink(vk, q)^2)
-            mc_marginal(quarter, vk, dealer_uid, q) =
-                let r = kink(vk, q)
-                    Float32(base(quarter, vk, dealer_uid) + γ * (r^2 + 2 * q * r))
-                end
-            return mc_marginal, mc_average
+                Float32(w_vec[vk_pos[vk]] + f_vec[dealer_pos[dealer_uid]] + t_vec[quarter[2]])
+            θ(dealer_uid) = Float32(scenario.κ) * index.capacity[dealer_pos[dealer_uid]]
+            overload(dealer_uid, Q) = max(Q - θ(dealer_uid), 0.0f0)
+            mc_marginal(quarter, vk, dealer_uid, Q) =
+                base(quarter, vk, dealer_uid) + γ * overload(dealer_uid, Q)
+            mc_average(quarter, vk, dealer_uid, Q) =
+                base(quarter, vk, dealer_uid) +
+                γ / 2 * overload(dealer_uid, Q)^2 / max(Q, eps(Float32))
+            return (; base, θ, γ, mc_marginal, mc_average)
         end
 
         # -----------------------------------------------------------------------------
@@ -196,7 +195,8 @@ function (@main)(_)
         # via PriceChange so that when the next (t, f) reads its own q / J, it
         # sees the previously-updated prices (that's the Gauss-Seidel property).
         # -----------------------------------------------------------------------------
-        function solve_nash_bertrand!(cf, mc_marginal)
+        function solve_nash_bertrand!(cf, costs)
+            (; base, θ, γ) = costs
             tol_std = NB_TOL
             history = Float32[]
             for outer in 1:NB_MAX_SWEEPS
@@ -206,9 +206,15 @@ function (@main)(_)
                     in_bbl_universe(f, js) || continue
                     q = expected_demand(cf, f, t)
                     J = share_matrix(cf, f, t)
-                    mc = Float32[mc_marginal(t, j, f, q[i]) for (i, j) in enumerate(js)]
+                    p = Float32[current_price(t, j, f) for j in js]
                     markup = Float32.(J' \ Float64.(q))
-                    p_target = mc .- markup
+                    p0 = Float32[base(t, j, f) for j in js] .- markup
+                    # Overload mc λ = γ·(Q − θ_f)₊ solved on Q linearized in p, so a steep γ
+                    # doesn't oscillate; at the fixed point it is the exact FOC.
+                    s = sum(J)
+                    γ > 0 && s >= 0 && error("Non-negative aggregate price slope at $((t, f)): $s")
+                    λ = max(0.0f0, γ * (sum(q) + sum(J * (p0 .- p)) - θ(f)) / (1 - γ * s))
+                    p_target = p0 .+ λ
                     for (i, j) in enumerate(js)
                         p_old = current_price(t, j, f)
                         p_new = NB_DAMPING * p_target[i] + (1 - NB_DAMPING) * p_old
@@ -268,15 +274,20 @@ function (@main)(_)
         # each starts from the same initial point.
         # -----------------------------------------------------------------------------
         function run_scenario(name::Symbol, scenario)
-            @info "Solving Nash-Bertrand: $name" γ = scenario.γ n_kinked = count(isfinite, scenario.θ)
-            mc_marginal, mc_average = build_mc_lookup(scenario)
-            history, converged = solve_nash_bertrand!(cf, mc_marginal)
+            @info "Solving Nash-Bertrand: $name" γ = scenario.γ κ = scenario.κ
+            costs = build_mc_lookup(scenario)
+            (; mc_marginal, mc_average) = costs
+            history, converged = solve_nash_bertrand!(cf, costs)
             p_NB, q_NB = read_equilibrium(cf)
+            Q_NB = Dict{Tuple{QuarterKey, UUID}, Float32}()
+            for (i, (t, _, f)) in enumerate(panel_meta)
+                Q_NB[(t, f)] = get(Q_NB, (t, f), 0.0f0) + q_NB[i]
+            end
             mc_marginal_vec = Float32[
-                mc_marginal(t, j, f, q_NB[i]) for (i, (t, j, f)) in enumerate(panel_meta)
+                mc_marginal(t, j, f, Q_NB[(t, f)]) for (t, j, f) in panel_meta
             ]
             mc_average_vec = Float32[
-                mc_average(t, j, f, q_NB[i]) for (i, (t, j, f)) in enumerate(panel_meta)
+                mc_average(t, j, f, Q_NB[(t, f)]) for (t, j, f) in panel_meta
             ]
             gap = p_NB .- p_observed
             weights = q_NB ./ max(sum(q_NB), eps())

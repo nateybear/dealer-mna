@@ -21,8 +21,9 @@ const SIM_SIZE = 100
 # drift.
 const COORDINATED_SHIFTS = Float32[0.75, 0.9, 0.95, 0.98, 0.99, 1.01, 1.02, 1.05, 1.1, 1.25]
 
-# Candidate hockey-stick kinks θ_jk, as quantiles of product j's observed-price demand.
-const KINK_QUANTILES = Float32[0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.975, 0.99]
+# Candidate dealer capacities θ_f = κ·Q̄_f (Q̄_f = highest observed quarterly sales). Ascending:
+# aggregate_overload! stops at the first κ with no overload.
+const CAPACITY_MULTIPLES = Float32[0.8, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5]
 
 """
     tf_to_j_lookup(model_or_cf) → OrderedDict{(QuarterKey, UUID), Vector{VehicleKey}}

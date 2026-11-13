@@ -1443,6 +1443,7 @@ rule data_bbl_matrix:
         price_densities="data/price_densities.jld2",
         state_transition="data/state_transition.jld2",
         simulations=expand("data/bbl_simulation/seed_{seed}.jld2", seed=BBL_SEEDS),
+        fords="data/arrow/fords.arrow",
     output:
         matrix="data/bbl_matrix.jld2",
         C_h="data/bbl_C_h.map",
