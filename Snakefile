@@ -2027,9 +2027,9 @@ def julia(scriptfile, extra_args=None, processes=None, **rule):
             threads = config.get("threads", "auto")
             # run the script with the temp file as input
             if config.get("mpi", ""):
-                cmd = f"{config['mpi']} julia --project=. --threads={threads} {p_flag} {scriptfile} {args_str} '{f.name}'"
+                cmd = f"{config['mpi']} julia --project=. --threads={threads} --gcthreads=1 {p_flag} {scriptfile} {args_str} '{f.name}'"
             else:
-                cmd = f"julia --project=. --threads={threads} {p_flag} {scriptfile} {args_str} < '{f.name}'"
+                cmd = f"julia --project=. --threads={threads} --gcthreads=1 {p_flag} {scriptfile} {args_str} < '{f.name}'"
             shell(cmd)
         # delete the temp file
         os.remove(f.name)

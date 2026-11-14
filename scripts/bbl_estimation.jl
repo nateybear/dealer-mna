@@ -245,8 +245,7 @@ end
 
     function solve_copy!(m)
         JuMP.set_optimizer(m, KNITRO.Optimizer)
-        # MKL PARDISO pivots statically: factor memory is fixed at analysis, unlike MA97's delays.
-        set_attribute(m, "linsolver", 6)
+        set_attribute(m, "linsolver", 7)
         set_attribute(m, "linsolver_numthreads", Threads.nthreads())
         optimize!(m)
         if !is_solved_and_feasible(m)
@@ -324,8 +323,8 @@ end
         active_h = findall(x -> abs(x) > 1e-12, γ_start)
         for (bi, (name, n_scen, lo, hi, sorted)) in enumerate(block_specs)
             n_rows = n_tf * n_scen
-            s_sum = zeros(Float64, n_rows)
-            s_sq = zeros(Float64, n_rows)
+            # One column per sim, so threads never write the same entry.
+            vals = zeros(Float64, n_rows, n_col)
             @threads for s in 1:n_col
                 R_slice = R_map[lo:hi, s]
                 Cj_slice = C_j_map[lo:hi, s, :]
@@ -347,14 +346,10 @@ end
                 for tf_idx in 1:n_tf, k in 1:n_scen
                     canonical_row = tf_idx + (k - 1) * n_tf
                     raw_row = tf_idx + (perms[tf_idx][k] - 1) * n_tf
-                    v = vals_raw[raw_row]
-                    s_sum[canonical_row] += v
-                    s_sq[canonical_row] += v * v
+                    vals[canonical_row, s] = vals_raw[raw_row]
                 end
             end
-            means = s_sum ./ n_col
-            vars = max.(0.0, (s_sq ./ n_col) .- means .^ 2)
-            append!(flat, sqrt.(vars))
+            append!(flat, vec(std(vals; dims = 2, corrected = false)))
         end
         return flat
     end
