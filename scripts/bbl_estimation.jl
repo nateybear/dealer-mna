@@ -181,8 +181,10 @@ end
     @variable(model, ϵ[1:n_moments] ≥ 0)
 
     # Overload price γ on dealer capacity κ·Q̄_f: one γ slot per κ, all but the active one fixed
-    # at 0. γ̄ puts overload mc at the w upper bound when the median dealer is 10% over capacity.
-    const γ̄ = 10 / (0.1 * median(index.capacity))
+    # at 0. γ is per median capacity, cost (γ/2)·(Q − κ·Q̄_f)₊²/Q̄_med, so its column is on w's
+    # scale. γ̄ puts overload mc at the w upper bound when the median dealer is 10% over capacity.
+    const Q̄_med = Float64(median(index.capacity))
+    const γ̄ = 100.0
     @variable(model, 0 <= γ[1:K] <= γ̄)
 
     function set_active_kappa!(k)
@@ -199,7 +201,7 @@ end
     end
 
     total_constraints = sum(length(R) for R in R_blocks)
-    @info "Adding moment constraints" total_constraints per_block = [length(R) for R in R_blocks] K γ̄
+    @info "Adding moment constraints" total_constraints per_block = [length(R) for R in R_blocks] K Q̄_med γ̄
     ϵ_rest = ϵ
     for bi in eachindex(block_specs)
         R_b = R_blocks[bi]
@@ -215,7 +217,7 @@ end
             add_sparse_row!(expr, Cj_sp, i, w, s)
             add_sparse_row!(expr, Cf_sp, i, f, s)
             add_sparse_row!(expr, Ct_sp, i, t, s)
-            add_sparse_row!(expr, Ch_sp, i, γ, s)
+            add_sparse_row!(expr, Ch_sp, i, γ, s / Q̄_med)
             @constraint(model, expr + ϵ_i ≥ 0)
         end
     end
@@ -245,7 +247,8 @@ end
         set_objective_function(model, obj)
         model_copy = copy(model)
         JuMP.set_optimizer(model_copy, KNITRO.Optimizer)
-        set_attribute(model_copy, "linsolver", 7)
+        # MKL PARDISO pivots statically: factor memory is fixed at analysis, unlike MA97's delays.
+        set_attribute(model_copy, "linsolver", 6)
         set_attribute(model_copy, "linsolver_numthreads", Threads.nthreads())
         optimize!(model_copy)
         assert_is_solved_and_feasible(model_copy)
@@ -269,7 +272,10 @@ end
             ϵ = value.(model_copy[:ϵ]),
             γ = value.(model_copy[:γ]),
         )
-        return obj_val, value.(all_variables(model_copy)), named
+        all_vals = value.(all_variables(model_copy))
+        # KNITRO's workspace is C memory the GC can't see; free it now, not at finalization.
+        empty!(model_copy)
+        return obj_val, all_vals, named
     end
 
     add_sse_constraint!(c) = @constraint(model, sum(ϵ .^ 2) ≤ c)
@@ -300,7 +306,7 @@ end
                 vals_raw = R_slice .+ Cj_slice * w_start .+
                            Cf_slice * f_start .+ Ct_slice * t_start
                 for c in active_h
-                    vals_raw .+= γ_start[c] .* @view(C_h_map[lo:hi, s, c])
+                    vals_raw .+= (γ_start[c] / Q̄_med) .* @view(C_h_map[lo:hi, s, c])
                 end
                 perms = if sorted
                     [
@@ -471,7 +477,7 @@ end
         for k in 1:K
             ow = index.capacity_obj_weights[k]
             ow == 0 && continue
-            add_to_expression!(expr, ow, model[:γ][k])
+            add_to_expression!(expr, ow / Q̄_med, model[:γ][k])
         end
         return expr
     end
@@ -490,7 +496,7 @@ end
         return (;
             obj = obj_val,
             w = named.w, f = named.f, t = named.t,
-            γ = named.γ[k], γ_cap = γ̄, κ = index.kappa_grid[k], k,
+            γ = named.γ[k], γ_cap = γ̄, Q̄_med, κ = index.kappa_grid[k], k,
             bindings, n_binding, max_ε, top_str,
         )
     end

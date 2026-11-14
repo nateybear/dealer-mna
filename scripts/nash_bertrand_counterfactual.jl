@@ -167,8 +167,8 @@ function (@main)(_)
         # -----------------------------------------------------------------------------
         # Cost lookups for a scenario NamedTuple (from bbl_estimates). w aligns to
         # index.vehicle_cols, f and capacity to index.dealer_cols, t to quarter_of_year.
-        # Dealer total cost Σ_j base_j·q_j + (γ/2)·r², r = max(Q − θ_f, 0), Q = Σ_j q_j,
-        # θ_f = κ·capacity_f; every product's marginal cost is base_j + γ·r.
+        # Dealer total cost Σ_j base_j·q_j + (γ/2)·r²/Q̄_med, r = max(Q − θ_f, 0), Q = Σ_j q_j,
+        # θ_f = κ·capacity_f; every product's marginal cost is base_j + γ·r/Q̄_med.
         # -----------------------------------------------------------------------------
         vk_pos = Dict(vk => i for (i, vk) in enumerate(index.vehicle_cols))
         dealer_pos = Dict(f => i for (i, f) in enumerate(index.dealer_cols))
@@ -176,17 +176,17 @@ function (@main)(_)
             w_vec = scenario.w
             f_vec = scenario.f
             t_vec = scenario.t
-            γ = Float32(scenario.γ)
+            slope = Float32(scenario.γ / scenario.Q̄_med)  # overload mc per car over capacity
             base(quarter, vk, dealer_uid) =
                 Float32(w_vec[vk_pos[vk]] + f_vec[dealer_pos[dealer_uid]] + t_vec[quarter[2]])
             θ(dealer_uid) = Float32(scenario.κ) * index.capacity[dealer_pos[dealer_uid]]
             overload(dealer_uid, Q) = max(Q - θ(dealer_uid), 0.0f0)
             mc_marginal(quarter, vk, dealer_uid, Q) =
-                base(quarter, vk, dealer_uid) + γ * overload(dealer_uid, Q)
+                base(quarter, vk, dealer_uid) + slope * overload(dealer_uid, Q)
             mc_average(quarter, vk, dealer_uid, Q) =
                 base(quarter, vk, dealer_uid) +
-                γ / 2 * overload(dealer_uid, Q)^2 / max(Q, eps(Float32))
-            return (; base, θ, γ, mc_marginal, mc_average)
+                slope / 2 * overload(dealer_uid, Q)^2 / max(Q, eps(Float32))
+            return (; base, θ, slope, mc_marginal, mc_average)
         end
 
         # -----------------------------------------------------------------------------
@@ -196,7 +196,7 @@ function (@main)(_)
         # sees the previously-updated prices (that's the Gauss-Seidel property).
         # -----------------------------------------------------------------------------
         function solve_nash_bertrand!(cf, costs)
-            (; base, θ, γ) = costs
+            (; base, θ, slope) = costs
             tol_std = NB_TOL
             history = Float32[]
             for outer in 1:NB_MAX_SWEEPS
@@ -209,11 +209,12 @@ function (@main)(_)
                     p = Float32[current_price(t, j, f) for j in js]
                     markup = Float32.(J' \ Float64.(q))
                     p0 = Float32[base(t, j, f) for j in js] .- markup
-                    # Overload mc λ = γ·(Q − θ_f)₊ solved on Q linearized in p, so a steep γ
-                    # doesn't oscillate; at the fixed point it is the exact FOC.
+                    # Overload mc λ = γ·(Q − θ_f)₊/Q̄_med solved on Q linearized in p, so a steep
+                    # γ doesn't oscillate; at the fixed point it is the exact FOC.
                     s = sum(J)
-                    γ > 0 && s >= 0 && error("Non-negative aggregate price slope at $((t, f)): $s")
-                    λ = max(0.0f0, γ * (sum(q) + sum(J * (p0 .- p)) - θ(f)) / (1 - γ * s))
+                    slope > 0 && s >= 0 &&
+                        error("Non-negative aggregate price slope at $((t, f)): $s")
+                    λ = max(0.0f0, slope * (sum(q) + sum(J * (p0 .- p)) - θ(f)) / (1 - slope * s))
                     p_target = p0 .+ λ
                     for (i, j) in enumerate(js)
                         p_old = current_price(t, j, f)
