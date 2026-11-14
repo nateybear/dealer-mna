@@ -239,21 +239,32 @@ end
             meta
         end
 
+    function solve_copy!(m)
+        JuMP.set_optimizer(m, KNITRO.Optimizer)
+        # MKL PARDISO pivots statically: factor memory is fixed at analysis, unlike MA97's delays.
+        set_attribute(m, "linsolver", 6)
+        set_attribute(m, "linsolver_numthreads", Threads.nthreads())
+        optimize!(m)
+        assert_is_solved_and_feasible(m)
+        return m
+    end
+
+    # KNITRO's workspace is C memory the GC can't see, so free it once values are read. Not
+    # empty!: KNITRO.jl's empty! re-sets maxtime (param 1163), which Knitro 14.1 rejects.
+    free_knitro!(m) = set_attribute(m, "free", true)
+
     # Solves a copy of `model`. With `tiebreak = k`, a second stage holds the objective at its
     # optimum and pushes γ[k] the same direction: γ is only bounded below when observed sales
     # never exceed capacity, and downstream counterfactuals need a definite value.
     function solve_bound!(sense, obj; tiebreak = nothing)
         set_objective_sense(model, sense)
         set_objective_function(model, obj)
-        model_copy = copy(model)
-        JuMP.set_optimizer(model_copy, KNITRO.Optimizer)
-        # MKL PARDISO pivots statically: factor memory is fixed at analysis, unlike MA97's delays.
-        set_attribute(model_copy, "linsolver", 6)
-        set_attribute(model_copy, "linsolver_numthreads", Threads.nthreads())
-        optimize!(model_copy)
-        assert_is_solved_and_feasible(model_copy)
+        model_copy = solve_copy!(copy(model))
         obj_val = objective_value(model_copy)
         if tiebreak !== nothing
+            # Fresh copy: KNITRO refuses constraints after a solve, and JuMP's fallback is empty!.
+            free_knitro!(model_copy)
+            model_copy = copy(model)
             obj_copy = objective_function(model_copy)
             tol = 1e-6 * max(1.0, abs(obj_val))
             if sense == MIN_SENSE
@@ -262,8 +273,7 @@ end
                 @constraint(model_copy, obj_copy ≥ obj_val - tol)
             end
             @objective(model_copy, sense, model_copy[:γ][tiebreak])
-            optimize!(model_copy)
-            assert_is_solved_and_feasible(model_copy)
+            solve_copy!(model_copy)
         end
         named = (;
             w = value.(model_copy[:w]),
@@ -273,8 +283,7 @@ end
             γ = value.(model_copy[:γ]),
         )
         all_vals = value.(all_variables(model_copy))
-        # KNITRO's workspace is C memory the GC can't see; free it now, not at finalization.
-        empty!(model_copy)
+        free_knitro!(model_copy)
         return obj_val, all_vals, named
     end
 
