@@ -181,10 +181,9 @@ end
     @variable(model, ϵ[1:n_moments] ≥ 0)
 
     # Overload price γ on dealer capacity κ·Q̄_f: one γ slot per κ, all but the active one fixed
-    # at 0. γ is per median capacity, cost (γ/2)·(Q − κ·Q̄_f)₊²/Q̄_med, so its column is on w's
-    # scale. γ̄ puts overload mc at the w upper bound when the median dealer is 10% over capacity.
-    const Q̄_med = Float64(median(index.capacity))
-    const γ̄ = 100.0
+    # at 0. Cost (γ/2)·((Q − κ·Q̄_f)/Q̄_f)₊², so overload mc is γ·(Q − κ·Q̄_f)₊/Q̄_f². γ̄ puts
+    # overload mc at the w upper bound when the median dealer is 10% over capacity.
+    const γ̄ = 100 * Float64(median(index.capacity))
     @variable(model, 0 <= γ[1:K] <= γ̄)
 
     function set_active_kappa!(k)
@@ -201,7 +200,7 @@ end
     end
 
     total_constraints = sum(length(R) for R in R_blocks)
-    @info "Adding moment constraints" total_constraints per_block = [length(R) for R in R_blocks] K Q̄_med γ̄
+    @info "Adding moment constraints" total_constraints per_block = [length(R) for R in R_blocks] K γ̄
     ϵ_rest = ϵ
     for bi in eachindex(block_specs)
         R_b = R_blocks[bi]
@@ -217,7 +216,7 @@ end
             add_sparse_row!(expr, Cj_sp, i, w, s)
             add_sparse_row!(expr, Cf_sp, i, f, s)
             add_sparse_row!(expr, Ct_sp, i, t, s)
-            add_sparse_row!(expr, Ch_sp, i, γ, s / Q̄_med)
+            add_sparse_row!(expr, Ch_sp, i, γ, s)
             @constraint(model, expr + ϵ_i ≥ 0)
         end
     end
@@ -239,19 +238,39 @@ end
             meta
         end
 
+    struct KnitroFailure <: Exception
+        status::String
+    end
+    Base.showerror(io::IO, e::KnitroFailure) = print(io, "KNITRO did not solve: ", e.status)
+
     function solve_copy!(m)
         JuMP.set_optimizer(m, KNITRO.Optimizer)
         # MKL PARDISO pivots statically: factor memory is fixed at analysis, unlike MA97's delays.
         set_attribute(m, "linsolver", 6)
         set_attribute(m, "linsolver_numthreads", Threads.nthreads())
         optimize!(m)
-        assert_is_solved_and_feasible(m)
+        if !is_solved_and_feasible(m)
+            status = "$(termination_status(m)): $(raw_status(m))"
+            free_knitro!(m)
+            throw(KnitroFailure(status))
+        end
         return m
     end
 
     # KNITRO's workspace is C memory the GC can't see, so free it once values are read. Not
     # empty!: KNITRO.jl's empty! re-sets maxtime (param 1163), which Knitro 14.1 rejects.
     free_knitro!(m) = set_attribute(m, "free", true)
+
+    # Per-κ sweeps skip grid points KNITRO can't solve (unsolved, not rejected); other errors propagate.
+    function skip_failure(f, k)
+        try
+            return f()
+        catch e
+            e isa KnitroFailure || rethrow()
+            @warn "Skipping κ" κ = index.kappa_grid[k] exception = e
+            return nothing
+        end
+    end
 
     # Solves a copy of `model`. With `tiebreak = k`, a second stage holds the objective at its
     # optimum and pushes γ[k] the same direction: γ is only bounded below when observed sales
@@ -315,7 +334,7 @@ end
                 vals_raw = R_slice .+ Cj_slice * w_start .+
                            Cf_slice * f_start .+ Ct_slice * t_start
                 for c in active_h
-                    vals_raw .+= (γ_start[c] / Q̄_med) .* @view(C_h_map[lo:hi, s, c])
+                    vals_raw .+= γ_start[c] .* @view(C_h_map[lo:hi, s, c])
                 end
                 perms = if sorted
                     [
@@ -486,7 +505,7 @@ end
         for k in 1:K
             ow = index.capacity_obj_weights[k]
             ow == 0 && continue
-            add_to_expression!(expr, ow / Q̄_med, model[:γ][k])
+            add_to_expression!(expr, ow, model[:γ][k])
         end
         return expr
     end
@@ -505,7 +524,7 @@ end
         return (;
             obj = obj_val,
             w = named.w, f = named.f, t = named.t,
-            γ = named.γ[k], γ_cap = γ̄, Q̄_med, κ = index.kappa_grid[k], k,
+            γ = named.γ[k], γ_cap = γ̄, κ = index.kappa_grid[k], k,
             bindings, n_binding, max_ε, top_str,
         )
     end
@@ -522,12 +541,15 @@ function (@main)(_)
     @info "Step 1: unweighted feasibility per κ" kappa_grid
     step1 = pmap(1:K) do k
         set_active_kappa!(k)
-        return solve_bound!(MIN_SENSE, sum(ϵ .^ 2))
+        return skip_failure(() -> solve_bound!(MIN_SENSE, sum(ϵ .^ 2)), k)
     end
-    c_unweighted_by_κ = first.(step1)
+    # Inf marks an unsolved κ; the problem is always feasible through ϵ, so it can't mean infeasible.
+    c_unweighted_by_κ = [isnothing(s) ? Inf : s[1] for s in step1]
+    all(isinf, c_unweighted_by_κ) && error("KNITRO failed on every κ in step 1")
     k1 = argmin(c_unweighted_by_κ)
     c_unweighted, start_vals, sv = step1[k1]
-    @info "Unweighted feasibility done" c_unweighted c_linear κ = kappa_grid[k1] γ = sv.γ[k1] c_unweighted_by_κ
+    @info "Unweighted feasibility done" c_unweighted c_linear κ = kappa_grid[k1] γ = sv.γ[k1] c_unweighted_by_κ κ_failed =
+        kappa_grid[isinf.(c_unweighted_by_κ)]
 
     @everywhere workers() set_active_kappa!($k1)
     @everywhere workers() set_start_values!($start_vals)
@@ -560,15 +582,17 @@ function (@main)(_)
     step2 = pmap(1:K) do k
         set_active_kappa!(k)
         set_start_values!(start_vals_linear)
-        return solve_bound!(MIN_SENSE, weighted_sse_obj(σ))
+        return skip_failure(() -> solve_bound!(MIN_SENSE, weighted_sse_obj(σ)), k)
     end
-    c_weighted_by_κ = first.(step2)
+    c_weighted_by_κ = [isnothing(s) ? Inf : s[1] for s in step2]
+    all(isinf, c_weighted_by_κ) && error("KNITRO failed on every κ in step 2")
     c_weighted = minimum(c_weighted_by_κ)
     c_tol = c_weighted * (1 + 1e-6) + 1e-10
     ks = findall(≤(c_tol), c_weighted_by_κ)
-    start_vals_by_κ = [s[2] for s in step2]
+    start_vals_by_κ = [isnothing(s) ? nothing : s[2] for s in step2]
+    κ_failed = kappa_grid[isinf.(c_weighted_by_κ)]
     @info "Weighted feasibility done" c_weighted c_unweighted ratio_c =
-        c_weighted / max(c_unweighted, eps()) κ_identified = kappa_grid[ks] c_weighted_by_κ
+        c_weighted / max(c_unweighted, eps()) κ_identified = kappa_grid[ks] c_weighted_by_κ κ_failed
 
     @everywhere workers() add_weighted_sse_constraint!($c_tol, $σ)
     @everywhere workers() set_sigma_for_diag!($σ)
@@ -590,10 +614,13 @@ function (@main)(_)
     cases = pmap(jobs) do (k, sense)
         set_active_kappa!(k)
         set_start_values!(start_vals_by_κ[k])
-        return solve_extreme_case(sense, w_weights, f_weights, t_weights)
+        return skip_failure(() -> solve_extreme_case(sense, w_weights, f_weights, t_weights), k)
     end
-    best_case = argmin(c -> c.obj, [c for (c, (_, s)) in zip(cases, jobs) if s == MIN_SENSE])
-    worst_case = argmax(c -> c.obj, [c for (c, (_, s)) in zip(cases, jobs) if s == MAX_SENSE])
+    solved(sense) = [c for (c, (_, s)) in zip(cases, jobs) if s == sense && !isnothing(c)]
+    (isempty(solved(MIN_SENSE)) || isempty(solved(MAX_SENSE))) &&
+        error("KNITRO failed every best- or worst-case solve")
+    best_case = argmin(c -> c.obj, solved(MIN_SENSE))
+    worst_case = argmax(c -> c.obj, solved(MAX_SENSE))
     for (name, sol) in (("Best case (min", best_case), ("Worst case (max", worst_case))
         @info "$name sales-weighted marginal cost)" obj = sol.obj κ = sol.κ γ = sol.γ γ_cap =
             sol.γ_cap n_binding = sol.n_binding top = sol.top_str
@@ -648,7 +675,7 @@ function (@main)(_)
             w_weights, f_weights, t_weights, n_sales,
             avg_price_dollars, med_price_dollars, price_scale,
             c_linear, c_unweighted, c_weighted, σ,
-            kappa_grid, c_unweighted_by_κ, c_weighted_by_κ, κ_identified = kappa_grid[ks],
+            kappa_grid, c_unweighted_by_κ, c_weighted_by_κ, κ_identified = kappa_grid[ks], κ_failed,
         ),
     )
     return nothing

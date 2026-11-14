@@ -63,8 +63,8 @@ function BBLIndex(dealers::AbstractVector{UUID}, usable_vks, capacity, capacity_
 end
 
 # Q̄_f = dealer's highest observed quarterly sales of BBL-universe products over T, aligned to
-# `dealers`. obj_weights[k] = Σ_ft ½·max(q_ft − κ_k·Q̄_f, 0)² / Σ_ft q_ft: the per-unit average
-# overload at observed sales.
+# `dealers`. obj_weights[k] = Σ_ft ½·max((q_ft − κ_k·Q̄_f)/Q̄_f, 0)² / Σ_ft q_ft: the per-unit
+# average overload at observed sales.
 function dealer_capacity(fords, dealers, usable_vks, T)
     dealer_set = Set(dealers)
     T_set = Set(T)
@@ -90,8 +90,10 @@ function dealer_capacity(fords, dealers, usable_vks, T)
     capacity = Float32[peak[f] for f in dealers]
     total_q = sum(q_ft.q)
     obj_weights = [
-        sum(max(r.q - κ * peak[r.dealer_uid], 0)^2 / 2 for r in eachrow(q_ft)) / total_q for
-        κ in Supply.CAPACITY_MULTIPLES
+        sum(
+            max((r.q - κ * peak[r.dealer_uid]) / peak[r.dealer_uid], 0)^2 / 2 for
+            r in eachrow(q_ft)
+        ) / total_q for κ in Supply.CAPACITY_MULTIPLES
     ]
     return capacity, obj_weights
 end
@@ -231,8 +233,8 @@ function BBLMatrices(idx::BBLIndex, simulations; C_h_map = nothing)
     return BBLMatrices(idx, R_f, C_f, R_t, C_t, R_j, C_j)
 end
 
-# Coefficient on γ_k: −Σ_fwd β^fwd · ½·max(Q − κ_k·Q̄_f, 0)², Q = dealer's total demand; same
-# sign convention as aggregate!'s C. kappa_grid is ascending, so stop at the first inactive κ.
+# Coefficient on γ_k: −Σ_fwd β^fwd · ½·max((Q − κ_k·Q̄_f)/Q̄_f, 0)², Q = dealer's total demand;
+# same sign convention as aggregate!'s C. kappa_grid is ascending, so stop at the first inactive κ.
 function aggregate_overload!(H::AbstractMatrix, idx::BBLIndex, tf, sim, scenario_lookup)
     (t, f) = tf
     row = idx.tf_row_index[tf]
@@ -245,7 +247,7 @@ function aggregate_overload!(H::AbstractMatrix, idx::BBLIndex, tf, sim, scenario
             init = 0.0,
         )
         for (k, κ) in enumerate(idx.kappa_grid)
-            r = Q - κ * Q̄
+            r = (Q - κ * Q̄) / Q̄
             r > 0 || break
             H[row, k] -= disc * r^2 / 2
         end
