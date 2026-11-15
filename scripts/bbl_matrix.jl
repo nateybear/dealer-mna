@@ -3,7 +3,7 @@ using .Demand
 
 using SparseArrays
 using Mmap
-using Statistics: quantile
+using Statistics: median, quantile
 
 import Lazy: iterated
 
@@ -62,9 +62,9 @@ function BBLIndex(dealers::AbstractVector{UUID}, usable_vks, capacity, capacity_
     )
 end
 
-# Q̄_f = dealer's highest observed quarterly sales of BBL-universe products over T, aligned to
-# `dealers`. obj_weights[k] = Σ_ft ½·max((q_ft − κ_k·Q̄_f)/Q̄_f, 0)² / Σ_ft q_ft: the per-unit
-# average overload at observed sales.
+# Q̄_f = dealer's median quarterly sales of BBL-universe products over T (quarters with sales),
+# aligned to `dealers`. obj_weights[k] = Σ_ft ½·max((q_ft − κ_k·Q̄_f)/Q̄_f, 0)² / Σ_ft q_ft: the
+# per-unit average overload at observed sales.
 function dealer_capacity(fords, dealers, usable_vks, T)
     dealer_set = Set(dealers)
     T_set = Set(T)
@@ -78,20 +78,20 @@ function dealer_capacity(fords, dealers, usable_vks, T)
         groupby([:dealer_uid, :t])
         combine(nrow => :q)
     end
-    peak = Dict(
+    typical = Dict(
         r.dealer_uid => r.q for
-        r in eachrow(combine(groupby(q_ft, :dealer_uid), :q => maximum => :q))
+        r in eachrow(combine(groupby(q_ft, :dealer_uid), :q => median => :q))
     )
-    missing_dealers = [f for f in dealers if !haskey(peak, f)]
+    missing_dealers = [f for f in dealers if !haskey(typical, f)]
     isempty(missing_dealers) || error(
         "$(length(missing_dealers)) BBL dealers have no sales in the panel, " *
         "e.g. $(first(missing_dealers))",
     )
-    capacity = Float32[peak[f] for f in dealers]
+    capacity = Float32[typical[f] for f in dealers]
     total_q = sum(q_ft.q)
     obj_weights = [
         sum(
-            max((r.q - κ * peak[r.dealer_uid]) / peak[r.dealer_uid], 0)^2 / 2 for
+            max((r.q - κ * typical[r.dealer_uid]) / typical[r.dealer_uid], 0)^2 / 2 for
             r in eachrow(q_ft)
         ) / total_q for κ in Supply.CAPACITY_MULTIPLES
     ]

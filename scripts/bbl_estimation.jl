@@ -271,28 +271,11 @@ end
         end
     end
 
-    # Solves a copy of `model`. With `tiebreak = k`, a second stage holds the objective at its
-    # optimum and pushes γ[k] the same direction: γ is only bounded below when observed sales
-    # never exceed capacity, and downstream counterfactuals need a definite value.
-    function solve_bound!(sense, obj; tiebreak = nothing)
+    function solve_bound!(sense, obj)
         set_objective_sense(model, sense)
         set_objective_function(model, obj)
         model_copy = solve_copy!(copy(model))
         obj_val = objective_value(model_copy)
-        if tiebreak !== nothing
-            # Fresh copy: KNITRO refuses constraints after a solve, and JuMP's fallback is empty!.
-            free_knitro!(model_copy)
-            model_copy = copy(model)
-            obj_copy = objective_function(model_copy)
-            tol = 1e-6 * max(1.0, abs(obj_val))
-            if sense == MIN_SENSE
-                @constraint(model_copy, obj_copy ≤ obj_val + tol)
-            else
-                @constraint(model_copy, obj_copy ≥ obj_val - tol)
-            end
-            @objective(model_copy, sense, model_copy[:γ][tiebreak])
-            solve_copy!(model_copy)
-        end
         named = (;
             w = value.(model_copy[:w]),
             f = value.(model_copy[:f]),
@@ -506,13 +489,12 @@ end
     end
 
     # One-shot best/worst counterfactual solve under the active κ: build the
-    # sales-weighted objective, run the QCQP with the γ tie-break, attribute
-    # binding constraints, and return a self-contained NamedTuple (all
-    # master-side references only).
+    # sales-weighted objective, run the QCQP, attribute binding constraints,
+    # and return a self-contained NamedTuple (all master-side references only).
     function solve_extreme_case(sense, w_weights, f_weights, t_weights)
         k = findfirst(!is_fixed, γ)
         obj = sales_weighted_objective(w_weights, f_weights, t_weights)
-        obj_val, _, named = solve_bound!(sense, obj; tiebreak = k)
+        obj_val, _, named = solve_bound!(sense, obj)
         bindings, n_binding, max_ε = attribute_binding(named.ϵ)
         top_str = format_binding_summary(bindings)
         named.γ[k] ≥ 0.99 * γ̄ && @warn "γ at its cap; raise γ̄" γ = named.γ[k] γ̄
@@ -526,14 +508,8 @@ end
 end
 
 function (@main)(_)
-    @info "Step 0: linear-cost feasibility (γ ≡ 0), warm-start incumbent" total_constraints n_j n_f n_t K
-    @everywhere workers() set_active_kappa!(0)
-    c_linear, start_vals_linear, _ = @fetch solve_bound!(MIN_SENSE, sum(ϵ .^ 2))
-    @everywhere workers() set_start_values!($start_vals_linear)
-    @info "Linear-cost feasibility done" c_linear
-
     kappa_grid = @fetch index.kappa_grid
-    @info "Step 1: unweighted feasibility per κ" kappa_grid
+    @info "Step 1: unweighted feasibility per κ" total_constraints n_j n_f n_t kappa_grid
     step1 = pmap(1:K) do k
         set_active_kappa!(k)
         return skip_failure(() -> solve_bound!(MIN_SENSE, sum(ϵ .^ 2)), k)
@@ -543,7 +519,7 @@ function (@main)(_)
     all(isinf, c_unweighted_by_κ) && error("KNITRO failed on every κ in step 1")
     k1 = argmin(c_unweighted_by_κ)
     c_unweighted, start_vals, sv = step1[k1]
-    @info "Unweighted feasibility done" c_unweighted c_linear κ = kappa_grid[k1] γ = sv.γ[k1] c_unweighted_by_κ κ_failed =
+    @info "Unweighted feasibility done" c_unweighted κ = kappa_grid[k1] γ = sv.γ[k1] c_unweighted_by_κ κ_failed =
         kappa_grid[isinf.(c_unweighted_by_κ)]
 
     @everywhere workers() set_active_kappa!($k1)
@@ -567,8 +543,8 @@ function (@main)(_)
         @info "c weights" c_weighted c_weighted_new c_change σ
         i += 1
         c_weighted = c_weighted_new
-        if i ≥ 3
-            @warn "stopping after 10 iterations"
+        if i > 5
+            @warn "stopping after 5 iterations"
             break
         end
     end
@@ -576,7 +552,6 @@ function (@main)(_)
     # the identified set keeps every κ that attains the minimum.
     step2 = pmap(1:K) do k
         set_active_kappa!(k)
-        set_start_values!(start_vals_linear)
         return skip_failure(() -> solve_bound!(MIN_SENSE, weighted_sse_obj(σ)), k)
     end
     c_weighted_by_κ = [isnothing(s) ? Inf : s[1] for s in step2]
@@ -669,7 +644,7 @@ function (@main)(_)
             best_case, worst_case,
             w_weights, f_weights, t_weights, n_sales,
             avg_price_dollars, med_price_dollars, price_scale,
-            c_linear, c_unweighted, c_weighted, σ,
+            c_unweighted, c_weighted, σ,
             kappa_grid, c_unweighted_by_κ, c_weighted_by_κ, κ_identified = kappa_grid[ks], κ_failed,
         ),
     )
