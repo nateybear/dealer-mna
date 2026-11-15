@@ -1628,7 +1628,7 @@ rule all_structural:
         # Paper artifacts
         "tables/trim_probabilities.tex",
         "tables/demand.tex",
-        "tables/trim_variation.tex",
+        "tables/trim_availability.tex",
         "tables/markup_trim_regression.tex",
         "plots/mcem_trace.png",
         "plots/sales_targets_scatter.png",
@@ -1820,6 +1820,23 @@ rule table_trim_variation:
         "logs/table_trim_variation.log",
     run:
         julia("scripts/table_trim_variation.jl", input=input, output=output, log=log)
+
+
+rule table_trim_availability:
+    """
+    JMP Table (tab:trim_variation): kept trims per Ford model, total sales, and the
+    sales-weighted mean/SD of trim availability across active dealer-quarters.
+    """
+    input:
+        "scripts/table_trim_availability.jl",
+        fords="data/arrow/fords.arrow",
+        kept_trims="data/kept_trims.arrow",
+    output:
+        "tables/trim_availability.tex",
+    log:
+        "logs/table_trim_availability.log",
+    run:
+        julia("scripts/table_trim_availability.jl", input=input, output=output, log=log)
 
 
 rule table_msa_concentration:

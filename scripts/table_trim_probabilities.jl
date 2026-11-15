@@ -2,7 +2,6 @@ using DealerMnA
 using XGBoost
 using StatsBase: mean, std
 using LogExpFunctions
-using LaTeXTabulars
 using LaTeXStrings
 using Printf
 
@@ -72,10 +71,10 @@ function (@main)(_)
 
         header = [
             "Model", "MY", "Trim",
-            L"n_{\text{sales}}", L"n_{d,t}",
-            L"\overline{p}_{\text{base}}", L"\sigma(p_{\text{base}})",
-            L"\overline{\tilde\rho}", L"\sigma(\tilde\rho)",
-            L"\overline{P(\text{carry}\mid\text{comply})}",
+            L"n_{\text{sales}}", L"n_{ft}",
+            L"\overline{\rho^{\text{base}}}", L"\sigma(\rho^{\text{base}})",
+            L"\overline{\rho^{\text{bonus}}}", L"\sigma(\rho^{\text{bonus}})",
+            L"\overline{P(\text{carry}\mid\iota = 1)}",
         ]
         row_fmt(r) = [
             r.model, string(r.model_year), r.extra,
@@ -84,18 +83,15 @@ function (@main)(_)
             fmt3(r.mean_rho), fmt3(r.std_rho),
             fmt3(r.mean_p_carry),
         ]
+        # Rows only: the paper wraps them in a longtblr (caption, label, page breaks) via \fileInput.
         open(snakemake.output["tex"], "w") do io
-            return latex_tabular(
-                io,
-                Tabular("lll" * "r"^7),
-                [
-                    Rule(:top),
-                    header,
-                    Rule(:mid),
-                    row_fmt.(eachrow(table))...,
-                    Rule(:bottom),
-                ],
-            )
+            println(io, "\\toprule")
+            println(io, join(header, " & "), " \\\\")
+            println(io, "\\midrule")
+            for r in eachrow(table)
+                println(io, join(row_fmt(r), " & "), " \\\\")
+            end
+            return println(io, "\\bottomrule")
         end
     end
     return nothing

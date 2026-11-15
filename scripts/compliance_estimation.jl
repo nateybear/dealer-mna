@@ -74,12 +74,14 @@ using Distributed
     function log_e_step_diagnostics(E_results)
         qs = [0.1, 0.5, 0.9]
         p_compliant = [r.p_compliant for r in E_results]
-        ll_gap = [r.ll_complier - r.ll_noncomplier for r in E_results]
-        ρ̃_means = [r.ρ̃_mean for r in E_results]
-        p_base_means = [r.p_base_mean for r in E_results]
-        n_cars_vec = [r.n_cars for r in E_results]
-        obs_means = [r.obs_mean for r in E_results]
-        obs_vars = [r.obs_var for r in E_results]
+        # Assortment diagnostics only where a next-quarter assortment exists.
+        with_cars = filter(r -> r.n_cars > 0, E_results)
+        ll_gap = [r.ll_complier - r.ll_noncomplier for r in with_cars]
+        ρ̃_means = [r.ρ̃_mean for r in with_cars]
+        p_base_means = [r.p_base_mean for r in with_cars]
+        n_cars_vec = [r.n_cars for r in with_cars]
+        obs_means = [r.obs_mean for r in with_cars]
+        obs_vars = [r.obs_var for r in with_cars]
         nc_var_pred = @. p_base_means * (1 - p_base_means)
         sale_lift = obs_means .- p_base_means
 
@@ -193,7 +195,14 @@ function (@main)(_)
         1 -
         sum(mask) / length(mask)
 
-    gdf = groupby(panel, [:model, :model_year, :extra])
+    # Compliance in quarter t − 1 governs the assortment at t, so the M step keeps assortments
+    # whose dealer has a compliance row in the previous quarter.
+    shift_to_next(df) = transform(df, :t => ByRow(t -> t + Quarter(1)) => :t)
+    prev_keys = shift_to_next(select(compliance, :dealer_uid, :t))
+    panel_m = semijoin(panel, prev_keys, on = [:dealer_uid, :t])
+    @info "M-step sample: assortments with prior-quarter compliance" n_rows = nrow(panel_m) n_without_prior =
+        nrow(panel) - nrow(panel_m)
+    gdf = groupby(panel_m, [:model, :model_year, :extra])
 
     M_step = Dict()
     E_step = empty!(copy(compliance))
@@ -226,9 +235,10 @@ function (@main)(_)
             Float64(Π_FLOOR),
             1 - Float64(Π_FLOOR),
         )
+        prev_compliance = shift_to_next(compliance)
         M_step =
             let mapped = pmap(collect(gdf)) do cars
-                    cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
+                    cars = innerjoin(cars, prev_compliance, on = [:dealer_uid, :t])
                     X = X_matrix(cars)
                     y_all = Float32.(cars.is_sold)
                     γ_all = Float32.(cars.p_compliant)
@@ -425,14 +435,32 @@ function (@main)(_)
             get(φ_lookup, (r.dealer_uid, r.t), NaN32) for r in eachrow(E_step)
         ]
         E_results = pmap(eachrow(E_step); batch_size = 100) do r
-            cars = subset(panel, :dealer_uid => ByRow(==(r.dealer_uid)), :t => ByRow(==(r.t)))
+            # c_t is judged by the assortment it earns at t + 1 (X_matrix reads the state at t).
+            t_next = r.t + Quarter(1)
+            cars = subset(
+                panel, :dealer_uid => ByRow(==(r.dealer_uid)), :t => ByRow(==(t_next))
+            )
+            phi_contrib = isnan(r.phi_hat) ? 0.0 : (r.q_agg - r.phi_hat) / τ
+            if isempty(cars)  # no next-quarter assortment: the sales-target term alone
+                return (;
+                    p_compliant = softmax([log(π) + phi_contrib, log(1 - π)])[1],
+                    ll_complier = 0.0,
+                    ll_noncomplier = 0.0,
+                    phi_contrib,
+                    ρ̃_mean = NaN,
+                    p_base_mean = NaN,
+                    n_cars = 0,
+                    obs_mean = NaN,
+                    obs_var = NaN,
+                )
+            end
 
             dm = XGBoost.DMatrix(X_matrix(cars[[1], :]))
             booster = XGBoost.Booster(dm)
 
             cars.p_base = map(eachrow(cars)) do (; model, model_year, extra)
                 trim_info = M_step[(model, model_year, extra)]
-                k = trim_info[4][(r.dealer_uid, r.t)]
+                k = trim_info[4][(r.dealer_uid, t_next)]
                 pbase_bytes = trim_info[1][k]
                 XGBoost.load!(booster, pbase_bytes)
                 f_raw = only(XGBoost.predict(booster, dm; margin = true))
@@ -441,7 +469,7 @@ function (@main)(_)
 
             cars.ρ_tilde = map(eachrow(cars)) do (; model, model_year, extra)
                 trim_info = M_step[(model, model_year, extra)]
-                k = trim_info[4][(r.dealer_uid, r.t)]
+                k = trim_info[4][(r.dealer_uid, t_next)]
                 rho_bytes = trim_info[2][k]
                 isempty(rho_bytes) && return Float64(Supply.RHO_MIN)
                 XGBoost.load!(booster, rho_bytes)
@@ -462,7 +490,6 @@ function (@main)(_)
             ll_noncomplier = let (; is_sold, p_base) = cars
                 sum(@. is_sold * log(p_base) + (1 - is_sold) * log(1 - p_base))
             end
-            phi_contrib = isnan(r.phi_hat) ? 0.0 : (r.q_agg - r.phi_hat) / τ
             p_compliant = softmax(
                 [log(π) + ll_complier + phi_contrib, log(1 - π) + ll_noncomplier]
             )[1]
@@ -549,9 +576,10 @@ function (@main)(_)
             )
             distill_num_round = 300
             distill_huber_delta = 0.25
+            prev_posterior = shift_to_next(compliance)
             final_M_step =
                 let mapped = pmap(collect(gdf)) do cars
-                        cars = leftjoin(cars, compliance, on = [:dealer_uid, :t])
+                        cars = innerjoin(cars, prev_posterior, on = [:dealer_uid, :t])
                         X = X_matrix(cars)
                         n = nrow(cars)
                         group_key = (
