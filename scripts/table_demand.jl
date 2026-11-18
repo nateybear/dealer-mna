@@ -39,7 +39,7 @@ function median_own_price_elasticity(model, params)
 
     idx = Demand.param_indices(model)
     Πp = view(params, idx.i_Πp)
-    decomp = JLD2.load_object("data/delta_decomposition_regout.jld2")
+    decomp = JLD2.load_object(snakemake.input["delta_decomp"])
     β_price = Float32(coef(decomp.regout)[findfirst(==("price"), coefnames(decomp.regout))])
 
     Dn, Z = size(model.D_dense)

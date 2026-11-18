@@ -187,6 +187,29 @@ rule data_demand_estimates:
             extra_args=["knitro", "--full", "--multistart"],
         )
 
+
+rule data_delta_decomposition:
+    """
+    Second-stage δ regression (Hausman IV on price, log(J), FEs) that the
+    Counterfactual reads for β_price, ModelAdd/sweep_δ! predictions, and the
+    first-stage price prediction.
+    """
+    input:
+        "scripts/demand_delta_decomposition.jl",
+        model_frames="data/model_frames.jld2",
+        demand_estimates="data/demand_estimates.jld2",
+    output:
+        delta_decomp="data/delta_decomposition_regout.jld2",
+    log:
+        "logs/delta_decomposition.log",
+    run:
+        julia(
+            "scripts/demand_delta_decomposition.jl",
+            input=input,
+            output=output,
+            log=log,
+        )
+
 # ============================================================================
 # CHECKPOINT AGGREGATION HELPERS
 # ============================================================================
@@ -1036,6 +1059,7 @@ rule data_residual_demand:
         "scripts/residual_demands.jl",
         model_frames="data/model_frames.jld2",
         demand_estimates="data/demand_estimates.jld2",
+        delta_decomp="data/delta_decomposition_regout.jld2",
         price_table="data/price_table.arrow",
     output:
         residual_demand="data/residual_demand.jld2",
