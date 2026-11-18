@@ -39,6 +39,7 @@ function median_own_price_elasticity(model, params)
 
     idx = Demand.param_indices(model)
     Πp = view(params, idx.i_Πp)
+    λ = params[only(idx.i_λ)]
     regout = JLD2.load_object(snakemake.input["delta_decomp"]).regout
     β_price = [
         Float32(coef(regout)[findfirst(==(Demand.price_coefname(b)), coefnames(regout))]) for
@@ -71,8 +72,9 @@ function median_own_price_elasticity(model, params)
             dq = 0.0f0
             @inbounds for z in 1:Zb
                 s_jz = U[k, z]
+                c_z = 1 + (1 - λ) / (λ * max(work.inside_sum[bi, z], 1.0f-30))
                 q += M[z] * s_jz
-                dq += M[z] * s_jz * (1 - s_jz) * (α[z] + β)
+                dq += M[z] * s_jz * (1 / λ - c_z * s_jz) * (α[z] + β)
             end
             q > 0 || continue
             push!(eps, Float32(dq * p_raw / (price_scale * q)))
@@ -133,11 +135,22 @@ function (@main)(_)
         println(io, "     \\midrule")
 
         η1_est, η1_se, η1_pv = se_lookup["η_baseline"]
+        # Stars for λ test H₀: λ = 1 (plain logit), not λ = 0.
+        λ_est, λ_se, _ = se_lookup["λ_nest"]
+        λ_pv = reg_pval(λ_est - 1, λ_se)
+        side = Dict(
+            1 => ("\$\\eta_1\$ (Dist. Baseline)", η1_est, η1_se, η1_pv),
+            2 => ("\$\\lambda\$ (Nesting)", λ_est, λ_se, λ_pv),
+        )
         for (i, p) in enumerate(PRODUCT_ORDER)
             β_est, β_se = reg_lookup["price_" * chopprefix(p, "is_")]
             β_pv = reg_pval(β_est, β_se)
-            η_est = i == 1 ? " & \$\\eta_1\$ (Dist. Baseline) & " * fmt_est(η1_est, η1_pv) : ""
-            η_se = i == 1 ? " & & " * fmt_se(η1_se) : ""
+            η_est, η_se = if haskey(side, i)
+                label, est, se, pv = side[i]
+                (" & " * label * " & " * fmt_est(est, pv), " & & " * fmt_se(se))
+            else
+                ("", "")
+            end
             println(io,
                 "     Mean Price Effect: ", PRODUCT_LABELS[p], " & ", fmt_est(β_est, β_pv),
                 " &", η_est, " \\\\",

@@ -26,17 +26,19 @@ function param_indices(model::DemandModel)
     i_δ = @indexof delta nothing model
     i_Πᵦ = @indexof demo_product_params nothing model
     i_Πp = @indexof demo_price_params nothing model
+    i_λ = @indexof nest_params nothing model
     i_η = @indexof dist_params nothing model
-    return (; i_δ, i_Πᵦ, i_Πp, i_η)
+    return (; i_δ, i_Πᵦ, i_Πp, i_λ, i_η)
 end
 
-# Labels for the non-δ parameter block (length N_NONδ = K*Dn + Dn + 2 = 22 at K=4, Dn=4).
+# Labels for the non-δ parameter block (length N_NONδ = K*Dn + Dn + 3 = 23 at K=4, Dn=4).
 function build_nonδ_labels()
     D = string.(DEMOGRAPHIC_ATTRIBUTES)
     P = string.(PRODUCT_ATTRIBUTES)
     return vcat(
         ["Π[$d,$p]" for p in P for d in D],
         ["Πp[$d]" for d in D],
+        ["λ_nest"],
         ["η_baseline", "η_dist"],
     )
 end
@@ -51,11 +53,14 @@ struct DemandWork
     U_blocks::Vector{Matrix{Float32}}    # CCPs (or utility pre-softmax) per block, N_bi × Z
     E_blocks::Vector{Matrix{Float32}}    # exp(η₁ + η₂·dist) per block, N_bi × Z
     resid_blocks::Vector{Matrix{Float32}} # counts - M_z·CCP per block, N_bi × Z
-    inside_sum::Matrix{Float32}          # Σ_{k∈bi} CCP[k,z], n_blocks × Z
+    inside_sum::Matrix{Float32}          # s_in = Σ_{k∈bi} CCP[k,z], n_blocks × Z
+    inclusive_value::Matrix{Float32}     # IV = λ·log Σ_k exp(V_k/λ), n_blocks × Z
+    nest_entropy::Matrix{Float32}        # −Σ_k s_{k|in} log s_{k|in}, n_blocks × Z
     α::Matrix{Float32}                    # Σ_bi X_bi · resid_bi, (K+1) × Z
     G_π::Matrix{Float32}                  # per-zip score wrt π, N_NONδ × Z
     score_η1::Vector{Float32}            # per-zip η₁ score
     score_η2::Vector{Float32}            # per-zip η₂ score
+    score_λ::Vector{Float32}             # per-zip λ score
     # Envelope-Hessian accumulators (filled by eval_envelope_hessian!)
     partial_H::Matrix{Float32}
     K_corr::Matrix{Float32}
@@ -69,15 +74,18 @@ function DemandWork(model::DemandModel)
     Z = model.Z
     Dn = model.Dn
     Kp1 = model.K + 1
-    N_NONδ = Kp1 * Dn + 2  # Πᵦ (Dn × K) + Πp (Dn) + η (2). Note: Kp1*Dn = K*Dn+Dn covers Πᵦ+Πp.
+    N_NONδ = Kp1 * Dn + 3  # Πᵦ (Dn × K) + Πp (Dn) + λ (1) + η (2). Kp1*Dn covers Πᵦ+Πp.
     nt = Threads.nthreads()
     return DemandWork(
         [zeros(Float32, length(model.block_param_idxs[bi]), Z) for bi in 1:n_blocks],
         [zeros(Float32, length(model.block_param_idxs[bi]), Z) for bi in 1:n_blocks],
         [zeros(Float32, length(model.block_param_idxs[bi]), Z) for bi in 1:n_blocks],
         zeros(Float32, n_blocks, Z),
+        zeros(Float32, n_blocks, Z),
+        zeros(Float32, n_blocks, Z),
         zeros(Float32, Kp1, Z),
         zeros(Float32, N_NONδ, Z),
+        zeros(Float32, Z),
         zeros(Float32, Z),
         zeros(Float32, Z),
         zeros(Float32, N_NONδ, N_NONδ),
@@ -92,8 +100,10 @@ end
 # Forward pass: utility → CCP per block.
 # -------------------------------------------------------------------------------------------------
 
-# Per-column softmax over a block's rows with outside-good utility = 0 (stabilized).
-# Writes inside_sum[z] = Σ_k CCP[k,z].
+# Per-column nested-logit CCPs: every inside good shares one nest with parameter λ, outside
+# utility = 0. With m = max_k V_k, w_k = (V_k − m)/λ and S = Σ_k exp(w_k), the inclusive value
+# is IV = m + λ·log S, s_in = logistic(IV) and CCP_k = s_in·exp(w_k)/S. Writes s_in, IV and the
+# within-nest entropy H = log S − Σ_k (exp(w_k)/S)·w_k (needed by the λ score). λ = 1 is logit.
 #
 # The three inner k-loops read/write a contiguous column of U (col-major, k is the
 # fast index). `@turbo` from LoopVectorization vectorizes them with SLEEFPirates'
@@ -102,43 +112,62 @@ end
 # rewritten as a branchless `max` so `@turbo` accepts the reduction. `threaded=true`
 # parallelizes the outer z-loop (single-block CF hot path).
 @inline function softmax_block!(
-    U::AbstractMatrix{Float32}, inside_sum_row::AbstractVector{Float32};
+    U::AbstractMatrix{Float32}, inside_sum_row::AbstractVector{Float32},
+    iv_row::AbstractVector{Float32}, entropy_row::AbstractVector{Float32}, λ::Float32;
     threaded::Bool = false,
 )
     N_t, Z = size(U)
     if threaded
         @batch for z in 1:Z
-            _softmax_col!(U, inside_sum_row, N_t, z)
+            _softmax_col!(U, inside_sum_row, iv_row, entropy_row, λ, N_t, z)
         end
     else
         @inbounds for z in 1:Z
-            _softmax_col!(U, inside_sum_row, N_t, z)
+            _softmax_col!(U, inside_sum_row, iv_row, entropy_row, λ, N_t, z)
         end
     end
 end
 
+# Overflow-free logistic and log(1 + exp(x)). log s_in = −softplus(−IV), log s_out = −softplus(IV).
+@inline _logistic(x::Float32) = x ≥ 0 ? 1.0f0 / (1.0f0 + exp(-x)) : (e = exp(x); e / (1.0f0 + e))
+@inline _softplus(x::Float32) = max(x, 0.0f0) + log1p(exp(-abs(x)))
+
 @inline function _softmax_col!(
     U::AbstractMatrix{Float32}, inside_sum_row::AbstractVector{Float32},
+    iv_row::AbstractVector{Float32}, entropy_row::AbstractVector{Float32}, λ::Float32,
     N_t::Int, z::Int,
 )
-    u_max = 0.0f0
+    if N_t == 0
+        inside_sum_row[z] = 0.0f0
+        iv_row[z] = -Inf32
+        entropy_row[z] = 0.0f0
+        return nothing
+    end
+    u_max = U[1, z]
     @turbo for k in 1:N_t
         u_max = max(u_max, U[k, z])
     end
-    outside = @fastmath exp(-u_max)
-    denom = outside
+    inv_λ = 1.0f0 / λ
+    S = 0.0f0
+    A = 0.0f0
     @turbo for k in 1:N_t
-        e = exp(U[k, z] - u_max)
+        w = (U[k, z] - u_max) * inv_λ
+        e = exp(w)
         U[k, z] = e
-        denom += e
+        S += e
+        A += e * w
     end
-    inv_denom = 1.0f0 / denom
-    sm_sum = 0.0f0
+    # S ≥ 1 (the max term contributes exp(0)), so log S and A/S are well-conditioned.
+    log_S = log(S)
+    iv = u_max + λ * log_S
+    s_in = _logistic(iv)
+    scale = s_in / S
     @turbo for k in 1:N_t
-        U[k, z] *= inv_denom
-        sm_sum += U[k, z]
+        U[k, z] *= scale
     end
-    inside_sum_row[z] = sm_sum
+    inside_sum_row[z] = s_in
+    iv_row[z] = iv
+    entropy_row[z] = max(log_S - A / S, 0.0f0)
     return nothing
 end
 
@@ -162,10 +191,11 @@ end
 
 """
 forward_pass!(work, model, params)
-forward_pass!(work, model, δ, Πᵦ, Πp, η)
+forward_pass!(work, model, δ, Πᵦ, Πp, η, λ)
 
 Computes per-block CCPs into `work.U_blocks` and exp distance utilities into `work.E_blocks`,
-along with `work.inside_sum[bi, z] = Σ_{k∈block bi} CCP[k, z]`.
+along with `work.inside_sum[bi, z] = Σ_{k∈block bi} CCP[k, z]` and the per-(bi, z) inclusive
+value and within-nest entropy.
 
 The 6-arg form is used by the counterfactual layer to extend `δ` past `model.N` (after
 ModelAdd) without shuffling the non-δ block of `params`.
@@ -178,7 +208,7 @@ function forward_pass!(work::DemandWork, model::DemandModel, params::AbstractVec
     Πᵦ = reshape(view(params, idx.i_Πᵦ), model.Dn, model.K)
     Πp = view(params, idx.i_Πp)
     η = view(params, idx.i_η)
-    return forward_pass!(work, model, δ, Πᵦ, Πp, η)
+    return forward_pass!(work, model, δ, Πᵦ, Πp, η, params[only(idx.i_λ)])
 end
 
 function forward_pass!(
@@ -186,7 +216,8 @@ function forward_pass!(
     δ::AbstractVector{Float32},
     Πᵦ::AbstractMatrix{Float32},
     Πp::AbstractVector{Float32},
-    η::AbstractVector{Float32};
+    η::AbstractVector{Float32},
+    λ::Float32;
     blocks = 1:(model.n_blocks),
 )
     η1, η2 = η[1], η[2]
@@ -200,12 +231,12 @@ function forward_pass!(
     # nested-threading fights don't degenerate.
     if length(blocks) == 1
         _forward_pass_block!(
-            work, model, only(blocks), δ, ΠtD, η1, η2; threaded_z = true,
+            work, model, only(blocks), δ, ΠtD, η1, η2, λ; threaded_z = true,
         )
     else
         @batch for bi in blocks
             _forward_pass_block!(
-                work, model, bi, δ, ΠtD, η1, η2; threaded_z = false,
+                work, model, bi, δ, ΠtD, η1, η2, λ; threaded_z = false,
             )
         end
     end
@@ -218,7 +249,7 @@ end
 @inline function _forward_pass_block!(
     work::DemandWork, model::DemandModel, bi::Integer,
     δ::AbstractVector{Float32}, ΠtD::AbstractMatrix{Float32},
-    η1::Float32, η2::Float32; threaded_z::Bool,
+    η1::Float32, η2::Float32, λ::Float32; threaded_z::Bool,
 )
     U_bi = work.U_blocks[bi]
     E_bi = work.E_blocks[bi]
@@ -253,7 +284,10 @@ end
             end
         end
     end
-    softmax_block!(U_bi, view(work.inside_sum, bi, :); threaded = threaded_z)
+    softmax_block!(
+        U_bi, view(work.inside_sum, bi, :), view(work.inclusive_value, bi, :),
+        view(work.nest_entropy, bi, :), λ; threaded = threaded_z,
+    )
     return nothing
 end
 
@@ -270,15 +304,14 @@ function _inside_ll_block(U::Matrix{Float32}, counts::SparseMatrixCSC{Int32, Int
     return s
 end
 
-# Outside-good ll: Σ_{bi, z} (M_z - t_obs[bi,z]) · log(max(1 - inside_sum[bi,z], ε))
+# Outside-good ll: Σ_{bi, z} (M_z - t_obs[bi,z]) · log s_out, log s_out = −softplus(IV[bi,z]).
 function _outside_ll(work::DemandWork, model::DemandModel)
     ll = 0.0f0
     @inbounds for z in 1:(model.Z)
         for bi in 1:(model.n_blocks)
             n_out = model.M_zs[z] - Float32(model.t_obs[bi, z])
             if n_out > 0.0f0
-                p_out = max(1.0f0 - work.inside_sum[bi, z], 1.0f-10)
-                ll += n_out * log(p_out)
+                ll -= n_out * _softplus(work.inclusive_value[bi, z])
             end
         end
     end
@@ -300,6 +333,13 @@ function eval_ll!(work::DemandWork, model::DemandModel, params::AbstractVector{F
     return (ll_in + _outside_ll(work, model)) * model.inv_N
 end
 
+# resid[k,z] = ∂ℓ/∂V_k = n_k/λ − c_z·CCP_k, the nested-logit analogue of counts − M·CCP.
+# c_z = M_z + ((1−λ)/λ)·n_in/s_in; the s_in floor matches the log(max(·, 1f-30)) guards.
+@inline function _resid_scale(work::DemandWork, model::DemandModel, bi, z, λ::Float32)
+    n_in = Float32(model.t_obs[bi, z])
+    return model.M_zs[z] + (1.0f0 - λ) / λ * n_in / max(work.inside_sum[bi, z], 1.0f-30)
+end
+
 """
 eval_ll_δgrad!(work, model, params; δ_grad) → ll::Float32
 
@@ -310,6 +350,8 @@ function eval_ll_δgrad!(
     δ_grad::AbstractVector{Float32},
 )
     forward_pass!(work, model, params)
+    λ = params[only(param_indices(model).i_λ)]
+    inv_λ = 1.0f0 / λ
     fill!(δ_grad, 0.0f0)
     ll_in = 0.0f0
     @inbounds for bi in 1:(model.n_blocks)
@@ -319,9 +361,9 @@ function eval_ll_δgrad!(
         param_idxs = model.block_param_idxs[bi]
         N_bi = size(U_bi, 1)
         for z in 1:(model.Z)
-            mz = model.M_zs[z]
+            c_z = _resid_scale(work, model, bi, z, λ)
             for k in 1:N_bi
-                resid_bi[k, z] = -mz * U_bi[k, z]
+                resid_bi[k, z] = -c_z * U_bi[k, z]
             end
         end
         ll_block = 0.0f0
@@ -329,7 +371,7 @@ function eval_ll_δgrad!(
             for nz in counts_bi.colptr[col]:(counts_bi.colptr[col + 1] - 1)
                 row = counts_bi.rowval[nz]
                 val = Float32(counts_bi.nzval[nz])
-                resid_bi[row, col] += val
+                resid_bi[row, col] += val * inv_λ
                 ll_block += val * log(max(U_bi[row, col], 1.0f-30))
             end
         end
@@ -365,10 +407,13 @@ function eval_combined!(
     forward_pass!(work, model, params)
 
     idx = param_indices(model)
+    λ = params[only(idx.i_λ)]
+    inv_λ = 1.0f0 / λ
     fill!(grad, 0.0f0)
     fill!(work.α, 0.0f0)
     fill!(work.score_η1, 0.0f0)
     fill!(work.score_η2, 0.0f0)
+    fill!(work.score_λ, 0.0f0)
 
     ll_inside = 0.0f0
     for bi in 1:(model.n_blocks)
@@ -382,19 +427,28 @@ function eval_combined!(
         N_bi = size(U_bi, 1)
 
         @inbounds for z in 1:(model.Z)
-            mz = model.M_zs[z]
+            c_z = _resid_scale(work, model, bi, z, λ)
             for k in 1:N_bi
-                resid_bi[k, z] = -mz * U_bi[k, z]
+                resid_bi[k, z] = -c_z * U_bi[k, z]
             end
         end
+        # ∂ℓ/∂λ per (bi, z) = −(1/λ)·Σ_k n_k·log s_{k|in} − H·[((1−λ)/λ)·n_in + M_z·s_in],
+        # with log s_{k|in} = log CCP_k − log s_in.
         ll_block = 0.0f0
         @inbounds for col in 1:(model.Z)
+            ll_col = 0.0f0
             for nz in counts_bi.colptr[col]:(counts_bi.colptr[col + 1] - 1)
                 row = counts_bi.rowval[nz]
                 val = Float32(counts_bi.nzval[nz])
-                resid_bi[row, col] += val
-                ll_block += val * log(max(U_bi[row, col], 1.0f-30))
+                resid_bi[row, col] += val * inv_λ
+                ll_col += val * log(max(U_bi[row, col], 1.0f-30))
             end
+            ll_block += ll_col
+            n_in = Float32(model.t_obs[bi, col])
+            s_in = work.inside_sum[bi, col]
+            work.score_λ[col] -=
+                inv_λ * (ll_col - n_in * log(max(s_in, 1.0f-30))) +
+                work.nest_entropy[bi, col] * ((1.0f0 - λ) * inv_λ * n_in + model.M_zs[col] * s_in)
         end
         ll_inside += ll_block
 
@@ -435,6 +489,7 @@ function eval_combined!(
         grad[i_Πp_start + (d - 1)] = Π_grad[d, model.K + 1]
     end
 
+    grad[only(idx.i_λ)] = sum(work.score_λ)
     i_η_start = first(idx.i_η)
     grad[i_η_start] = sum(work.score_η1)
     grad[i_η_start + 1] = sum(work.score_η2)
@@ -453,6 +508,7 @@ function eval_combined!(
         end
     end
     @inbounds for z in 1:(model.Z)
+        work.G_π[N_NONδ - 2, z] = work.score_λ[z]
         work.G_π[N_NONδ - 1, z] = work.score_η1[z]
         work.G_π[N_NONδ, z] = work.score_η2[z]
     end
@@ -563,6 +619,10 @@ Woodbury solve (W=G fallback — degrades gracefully toward BHHH-like).
 function eval_envelope_hessian!(
     work::DemandWork, model::DemandModel; H::AbstractMatrix{Float32}
 )
+    error(
+        "eval_envelope_hessian!: not yet derived for the nested logit (λ row, 1/λ-scaled " *
+        "δ-Hessian); callers fall back to BHHH",
+    )
     N_NONδ = (model.K + 1) * model.Dn + 2
     @assert size(H, 1) == size(H, 2) == N_NONδ
     Kx = model.K
@@ -1494,8 +1554,9 @@ share_matrix(model, work, params, dealer_uid, t) → Matrix{Float32}
 `N_d × N_d` Jacobian of expected demand w.r.t. standardized prices for `dealer_uid` in quarter `t`.
 
   J[i, j] = ∂E[demand_i] / ∂price'_j
-          = Σ_z M_z · α_jz · P_i(z) · (1_{i=j} - P_j(z))
-          where α_jz = Σ_d Πp[d] · D_z[d] + mean_α[body class of j].
+          = Σ_z M_z · α_jz · P_i(z) · (1_{i=j}/λ - c_z · P_j(z))
+          where α_jz = Σ_d Πp[d] · D_z[d] + mean_α[body class of j]
+          and c_z = 1 + (1 - λ)/(λ · s_in(z)) (nested logit; λ = 1 gives c_z = 1).
 """
 function share_matrix(
     model::DemandModel, work::DemandWork, params::AbstractVector{Float32},
@@ -1507,6 +1568,7 @@ function share_matrix(
 
     idx = param_indices(model)
     Πp = view(params, idx.i_Πp)
+    λ = params[only(idx.i_λ)]
     Z = model.Z
     Dn = model.Dn
     α = Vector{Float32}(undef, Z)
@@ -1519,13 +1581,17 @@ function share_matrix(
     end
     b = Float32[mean_α[body_index(model.product_info[i])] for i in δ_idxs]
 
+    Mc = Float32[
+        model.M_zs[z] * (1.0f0 + (1.0f0 - λ) / (λ * max(work.inside_sum[bi, z], 1.0f-30)))
+        for z in 1:Z
+    ]
     P = work.U_blocks[bi]
     P_d = P[k_locals, :]
     αP = P_d .* (reshape(α, 1, Z) .+ b)
-    PdM = P_d .* reshape(model.M_zs, 1, Z)
+    PdM = P_d .* reshape(Mc, 1, Z)
     J = -PdM * αP'
-    # Diag correction = Σ_z M_z · α_iz · P_d[i, z] — batch all N_d as one gemv.
-    diag_corr = αP * model.M_zs
+    # Diag correction = Σ_z M_z · α_iz · P_d[i, z] / λ — batch all N_d as one gemv.
+    diag_corr = (αP * model.M_zs) ./ λ
     @inbounds for i in 1:N_d
         J[i, i] += diag_corr[i]
     end
@@ -1581,6 +1647,7 @@ mutable struct Counterfactual{TRegout, TFirstStage, THausman}
     Πᵦ::Matrix{Float32}                         # Dn × K
     Πp::Vector{Float32}
     η::Vector{Float32}
+    λ::Float32                                       # nesting parameter (1 = plain logit)
     β_price::NTuple{4, Float32}                      # mean price slope by body class
     regout::TRegout                                 # FixedEffectModels regression (loaded from JLD2)
     first_stage::TFirstStage
@@ -1619,6 +1686,7 @@ function Counterfactual(
     Πᵦ = reshape(Vector{Float32}(params[i.i_Πᵦ]), model.Dn, model.K)
     Πp = Vector{Float32}(params[i.i_Πp])
     η = Vector{Float32}(params[i.i_η])
+    λ = Float32(params[only(i.i_λ)])
 
     decomp = JLD2.load_object(decomp_path)
     regout = decomp.regout
@@ -1639,7 +1707,7 @@ function Counterfactual(
     hausman_fn_ = isnothing(hausman_fn) ? default_hausman_fn(model) : hausman_fn
 
     cf = Counterfactual(
-        model, work, δ, Πᵦ, Πp, η,
+        model, work, δ, Πᵦ, Πp, η, λ,
         β_price, regout, first_stage, J_t_lookup, hausman_fn_,
         trues(model.n_blocks),
     )
@@ -1654,7 +1722,7 @@ Called lazily by the read-only accessors (expected_demand / share_matrix / foc_r
 function refresh!(cf::Counterfactual)
     any(cf.dirty_blocks) || return cf
     blocks = findall(cf.dirty_blocks)
-    forward_pass!(cf.work, cf.model, cf.δ, cf.Πᵦ, cf.Πp, cf.η; blocks)
+    forward_pass!(cf.work, cf.model, cf.δ, cf.Πᵦ, cf.Πp, cf.η, cf.λ; blocks)
     fill!(cf.dirty_blocks, false)
     return cf
 end
@@ -1809,13 +1877,13 @@ function foc_residual(
 end
 
 # Rebuild a flat params vector from cf's unpacked pieces. Used by share_matrix / foc_residual
-# which still take a `params` view in the low-level API (they only read i_Πp).
+# which still take a `params` view in the low-level API (they only read i_Πp and i_λ).
 function _full_params(cf::Counterfactual)
     i = param_indices(cf.model)
     n_total = i.i_η[end]
     out = Vector{Float32}(undef, n_total)
     # δ may have grown past model.N (ModelAdd); the i.i_δ range only covers 1:N, which is fine
-    # — share_matrix / foc_residual only read i_Πp anyway.
+    # — share_matrix / foc_residual only read i_Πp and i_λ anyway.
     @inbounds for k in 1:length(i.i_δ)
         out[i.i_δ[k]] = cf.δ[k]
     end
@@ -1826,6 +1894,7 @@ function _full_params(cf::Counterfactual)
     @inbounds for k in eachindex(i.i_Πp)
         out[i.i_Πp[k]] = cf.Πp[k]
     end
+    out[only(i.i_λ)] = cf.λ
     out[i.i_η[1]] = cf.η[1]
     out[i.i_η[2]] = cf.η[2]
     return out

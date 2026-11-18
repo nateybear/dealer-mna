@@ -61,12 +61,14 @@ n_demographics(_) = length(DEMOGRAPHIC_ATTRIBUTES)
 n_product_attributes(_) = length(PRODUCT_ATTRIBUTES)
 n_demo_product_params(x) = n_demographics(x) * n_product_attributes(x)
 n_demo_price_params(x) = n_demographics(x)
+n_nest_params(_) = 1
 n_dist_params(_) = 2
 
 const ORDER = [
     n_delta,
     n_demo_product_params,
     n_demo_price_params,
+    n_nest_params,
     n_dist_params,
 ]
 
@@ -109,6 +111,9 @@ function initial_parameters(model::DemandModel)
 
     # Πp (4 demographics): uniform -0.5; after standardization Πp[d]·D'_z[d]·p' is O(1).
     out[@indexof demo_price_params out model] .= -0.5f0
+
+    # λ = 1 is plain logit.
+    out[@indexof nest_params out model] .= 0.9f0
 
     return out
 end

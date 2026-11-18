@@ -140,11 +140,15 @@ end
 # Misc helpers
 # -------------------------------------------------------------------------------------------------
 
-# Bounds pre-screen — identical to MPI script. Cheap rejection of obviously bad proposals.
+# Nesting parameter λ ∈ [LB_λ, 1]; λ → 0 makes V/λ blow up in Float32.
+const LB_λ = 0.05
+
+# Bounds pre-screen. Cheap rejection of obviously bad proposals. π ends with (λ, η₁, η₂).
 function bounds_violated(π)
     η_dist = π[end]
     η_baseline = π[end - 1]
-    return abs(η_dist) > 5 || abs(η_baseline) > 10 ||
+    λ = π[end - 2]
+    return abs(η_dist) > 5 || abs(η_baseline) > 10 || !(LB_λ ≤ λ ≤ 1) ||
            any(>(15), abs.(π[1:(end - 2)]))
 end
 
@@ -690,8 +694,8 @@ function optimize_knitro(state::EstimationState, π₀, cmdargs)
         return optimize_knitro_full(state, cmdargs)
     end
     N = length(state.i_nonδ)
-    lb = vcat(fill(-15.0, N - 2), -10.0, -5.0)
-    ub = vcat(fill(15.0, N - 2), 10.0, 5.0)
+    lb = vcat(fill(-15.0, N - 3), LB_λ, -10.0, -5.0)
+    ub = vcat(fill(15.0, N - 3), 1.0, 10.0, 5.0)
 
     m = JuMP.Model(KNITRO.Optimizer)
     JuMP.@variable(m, lb[i] <= x[i = 1:N] <= ub[i], start = Float64(π₀[i]))
@@ -744,6 +748,9 @@ function optimize_knitro_full(state::EstimationState, cmdargs)
     ub[i_nonδ[end - 1]] = 10.0
     lb[i_nonδ[end]] = -5.0
     ub[i_nonδ[end]] = 5.0
+    i_λ = only(param_indices(state.model).i_λ)
+    lb[i_λ] = LB_λ
+    ub[i_λ] = 1.0
 
     kc = KNITRO.KN_new()
     local nStatus, obj_val, x_opt
