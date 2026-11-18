@@ -25,8 +25,8 @@ function (@main)(_)
 
         @info "WTP constants" β_price η1 η2 dist_scale price_scale Δd_std
 
-        # α_z per zip (marginal utility of standardized price). Matches the
-        # expression inside share_matrix at src/demand/dense.jl:1315-1319.
+        # Demographic part of the price coefficient per zip; a purchase's α adds the mean slope of
+        # its body class, as in share_matrix.
         z_lookup = Dict(z => i for (i, z) in enumerate(model.zips))
         Dn, Z = size(model.D_dense)
         α_by_zip = Vector{Float32}(undef, Z)
@@ -35,12 +35,19 @@ function (@main)(_)
             for d in 1:Dn
                 s += Πp[d] * model.D_dense[d, z]
             end
-            α_by_zip[z] = β_price + s
+            α_by_zip[z] = s
         end
+        body_by_model = Dict(
+            j[1:3] => Demand.body_index(model.product_info[idx]) for
+            ((_, j, _), idx) in pairs(model.product_lookup.tjf)
+        )
         # Sanity: α should be strictly negative if the estimated model is well-behaved.
-        n_nonneg_α = count(≥(0.0f0), α_by_zip)
-        n_nonneg_α > 0 &&
-            @warn "Non-negative α_z for some zips; those buyers will be dropped" n_nonneg_α n_zips = Z
+        n_nonneg_α = sum(count(≥(0.0f0), α_by_zip .+ β) for β in β_price)
+        n_nonneg_α > 0 && @warn(
+            "Non-negative α for some (zip, body class); those buyers will be dropped",
+            n_nonneg_α,
+            n_zips = Z,
+        )
 
         fords = read_arrow(snakemake.input["fords"])
         n_all = nrow(fords)
@@ -50,17 +57,19 @@ function (@main)(_)
             fords,
             :ownrzpcd => ByRow(∈(keys(z_lookup))),
             :dealer_uid => ByRow(∈(dealer_uids_in_model)),
+            [:make, :model, :model_year] =>
+                ByRow((mk, md, my) -> haskey(body_by_model, (mk, md, my))),
         )
         n_kept = nrow(fords_kept)
         n_dropped = n_all - n_kept
         n_dropped > 0 &&
-            @warn "Dropped fords rows outside the demand-model zip/dealer support" n_dropped n_all n_kept
+            @warn "Dropped fords rows outside the demand-model zip/dealer/model support" n_dropped n_all n_kept
 
         wtp_dollars_per_mile = Float32[]
         sizehint!(wtp_dollars_per_mile, n_kept)
         for r in eachrow(fords_kept)
             z_idx = z_lookup[r.ownrzpcd]
-            α = α_by_zip[z_idx]
+            α = α_by_zip[z_idx] + β_price[body_by_model[(r.make, r.model, r.model_year)]]
             α ≥ 0 && continue
             d_std = Float32(model.distances[r.ownrzpcd, r.dealer_uid])
             E_now = exp(η1 + η2 * d_std)

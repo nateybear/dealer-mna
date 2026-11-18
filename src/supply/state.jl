@@ -21,9 +21,9 @@ const SIM_SIZE = 100
 # drift.
 const COORDINATED_SHIFTS = Float32[0.75, 0.9, 0.95, 0.98, 0.99, 1.01, 1.02, 1.05, 1.1, 1.25]
 
-# Candidate dealer capacities θ_f = κ·Q̄_f (Q̄_f = median observed quarterly sales). Ascending:
-# aggregate_overload! stops at the first κ with no overload.
-const CAPACITY_MULTIPLES = Float32.(0.7:0.05:1.2)
+# Candidate dealer capacities θ_f = κ·Q̄_f (Q̄_f = 75th percentile of observed quarterly sales).
+# Ascending: aggregate_overload! stops at the first κ with no overload.
+const CAPACITY_MULTIPLES = Float32.(1.0:0.25:2.75)
 
 """
     tf_to_j_lookup(model_or_cf) → OrderedDict{(QuarterKey, UUID), Vector{VehicleKey}}

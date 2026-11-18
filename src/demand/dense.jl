@@ -946,6 +946,30 @@ function _body_flags_for_vehicle(model::DemandModel, vehicle::VehicleKey)
     return (is_coupe, is_suv, is_pickup, is_sedan)
 end
 
+# Position of a product's body class in PRODUCT_ATTRIBUTES; the δ regression has one price slope
+# per class, so every product must carry exactly one flag.
+function body_index(info)
+    n = info.is_coupe + info.is_suv + info.is_pickup + info.is_sedan
+    n == 1 || error(
+        "Expected exactly one body flag, got coupe=$(info.is_coupe) suv=$(info.is_suv) " *
+        "pickup=$(info.is_pickup) sedan=$(info.is_sedan)",
+    )
+    return info.is_coupe ? 1 : info.is_suv ? 2 : info.is_pickup ? 3 : 4
+end
+
+price_coefname(b::Integer) = "price_" * chopprefix(string(PRODUCT_ATTRIBUTES[b]), "is_")
+
+# Price and its Hausman instrument split by body class — the δ regression's price terms.
+function add_body_price_columns!(df::AbstractDataFrame, body::AbstractVector{<:Integer})
+    for b in eachindex(PRODUCT_ATTRIBUTES)
+        on = body .== b
+        df[!, price_coefname(b)] = ifelse.(on, Float64.(df.price), 0.0)
+        df[!, replace(price_coefname(b), "price_" => "price_hausman_")] =
+            ifelse.(on, Float64.(df.price_hausman), 0.0)
+    end
+    return df
+end
+
 # ---- apply!(::PriceMultiply, ...) ----
 
 # Fast path when all three filters are set (single product): returns a tuple-backed
@@ -958,10 +982,12 @@ end
 apply!(tweak::PriceMultiply, model, δ; β_price) → undo handle (or `missing` if no match)
 
 Multiplies the standardized price in `model.X_blocks[bi][end, k]` by `tweak.by` for every
-(t, j, f) matching the tweak's filters, and shifts `δ[δ_idx]` by `β_price · old_price · (by − 1)`.
+(t, j, f) matching the tweak's filters, and shifts `δ[δ_idx]` by `β · old_price · (by − 1)`, with
+β the product's body-class slope from `β_price`.
 """
 function apply!(
-    tweak::PriceMultiply, model::DemandModel, δ::AbstractVector{Float32}; β_price::Float32
+    tweak::PriceMultiply, model::DemandModel, δ::AbstractVector{Float32};
+    β_price::NTuple{4, Float32},
 )
     K = model.K
     by = tweak.by
@@ -976,7 +1002,7 @@ function apply!(
         old_p = model.X_blocks[bi][K + 1, k_local]
         new_p = old_p * by
         model.X_blocks[bi][K + 1, k_local] = new_p
-        offset = β_price * old_p * (by - 1.0f0)
+        offset = β_price[body_index(model.product_info[δ_idx])] * old_p * (by - 1.0f0)
         δ[δ_idx] += offset
         return (;
             kind = :price_multiply,
@@ -999,7 +1025,7 @@ function apply!(
         old_prices[i] = old_p
         new_p = old_p * by
         model.X_blocks[bi][K + 1, k_local] = new_p
-        offset = β_price * old_p * (by - 1.0f0)
+        offset = β_price[body_index(model.product_info[δ_idxs[i]])] * old_p * (by - 1.0f0)
         δ_offsets[i] = offset
         δ[δ_idxs[i]] += offset
     end
@@ -1020,10 +1046,11 @@ apply!(tweak::PriceChange, model, δ; β_price) → undo handle (or `missing` if
 
 Wholesale-sets the standardized price in `model.X_blocks[bi][end, k]` to `tweak.price` for
 every (t, j, f) matching the tweak's filters, and shifts `δ[δ_idx]` by
-`β_price · (tweak.price − old_price)`.
+`β · (tweak.price − old_price)`, with β the product's body-class slope from `β_price`.
 """
 function apply!(
-    tweak::PriceChange, model::DemandModel, δ::AbstractVector{Float32}; β_price::Float32
+    tweak::PriceChange, model::DemandModel, δ::AbstractVector{Float32};
+    β_price::NTuple{4, Float32},
 )
     K = model.K
     new_p = tweak.price
@@ -1037,7 +1064,7 @@ function apply!(
         k_local = Int32(loc[2])
         old_p = model.X_blocks[bi][K + 1, k_local]
         model.X_blocks[bi][K + 1, k_local] = new_p
-        offset = β_price * (new_p - old_p)
+        offset = β_price[body_index(model.product_info[δ_idx])] * (new_p - old_p)
         δ[δ_idx] += offset
         return (;
             kind = :price_change,
@@ -1059,7 +1086,7 @@ function apply!(
         old_p = model.X_blocks[bi][K + 1, k_local]
         old_prices[i] = old_p
         model.X_blocks[bi][K + 1, k_local] = new_p
-        offset = β_price * (new_p - old_p)
+        offset = β_price[body_index(model.product_info[δ_idxs[i]])] * (new_p - old_p)
         δ_offsets[i] = offset
         δ[δ_idxs[i]] += offset
     end
@@ -1209,6 +1236,8 @@ function apply!(
         tweak.price
     end
 
+    is_coupe, is_suv, is_pickup, is_sedan = _body_flags_for_vehicle(model, tweak.vehicle)
+
     # δ prediction: skipped when the caller (BBL) will run `sweep_δ!` right
     # after and overwrite this value — see the `predict_delta` field docstring.
     # Sentinel is 0.0f0 (not `_MASK_DELETE_δ`) because forward_pass may still
@@ -1224,6 +1253,7 @@ function apply!(
             year = [year_val],
             quarter = [quarter_val],
         )
+        add_body_price_columns!(row_df, [body_index((; is_coupe, is_suv, is_pickup, is_sedan))])
         δ_hat_raw = pred_regout(regout, row_df)
         if ismissing(δ_hat_raw) || ismissing(first(δ_hat_raw))
             @warn "ModelAdd: regout predict returned missing for $tjf_key; no-op"
@@ -1237,7 +1267,6 @@ function apply!(
     bi = _block_index_for_quarter(model, tweak.quarter)
     K = model.K
     Z = model.Z
-    is_coupe, is_suv, is_pickup, is_sedan = _body_flags_for_vehicle(model, tweak.vehicle)
 
     new_X_col = Vector{Float32}(undef, K + 1)
     body_flags = (is_coupe, is_suv, is_pickup, is_sedan)
@@ -1465,14 +1494,14 @@ share_matrix(model, work, params, dealer_uid, t) → Matrix{Float32}
 `N_d × N_d` Jacobian of expected demand w.r.t. standardized prices for `dealer_uid` in quarter `t`.
 
   J[i, j] = ∂E[demand_i] / ∂price'_j
-          = Σ_z M_z · α_z · P_i(z) · (1_{i=j} - P_j(z))
-          where α_z = Σ_d Πp[d] · D_z[d].
+          = Σ_z M_z · α_jz · P_i(z) · (1_{i=j} - P_j(z))
+          where α_jz = Σ_d Πp[d] · D_z[d] + mean_α[body class of j].
 """
 function share_matrix(
     model::DemandModel, work::DemandWork, params::AbstractVector{Float32},
-    dealer_uid::UUID, t::QuarterKey; mean_α,
+    dealer_uid::UUID, t::QuarterKey; mean_α::NTuple{4, Float32},
 )
-    bi, k_locals, _ = dealer_block_locals(model, dealer_uid, t)
+    bi, k_locals, δ_idxs = dealer_block_locals(model, dealer_uid, t)
     N_d = length(k_locals)
     N_d == 0 && return Matrix{Float32}(undef, 0, 0)
 
@@ -1486,16 +1515,17 @@ function share_matrix(
         @simd for d in 1:Dn
             s += Πp[d] * model.D_dense[d, z]
         end
-        α[z] = s + mean_α
+        α[z] = s
     end
+    b = Float32[mean_α[body_index(model.product_info[i])] for i in δ_idxs]
 
     P = work.U_blocks[bi]
     P_d = P[k_locals, :]
-    w = model.M_zs .* α
-    PdW = P_d .* reshape(w, 1, Z)
-    J = -PdW * P_d'
-    # Diag correction = Σ_z w[z] · P_d[i, z] — batch all N_d as one gemv.
-    diag_corr = P_d * w
+    αP = P_d .* (reshape(α, 1, Z) .+ b)
+    PdM = P_d .* reshape(model.M_zs, 1, Z)
+    J = -PdM * αP'
+    # Diag correction = Σ_z M_z · α_iz · P_d[i, z] — batch all N_d as one gemv.
+    diag_corr = αP * model.M_zs
     @inbounds for i in 1:N_d
         J[i, i] += diag_corr[i]
     end
@@ -1551,8 +1581,8 @@ mutable struct Counterfactual{TRegout, TFirstStage, THausman}
     Πᵦ::Matrix{Float32}                         # Dn × K
     Πp::Vector{Float32}
     η::Vector{Float32}
-    β_price::Float32
-    regout::TRegout                                  # FixedEffectModels regression (loaded from JLD2)
+    β_price::NTuple{4, Float32}                      # mean price slope by body class
+    regout::TRegout                                 # FixedEffectModels regression (loaded from JLD2)
     first_stage::TFirstStage
     J_t_lookup::Dict{QuarterKey, Int}
     hausman_fn::THausman
@@ -1594,9 +1624,14 @@ function Counterfactual(
     regout = decomp.regout
     first_stage = decomp.first_stage
     df = decomp.df
-    β_idx = findfirst(==("price"), coefnames(regout))
-    isnothing(β_idx) && error("Counterfactual: no 'price' coefficient in regout")
-    β_price = Float32(coef(regout)[β_idx])
+    β_price = ntuple(length(PRODUCT_ATTRIBUTES)) do b
+        β_idx = findfirst(==(price_coefname(b)), coefnames(regout))
+        isnothing(β_idx) && error(
+            "Counterfactual: no '$(price_coefname(b))' coefficient in regout " *
+            "(have $(coefnames(regout))); rebuild data/delta_decomposition_regout.jld2",
+        )
+        Float32(coef(regout)[β_idx])
+    end
     J_t_lookup = Dict{QuarterKey, Int}(
         (Int64(row.year), Int64(row.quarter)) => Int(row.J)
         for row in eachrow(unique(select(df, :year, :quarter, :J)))
@@ -1694,6 +1729,7 @@ function sweep_δ!(cf::Counterfactual, t::QuarterKey)
     δ_idxs = Int32[]
     prices = Float64[]
     p_hausmans = Float64[]
+    bodies = Int[]
     vehicleids = String[]
     dealer_uids = UUID[]
     for (tjf_key, idx) in pairs(model.product_lookup.tjf)
@@ -1705,6 +1741,7 @@ function sweep_δ!(cf::Counterfactual, t::QuarterKey)
         push!(δ_idxs, idx)
         push!(prices, Float64(model.X_blocks[bi][K + 1, Int(k_local)]))
         push!(p_hausmans, Float64(model.product_info[idx].p_hausman))
+        push!(bodies, body_index(model.product_info[idx]))
         push!(vehicleids, string(model_str, "_", model_year, "_", trim_rank))
         push!(dealer_uids, dealer_uid)
     end
@@ -1720,6 +1757,7 @@ function sweep_δ!(cf::Counterfactual, t::QuarterKey)
         year = fill(year_val, n),
         quarter = fill(quarter_val, n),
     )
+    add_body_price_columns!(df, bodies)
     δ_hats = pred_regout(cf.regout, df)
     @inbounds for i in 1:n
         cf.δ[δ_idxs[i]] = Float32(δ_hats[i])

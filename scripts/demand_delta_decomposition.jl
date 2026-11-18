@@ -1,5 +1,6 @@
 # Flatten the fitted δ vector into a DataFrame with the (dealer, vehicle, quarter, price, price
-# instrument) tuple that defines each mean-utility row, then regress δ on price (Hausman IV).
+# instrument) tuple that defines each mean-utility row, then regress δ on price by body class
+# (Hausman IV, instrument also split by class).
 
 using DealerMnA
 import .Demand: DemandModel, n_delta
@@ -26,6 +27,7 @@ function (@main)(_)
         price = Vector{Float32}(undef, N)
         price_hausman = Vector{Float32}(undef, N)
         count = Vector{Int64}(undef, N)
+        body = Vector{Int}(undef, N)
 
         # product_lookup.tjf maps each (t, j, f) triple to its flat Int32 product index.
         # The OrderedDict iterates in insertion order, which matches the 1:N δ ordering.
@@ -46,6 +48,7 @@ function (@main)(_)
             price[i] = info.p
             price_hausman[i] = info.p_hausman
             count[i] = info.n
+            body[i] = Demand.body_index(info)
         end
 
         df = DataFrame(
@@ -66,8 +69,10 @@ function (@main)(_)
         df.vehicleid = string.(df.model, "_", df.model_year, "_", df.trim_rank)
 
         transform!(groupby(df, [:year, :quarter]), nrow => :J)
+        Demand.add_body_price_columns!(df, body)
 
-        regout = reg(df, @formula(delta ~ (price ~ price_hausman) + log(J) + fe(vehicleid) + fe(dealer_uid) + fe(year) + fe(quarter)), Vcov.robust(), save = :all)
+        regout = reg(df, @formula(delta ~ (price_coupe + price_suv + price_pickup + price_sedan ~ price_hausman_coupe + price_hausman_suv + price_hausman_pickup + price_hausman_sedan) + log(J) + fe(vehicleid) + fe(dealer_uid) + fe(year) + fe(quarter)), Vcov.robust(), save = :all)
+        @info "δ regression" regout
 
         first_stage = reg(df, @formula(price ~ price_hausman + log(J) + fe(vehicleid) + fe(dealer_uid) + fe(year) + fe(quarter)), Vcov.robust(), save = :fe)
 

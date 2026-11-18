@@ -39,8 +39,11 @@ function median_own_price_elasticity(model, params)
 
     idx = Demand.param_indices(model)
     Πp = view(params, idx.i_Πp)
-    decomp = JLD2.load_object(snakemake.input["delta_decomp"])
-    β_price = Float32(coef(decomp.regout)[findfirst(==("price"), coefnames(decomp.regout))])
+    regout = JLD2.load_object(snakemake.input["delta_decomp"]).regout
+    β_price = [
+        Float32(coef(regout)[findfirst(==(Demand.price_coefname(b)), coefnames(regout))]) for
+        b in eachindex(Demand.PRODUCT_ATTRIBUTES)
+    ]
 
     Dn, Z = size(model.D_dense)
     α = Vector{Float32}(undef, Z)
@@ -49,7 +52,7 @@ function median_own_price_elasticity(model, params)
         for d in 1:Dn
             s += Πp[d] * model.D_dense[d, z]
         end
-        α[z] = β_price + s
+        α[z] = s
     end
     M = model.M_zs
     price_scale = model.price_scale
@@ -61,13 +64,15 @@ function median_own_price_elasticity(model, params)
         Nb, Zb = size(U)
         for k in 1:Nb
             global_idx = model.block_param_idxs[bi][k]
-            p_raw = Float32(model.product_info[global_idx].p) * price_scale
+            info = model.product_info[global_idx]
+            p_raw = Float32(info.p) * price_scale
+            β = β_price[Demand.body_index(info)]
             q = 0.0f0
             dq = 0.0f0
             @inbounds for z in 1:Zb
                 s_jz = U[k, z]
                 q += M[z] * s_jz
-                dq += M[z] * s_jz * (1 - s_jz) * α[z]
+                dq += M[z] * s_jz * (1 - s_jz) * (α[z] + β)
             end
             q > 0 || continue
             push!(eps, Float32(dq * p_raw / (price_scale * q)))
@@ -127,16 +132,18 @@ function (@main)(_)
         println(io, "           & ", join(price_se, " & "), " \\\\")
         println(io, "     \\midrule")
 
-        β_est, β_se = reg_lookup["price"]
-        β_pv = reg_pval(β_est, β_se)
         η1_est, η1_se, η1_pv = se_lookup["η_baseline"]
-        println(io,
-            "     Mean Price Effect & ", fmt_est(β_est, β_pv),
-            " & & \$\\eta_1\$ (Dist. Baseline) & ", fmt_est(η1_est, η1_pv), " \\\\",
-        )
-        println(io,
-            "     & ", fmt_se(β_se), " & & & ", fmt_se(η1_se), " \\\\[0.5em]",
-        )
+        for (i, p) in enumerate(PRODUCT_ORDER)
+            β_est, β_se = reg_lookup["price_" * chopprefix(p, "is_")]
+            β_pv = reg_pval(β_est, β_se)
+            η_est = i == 1 ? " & \$\\eta_1\$ (Dist. Baseline) & " * fmt_est(η1_est, η1_pv) : ""
+            η_se = i == 1 ? " & & " * fmt_se(η1_se) : ""
+            println(io,
+                "     Mean Price Effect: ", PRODUCT_LABELS[p], " & ", fmt_est(β_est, β_pv),
+                " &", η_est, " \\\\",
+            )
+            println(io, "     & ", fmt_se(β_se), " &", η_se, " \\\\[0.5em]")
+        end
 
         γ_est, γ_se = reg_lookup["log(J)"]
         γ_pv = reg_pval(γ_est, γ_se)

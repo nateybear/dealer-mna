@@ -3,7 +3,7 @@ using .Demand
 
 using SparseArrays
 using Mmap
-using Statistics: median, quantile
+using Statistics: quantile
 
 import Lazy: iterated
 
@@ -62,9 +62,9 @@ function BBLIndex(dealers::AbstractVector{UUID}, usable_vks, capacity, capacity_
     )
 end
 
-# Q̄_f = dealer's median quarterly sales of BBL-universe products over T (quarters with sales),
-# aligned to `dealers`. obj_weights[k] = Σ_ft ½·max((q_ft − κ_k·Q̄_f)/Q̄_f, 0)² / Σ_ft q_ft: the
-# per-unit average overload at observed sales.
+# Q̄_f = 75th percentile of the dealer's quarterly sales of BBL-universe products over T (quarters
+# with sales), aligned to `dealers`. obj_weights[k] = Σ_ft ½·max((q_ft − κ_k·Q̄_f)/Q̄_f, 0)² /
+# Σ_ft q_ft: the per-unit average overload at observed sales.
 function dealer_capacity(fords, dealers, usable_vks, T)
     dealer_set = Set(dealers)
     T_set = Set(T)
@@ -80,7 +80,7 @@ function dealer_capacity(fords, dealers, usable_vks, T)
     end
     typical = Dict(
         r.dealer_uid => r.q for
-        r in eachrow(combine(groupby(q_ft, :dealer_uid), :q => median => :q))
+        r in eachrow(combine(groupby(q_ft, :dealer_uid), :q => (q -> quantile(q, 0.75)) => :q))
     )
     missing_dealers = [f for f in dealers if !haskey(typical, f)]
     isempty(missing_dealers) || error(
