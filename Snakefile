@@ -1202,6 +1202,7 @@ rule data_bbl_simulation:
         price_table="data/price_table.arrow",
     output:
         sim="data/bbl_simulation/seed_{seed}.jld2",
+        branches="data/bbl_simulation/branches_seed_{seed}.jld2",
     log:
         "logs/bbl_forward_simulation_seed_{seed}.log",
     run:
@@ -1467,6 +1468,7 @@ rule data_bbl_matrix:
         price_densities="data/price_densities.jld2",
         state_transition="data/state_transition.jld2",
         simulations=expand("data/bbl_simulation/seed_{seed}.jld2", seed=BBL_SEEDS),
+        branches=expand("data/bbl_simulation/branches_seed_{seed}.jld2", seed=BBL_SEEDS),
         fords="data/arrow/fords.arrow",
     output:
         matrix="data/bbl_matrix.jld2",

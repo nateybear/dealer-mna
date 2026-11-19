@@ -3,7 +3,6 @@ using .Demand
 using XGBoost
 using LoggingExtras
 using LinearAlgebra
-using LogExpFunctions: logistic
 using Statistics: mean
 using StatsBase: quantile
 using Random
@@ -20,7 +19,6 @@ function (@main)(_)
     snakemake!()
     with_logging() do
         seed = parse(Int, snakemake.wildcards["seed"])
-        rng = MersenneTwister(seed)
         state_locked = get(snakemake.params, "state_locked", false)
         @info "BBL forward simulation" seed state_locked
 
@@ -35,7 +33,7 @@ function (@main)(_)
             model, params; decomp_path = snakemake.input["delta_decomp"]
         )
         compliance_fits = JLD2.load_object(snakemake.input["compliance_fits"])
-        sales_bytes, τ_sales = JLD2.load_object(snakemake.input["sales_targets"])
+        sales_bytes, _ = JLD2.load_object(snakemake.input["sales_targets"])
         price_densities = JLD2.load_object(snakemake.input["price_densities"])
         state_transition = JLD2.load_object(snakemake.input["state_transition"])
         compliance_arrow = read_arrow(snakemake.input["compliance"])
@@ -265,6 +263,13 @@ function (@main)(_)
         filter!(kv -> haskey(group_to_vks, kv.first), pbase_boosters)
         filter!(kv -> haskey(group_to_vks, kv.first), rho_boosters)
 
+        pb = Supply.PolicyBoosters(
+            sales_booster, pbase_boosters, rho_boosters, group_to_vks, price_boosters,
+            st_int_boosters, st_own_fo_boosters, st_own_so_boosters,
+            st_cross_fo_boosters, st_cross_int_boosters,
+            products, prod_index, ncols_state,
+        )
+
         # Persistent eviction of non-usable products so cf.model's live universe
         # matches the sim's sampling universe. Without this, unusable-but-FE-
         # identifiable products (in `intermed` but not `usable_vks`) survive the
@@ -306,7 +311,7 @@ function (@main)(_)
         iota_prev = Dict{UUID, Bool}()
         for f in dealers
             state_prev[f] = Vector{Float32}(view(state_matrix_obs, state_lookup[(t₀, f)], :))
-            iota_prev[f] = rand(rng) < get(p_compliant_t0, f, 0.5f0)
+            iota_prev[f] = get(p_compliant_t0, f, 0.5f0) ≥ 0.5f0
         end
 
         # state_locked diagnostic: pin s_prev to empirical state at (t_prev, f).
@@ -365,7 +370,6 @@ function (@main)(_)
             @info "Simulating period" t
 
             phi_by_dealer = Dict{UUID, Float32}()
-            log_phi_by_dealer = Dict{UUID, Float32}()
             state_expected_by_dealer = Dict{UUID, Vector{Float32}}()
             assortment_by_dealer = Dict{UUID, Vector{VehicleKey}}()
             prices_by_dealer = Dict{UUID, Vector{Float32}}()  # parallel to assortment
@@ -378,166 +382,18 @@ function (@main)(_)
                 else
                     state_prev[f]
                 end
-                ι_prev_f32 = Float32(iota_prev[f])
+                draw = Supply.draw_policy(pb, seed, t, f, s_prev, iota_prev[f])
+                phi_by_dealer[f] = draw.phi
+                assortment_by_dealer[f] = draw.assortment
+                state_expected_by_dealer[f] = draw.state_expected
+                prices_by_dealer[f] = draw.prices
 
-                # Sales target φ_t = f(state_{t-1}, quarter_of_year(t), ι_{t-1}).
-                # Column order matches X_agg in compliance_estimation.jl.
-                x_st = reshape(vcat(s_prev, Float32(t[2]), ι_prev_f32), 1, :)
-                dm_st = XGBoost.DMatrix(x_st)
-                log_phi = only(XGBoost.predict(sales_booster, dm_st; margin = true))
-                finalize(dm_st)
-                log_phi_by_dealer[f] = Float32(log_phi)
-                phi_by_dealer[f] = Float32(exp(log_phi))
-
-                # Sample assortment_t: iterate over compliance groups
-                dm_state = XGBoost.DMatrix(reshape(s_prev, 1, :))
-                new_assortment = VehicleKey[]
-                for (group, pb_boost) in pbase_boosters
-                    isrelevant_model = let y = group[2]
-                        if t[1] == y
-                            true
-                        elseif t[1] == y - 1
-                            t[2] == 4
-                        elseif t[1] == y + 1
-                            t[2] == 1
-                        else
-                            false
-                        end
-                    end
-                    isrelevant_model || continue
-                    p_base = clamp(
-                        logistic(only(XGBoost.predict(pb_boost, dm_state; margin = true))),
-                        1e-8, 1 - 1e-8,
-                    )
-                    is_sold = if iota_prev[f]
-                        ρ̃ = if haskey(rho_boosters, group)
-                            clamp(
-                                Supply.rho_from_margin(
-                                    only(
-                                        XGBoost.predict(
-                                            rho_boosters[group], dm_state; margin = true
-                                        ),
-                                    ),
-                                ),
-                                Float32(Supply.RHO_MIN), 1 - 1.0f-8,
-                            )
-                        else
-                            Float32(Supply.RHO_MIN)
-                        end
-                        (rand(rng) < p_base) || (rand(rng) < ρ̃)
-                    else
-                        rand(rng) < p_base
-                    end
-                    if is_sold
-                        for vk in get(group_to_vks, group, VehicleKey[])
-                            push!(new_assortment, vk)
-                        end
-                    end
-                end
-                finalize(dm_state)
-                assortment_by_dealer[f] = new_assortment
-
-                # Expected state s_t via quantile-grid transition boosters.
-                function draw_scalar_grid(grid, dm)
-                    weights_idxs = Supply.sample_from_quantile_grid(rng)
-                    return sum(
-                        w * only(XGBoost.predict(grid[i], dm; margin = true)) for
-                        (w, i) in weights_idxs
-                    )
-                end
-                state_exp_mat = fill(NaN32, J, Supply.state_matrix_width(J))
-                # X layout for state_transition: [s_prev, assortment_indicator]
-                # (+partner on cross). assortment_indicator[k] = 1 iff kept_vks[k]
-                # is in new_assortment.
-                x_prev_row = Vector{Float32}(undef, ncols_state + J)
-                @inbounds for i in 1:ncols_state
-                    x_prev_row[i] = s_prev[i]
-                end
-                @inbounds for k in 1:J
-                    x_prev_row[ncols_state + k] = 0.0f0
-                end
-                for vk in new_assortment
-                    x_prev_row[ncols_state + prod_index[vk]] = 1.0f0
-                end
-                dm_prev_row = XGBoost.DMatrix(reshape(x_prev_row, 1, :))
-                for vk in new_assortment
-                    j_idx = prod_index[vk]
-                    state_exp_mat[j_idx, Supply.intercept_col()] =
-                        draw_scalar_grid(st_int_boosters[vk], dm_prev_row)
-                    state_exp_mat[j_idx, Supply.firstorder_col(j_idx)] =
-                        draw_scalar_grid(st_own_fo_boosters[vk], dm_prev_row)
-                    state_exp_mat[j_idx, Supply.quadratic_col(J, j_idx)] =
-                        draw_scalar_grid(st_own_so_boosters[vk], dm_prev_row)
-                    haskey(st_cross_fo_boosters, vk) || continue
-                    haskey(st_cross_int_boosters, vk) || continue
-                    partners = Int[prod_index[vk2] for vk2 in new_assortment if vk2 != vk]
-                    isempty(partners) && continue
-                    X_cross = Matrix{Float32}(undef, length(partners), ncols_state + J + 1)
-                    for i in eachindex(partners)
-                        X_cross[i, 1:(ncols_state + J)] .= x_prev_row
-                        X_cross[i, end] = Float32(partners[i])
-                    end
-                    dm_cross = XGBoost.DMatrix(X_cross)
-                    cross_fo_grid = st_cross_fo_boosters[vk]
-                    cross_int_grid = st_cross_int_boosters[vk]
-                    for (i, k_idx) in enumerate(partners)
-                        state_exp_mat[j_idx, Supply.firstorder_col(k_idx)] =
-                            draw_scalar_grid(cross_fo_grid, view(dm_cross, i:i, :))
-                        state_exp_mat[j_idx, Supply.quadratic_col(J, k_idx)] =
-                            draw_scalar_grid(cross_int_grid, view(dm_cross, i:i, :))
-                    end
-                    finalize(dm_cross)
-                end
-                finalize(dm_prev_row)
-                state_expected_flat = reshape(state_exp_mat, :)
-                state_expected_by_dealer[f] = state_expected_flat
-
-                # Sample prices — quantile-grid density on (s_t_expected, log φ_t).
-                x_price_common = vcat(state_expected_flat, Float32(log_phi))
-                dm_price = XGBoost.DMatrix(reshape(x_price_common, 1, :))
-                drawn_prices = Vector{Float32}(undef, length(new_assortment))
-                for (i, vk) in enumerate(new_assortment)
-                    log_p = draw_scalar_grid(price_boosters[vk], dm_price)
-                    drawn_prices[i] = Float32(exp(log_p))
-                end
-                finalize(dm_price)
-                prices_by_dealer[f] = drawn_prices
-
-                # Apply diffs against OBSERVED assortment at (t, f). ModelAdd
-                # takes the drawn price directly (bypassing hausman_fn), which
-                # matters because (t, j, f) triples that ModelAdd creates
-                # aren't in training so the default hausman lookup would NaN
-                # out. Products present in obs get PriceChange; new products
-                # get ModelAdd(price=p); removed products get ModelDelete.
+                # Diff against the OBSERVED assortment at (t, f); the sweep below
+                # replaces ModelAdd's placeholder δ.
                 obs_at_t = VehicleKey[
                     vk for vk in get(intermed, (t, f), VehicleKey[]) if vk ∈ usable_vks
                 ]
-                obs_set = Set(obs_at_t)
-                for vk in setdiff(obs_at_t, new_assortment)
-                    apply!(cf, Demand.ModelDelete(vehicle = vk, quarter = t, dealer_uid = f))
-                end
-                for (i, vk) in enumerate(new_assortment)
-                    isnan(drawn_prices[i]) && continue
-                    p = drawn_prices[i]
-                    if vk in obs_set
-                        apply!(
-                            cf,
-                            Demand.PriceChange(
-                                vehicle = vk, quarter = t, dealer_uid = f, price = p
-                            ),
-                        )
-                    else
-                        # `predict_delta=false` skips pred_regout — sweep_δ!
-                        # below overwrites the sentinel with the real δ̂.
-                        apply!(
-                            cf,
-                            Demand.ModelAdd(
-                                vehicle = vk, quarter = t, dealer_uid = f,
-                                price = p, predict_delta = false,
-                            ),
-                        )
-                    end
-                end
+                Supply.apply_policy!(cf, f, t, obs_at_t, draw.assortment, draw.prices)
             end
 
             Demand.sweep_δ!(cf, t)
@@ -571,10 +427,8 @@ function (@main)(_)
                 end
 
                 q_vec = Vector{Float32}(expected_demand(cf, f, t))
-                q_tot = sum(q_vec)
                 φ_f = phi_by_dealer[f]
-                p_iota = logistic((q_tot - φ_f) / τ_sales)
-                new_iota = rand(rng) < p_iota
+                new_iota = sum(q_vec) ≥ φ_f
 
                 s_actual, pert_prices, pert_demands = Supply.residual_demand(
                     cf, f, t; return_draws = true, products = kept_vks
@@ -589,20 +443,7 @@ function (@main)(_)
                 perm = [findfirst(==(vk), assortment_by_dealer[f]) for vk in canonical]
                 obs_prices = prices_by_dealer[f][perm]
 
-                # Coordinated wide shifts: scale ALL prices for this (dealer,
-                # quarter) by α, read structural expected_demand under the shift.
-                # `expected_demand` returns in `tf_to_j_lookup(cf)` order, matching
-                # `canonical` / `obs_prices`.
-                coord_prices = Matrix{Float32}(undef, length(COORDINATED_SHIFTS), length(canonical))
-                coord_demands = Matrix{Float32}(
-                    undef, length(COORDINATED_SHIFTS), length(canonical)
-                )
-                for (i_shift, α) in enumerate(COORDINATED_SHIFTS)
-                    h = apply!(cf, Demand.PriceMultiply(; dealer_uid = f, quarter = t, by = α))
-                    coord_demands[i_shift, :] .= expected_demand(cf, f, t)
-                    coord_prices[i_shift, :] .= α .* obs_prices
-                    undo!(cf, h)
-                end
+                coord_prices, coord_demands = Supply.coordinated_demands(cf, f, t, obs_prices)
 
                 outputs[(t, f)] = (
                     assortment = canonical,
@@ -634,6 +475,20 @@ function (@main)(_)
         mkpath(dirname(snakemake.output["sim"]))
         JLD2.save_object(snakemake.output["sim"], outputs)
         @info "wrote" path = snakemake.output["sim"] n_records = length(outputs)
+
+        # Counterfactual compliance histories off the spine `outputs`, which cf still holds.
+        state_locked && return nothing
+        nodes = Dict{UUID, Dict{Supply.NodeKey, NamedTuple}}()
+        histories = Dict{Tuple{QuarterKey, UUID}, NamedTuple}()
+        for f in dealers
+            nodes[f] = Supply.simulate_histories!(histories, cf, pb, outputs, f, seed, t₀)
+            @info "Simulated histories" f n_nodes = length(nodes[f])
+        end
+        n_nodes = [length(nodes[f]) for f in dealers]
+        @info "History nodes per dealer" total = sum(n_nodes) mean = mean(n_nodes) max =
+            maximum(n_nodes)
+        JLD2.save_object(snakemake.output["branches"], (; nodes, histories))
+        @info "wrote" path = snakemake.output["branches"]
     end
     return nothing
 end

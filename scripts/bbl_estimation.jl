@@ -68,19 +68,17 @@ end
     C_h_map = Mmap.mmap("data/bbl_C_h.map", Array{Float32, 3}, (n_row, n_col, K))
 
     # Block spec: (name, n_scen, map_row_lo, map_row_hi, sorted)
-    # - local×sorted:   attacks noise cancellation (rank-k averaged across sims has consistent E[·] ≠ 0)
-    # - local×raw:      cheap extra constraint; disciplines sampling error
-    # - coord×sorted:   ranks the coordinated shifts by revenue diff before averaging
-    # - coord×raw:      shift α=0.5 always in slot 1 etc.; interpretable per-scenario means
+    # - local×raw:      one-shot residual-demand draw k at t0, then the policy
+    # - coord×raw:      persistent coordinated shift k (COORDINATED_SHIFTS[k])
+    # Deviation k is the same in every sim (fixed _PRICE_SEEDS, constant shifts), so a
+    # revenue-sorted copy of a block would average the same deviations and add nothing.
     local_map_lo = 1
     local_map_hi = N_LOCAL * n_tf
     coord_map_lo = local_map_hi + 1
     coord_map_hi = n_row
 
     block_specs = (
-        (:local_sorted, N_LOCAL, local_map_lo, local_map_hi, true),
-        #(:local_raw, N_LOCAL, local_map_lo, local_map_hi, false),
-        (:coord_sorted, N_SHIFTS, coord_map_lo, coord_map_hi, true),
+        (:local_raw, N_LOCAL, local_map_lo, local_map_hi, false),
         (:coord_raw, N_SHIFTS, coord_map_lo, coord_map_hi, false),
     )
 
@@ -90,7 +88,7 @@ end
     Ct_blocks = [zeros(Float64, n_tf * spec[2], n_t) for spec in block_specs]
     Ch_blocks = [zeros(Float64, n_tf * spec[2], K) for spec in block_specs]
 
-    @info "Accumulating 4 moment blocks" n_col n_tf N_LOCAL N_SHIFTS
+    @info "Accumulating moment blocks" n_blocks = length(block_specs) n_col n_tf N_LOCAL N_SHIFTS
     for s in 1:n_col
         R_slice = R_map[:, s]
         for (bi, (name, n_scen, lo, hi, sorted)) in enumerate(block_specs)

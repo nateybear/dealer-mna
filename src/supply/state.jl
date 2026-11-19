@@ -21,6 +21,10 @@ const SIM_SIZE = 100
 # drift.
 const COORDINATED_SHIFTS = Float32[0.75, 0.9, 0.95, 0.98, 0.99, 1.01, 1.02, 1.05, 1.1, 1.25]
 
+# BBL moment windows: one per start quarter, each spanning WINDOW_QUARTERS quarters (t0 … t0+4).
+const T_START = QuarterKey[(y, q) for y in 2017:2018 for q in 1:4]
+const WINDOW_QUARTERS = 5
+
 # Candidate dealer capacities θ_f = κ·Q̄_f (Q̄_f = 75th percentile of observed quarterly sales).
 # Ascending: aggregate_overload! stops at the first κ with no overload.
 const CAPACITY_MULTIPLES = Float32.(1.0:0.25:2.75)

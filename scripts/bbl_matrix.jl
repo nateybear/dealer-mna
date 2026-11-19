@@ -9,8 +9,6 @@ import Lazy: iterated
 
 const β = 0.95^0.25
 
-const T_START = QuarterKey[(y, q) for y in 2017:2018 for q in 1:4]
-
 const N_SCENARIOS = Supply.SIM_SIZE
 
 # Single source of truth is Supply.COORDINATED_SHIFTS — derived here so any
@@ -26,7 +24,7 @@ increment((y, q)) =
 # -----------------------------------------------------------------------------
 # BBLIndex: canonical row/column orderings shared across every (fe_type,
 # policy) matrix pair. Every field is deterministic — derived from the
-# filtered Counterfactual + usable_vks + T_START, all identical across
+# filtered Counterfactual + usable_vks + Supply.T_START, all identical across
 # sim seeds.
 # -----------------------------------------------------------------------------
 struct BBLIndex
@@ -44,7 +42,7 @@ struct BBLIndex
 end
 
 function BBLIndex(dealers::AbstractVector{UUID}, usable_vks, capacity, capacity_obj_weights)
-    tf_rows = [(t, f) for t in T_START for f in dealers]
+    tf_rows = [(t, f) for t in Supply.T_START for f in dealers]
     dealer_cols = collect(dealers)
     vehicle_cols = sort(collect(usable_vks))
     quarter_cols = [1, 2, 3, 4]
@@ -116,11 +114,11 @@ struct BBLMatrices
     C_j::Matrix{M}
 end
 
-function BBLMatrices(idx::BBLIndex, simulations; C_h_map = nothing)
+function BBLMatrices(idx::BBLIndex, simulations, branch_files; C_h_map = nothing)
     ### construction helpers
-    # Row 1        = observed policy
-    # Rows 2..1+N_SCENARIOS       = per-product independent local perturbations (residual demand seeds)
-    # Rows 2+N_SCENARIOS..end     = coordinated uniform shifts (COORDINATED_SHIFTS)
+    # Row 1        = observed policy (the simulated spine)
+    # Rows 2..1+N_SCENARIOS       = one-shot residual-demand draws at t0, then the policy
+    # Rows 2+N_SCENARIOS..end     = persistent coordinated shifts (COORDINATED_SHIFTS)
     outerM = N_SCENARIOS + N_SHIFTS + 1
     outerN = length(simulations)
     filled(T, closure) =
@@ -158,14 +156,30 @@ function BBLMatrices(idx::BBLIndex, simulations; C_h_map = nothing)
             )
     end
 
-    aggregator(col_lookup, scenario_lookup) = function (tf, tup, sim)
-        future_t, f, j = tup
+    aggregator(col_lookup) = function (tf, tup, outcome, i_j, scenario_lookup)
         row = idx.tf_row_index[tf]
         col = col_lookup(tup)
-        dealer_outcome = sim[(future_t, f)]
-        i_j = findfirst(==(j), dealer_outcome.assortment)
-        p, D = scenario_lookup(i_j, dealer_outcome)
+        p, D = scenario_lookup(i_j, outcome)
         return (; D, p, i = (row, col))
+    end
+
+    # (quarter, outcome, lookup) for each quarter of tf's window along scenario iscen's history
+    # (0 = observed policy). Off-spine outcomes come from the sim's branch nodes.
+    function history_steps(tf, iscen, sim, branches)
+        (t0, f) = tf
+        quarters = first(iterated(increment, t0), Supply.WINDOW_QUARTERS)
+        spine = [(t, sim[(t, f)], policy_lookup) for t in quarters]
+        iscen == 0 && return spine
+        h = branches.histories[tf]
+        node(key) = isempty(key[2]) ? sim[(key[1], f)] : branches.nodes[f][key]
+        along(path, lookup) = [(quarters[k + 1], node(key), lookup) for (k, key) in enumerate(path)]
+        if iscen ≤ N_SCENARIOS
+            first_step = (t0, spine[1][2], cf_lookup(iscen))
+            h.oneshot_flips[iscen] || return vcat([first_step], spine[2:end])
+            return vcat([first_step], along(h.oneshot_path, policy_lookup))
+        end
+        lookup = coord_lookup(iscen - N_SCENARIOS)
+        return vcat([(t0, spine[1][2], lookup)], along(h.shift_paths[iscen - N_SCENARIOS], lookup))
     end
 
     R_f = newV()
@@ -185,33 +199,13 @@ function BBLMatrices(idx::BBLIndex, simulations; C_h_map = nothing)
     n_h = length(idx.kappa_grid)
     H_obs = zeros(Float32, n_tf, n_h)
     H_pert = zeros(Float32, n_tf, n_h)
-    scen_lookups = vcat(
-        [cf_lookup(n) for n in 1:N_SCENARIOS], [coord_lookup(n) for n in 1:N_SHIFTS]
-    )
-
-    for (isim, simfile) in enumerate(simulations)
+    for (isim, (simfile, branch_file)) in enumerate(zip(simulations, branch_files))
         sim = JLD2.load_object(simfile)
-        for tf in idx.tf_rows
+        branches = JLD2.load_object(branch_file)
+        for tf in idx.tf_rows, iscen in 0:(outerM - 1)
+            steps = history_steps(tf, iscen, sim, branches)
             for (lookup, Rs, Cs) in containers_and_lookups
-                aggregate!(aggregator(lookup, policy_lookup), tf, sim, Rs[1, isim], Cs[1, isim])
-                for iscen in 1:N_SCENARIOS
-                    aggregate!(
-                        aggregator(lookup, cf_lookup(iscen)),
-                        tf,
-                        sim,
-                        Rs[iscen + 1, isim],
-                        Cs[iscen + 1, isim],
-                    )
-                end
-                for ishift in 1:N_SHIFTS
-                    aggregate!(
-                        aggregator(lookup, coord_lookup(ishift)),
-                        tf,
-                        sim,
-                        Rs[N_SCENARIOS + 1 + ishift, isim],
-                        Cs[N_SCENARIOS + 1 + ishift, isim],
-                    )
-                end
+                aggregate!(aggregator(lookup), tf, steps, Rs[iscen + 1, isim], Cs[iscen + 1, isim])
             end
         end
 
@@ -219,12 +213,12 @@ function BBLMatrices(idx::BBLIndex, simulations; C_h_map = nothing)
         C_h_map === nothing && continue
         fill!(H_obs, 0.0f0)
         for tf in idx.tf_rows
-            aggregate_overload!(H_obs, idx, tf, sim, policy_lookup)
+            aggregate_overload!(H_obs, idx, tf, history_steps(tf, 0, sim, branches))
         end
-        for (iscen, lookup) in enumerate(scen_lookups)
+        for iscen in 1:(outerM - 1)
             fill!(H_pert, 0.0f0)
             for tf in idx.tf_rows
-                aggregate_overload!(H_pert, idx, tf, sim, lookup)
+                aggregate_overload!(H_pert, idx, tf, history_steps(tf, iscen, sim, branches))
             end
             C_h_map[((iscen - 1) * n_tf + 1):(iscen * n_tf), isim, :] .= H_obs .- H_pert
         end
@@ -235,13 +229,12 @@ end
 
 # Coefficient on γ_k: −Σ_fwd β^fwd · ½·max((Q − κ_k·Q̄_f)/Q̄_f, 0)², Q = dealer's total demand;
 # same sign convention as aggregate!'s C. kappa_grid is ascending, so stop at the first inactive κ.
-function aggregate_overload!(H::AbstractMatrix, idx::BBLIndex, tf, sim, scenario_lookup)
-    (t, f) = tf
+function aggregate_overload!(H::AbstractMatrix, idx::BBLIndex, tf, steps)
+    (_, f) = tf
     row = idx.tf_row_index[tf]
     Q̄ = idx.capacity[idx.dealer_col_index[f]]
-    for (fwd, new_t) in enumerate(first(iterated(increment, t), 5))
+    for (fwd, (_, outcome, scenario_lookup)) in enumerate(steps)
         disc = Float32(β^(fwd - 1))
-        outcome = sim[(new_t, f)]
         Q = sum(
             (scenario_lookup(i_j, outcome)[2] for i_j in eachindex(outcome.assortment));
             init = 0.0,
@@ -255,16 +248,17 @@ function aggregate_overload!(H::AbstractMatrix, idx::BBLIndex, tf, sim, scenario
     return nothing
 end
 
-# for a given (t,f) tuple, walk forward a year and add it's contribution to our average W (from BBL)
-# fun should take a (t, f, j) tuple and a sim object and return a named tuple, (D realized demand, p chosen price, i index in C)
+# for a given (t,f) tuple, walk its history `steps` forward a year and add its contribution to
+# our average W (from BBL). fun takes a (t, f, j) tuple, the step's outcome, j's position in it
+# and the scenario lookup, and returns (D realized demand, p chosen price, i index in C)
 # Rows in C correspond to positions in R, just a unique index for each (t,f) combination
 # Columns in C correspond to positions for different fixed effect indicators
-function aggregate!(fun, tf, sim, R::AbstractVector, C::SparseMatrixCSC)
-    (t, f) = tf
-    for (fwd, new_t) in enumerate(first(iterated(increment, t), 5))
+function aggregate!(fun, tf, steps, R::AbstractVector, C::SparseMatrixCSC)
+    (_, f) = tf
+    for (fwd, (new_t, outcome, scenario_lookup)) in enumerate(steps)
         fwd -= 1 # number of periods ahead we are
-        for j in sim[(new_t, f)].assortment
-            (; D, p, i) = fun(tf, (new_t, f, j), sim)
+        for (i_j, j) in enumerate(outcome.assortment)
+            (; D, p, i) = fun(tf, (new_t, f, j), outcome, i_j, scenario_lookup)
             R[i[1]] += (β^fwd) * D * p  # βᵗ D(p) * p
             C[i...] -= (β^fwd) * D # - βᵗ D(p) (and a slot for a component of mc_{jft})
         end
@@ -388,7 +382,7 @@ function (@main)(_)
         sim0 = JLD2.load_object(snakemake.input["simulations"][1])
         expected = Set(
             (new_t, f) for (t, f) in idx.tf_rows for
-            new_t in first(iterated(increment, t), 5)
+            new_t in first(iterated(increment, t), Supply.WINDOW_QUARTERS)
         )
         missing_keys = [k for k in expected if !haskey(sim0, k)]
         if !isempty(missing_keys)
@@ -399,13 +393,20 @@ function (@main)(_)
         end
 
         sims = snakemake.input["simulations"]
+        branch_files = snakemake.input["branches"]
+        branches0 = JLD2.load_object(branch_files[1])
+        missing_rows = [tf for tf in idx.tf_rows if !haskey(branches0.histories, tf)]
+        isempty(missing_rows) || error(
+            "$(length(missing_rows)) BBL rows have no simulated histories, " *
+            "e.g. $(first(missing_rows)); regenerate the branch files",
+        )
         n_scen = N_SCENARIOS + N_SHIFTS
         n_h = length(idx.kappa_grid)
         mats = open(snakemake.output["C_h"], "w+") do io
             C_h_map = Mmap.mmap(
                 io, Array{Float32, 3}, (length(idx.tf_rows) * n_scen, length(sims), n_h)
             )
-            m = BBLMatrices(idx, sims; C_h_map)
+            m = BBLMatrices(idx, sims, branch_files; C_h_map)
             Mmap.sync!(C_h_map)
             m
         end

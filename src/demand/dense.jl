@@ -1772,19 +1772,20 @@ function apply!(cf::Counterfactual, tweak::ModelAdd)
 end
 
 """
-sweep_δ!(cf::Counterfactual, t::QuarterKey) → cf
+sweep_δ!(cf::Counterfactual, t::QuarterKey; only = nothing) → cf
 
 Recompute δ for every live product in quarter `t` using the current post-tweak state:
 price is read from `X_blocks[bi][K+1, k_local]`, Hausman instrument from
 `product_info[idx].p_hausman`, and `J` is the *current* `length(block_param_idxs[bi])`
 (reflects any ModelAdd/Delete). Overwrites `cf.δ[idx]` for each product; marks the
-block dirty so the next accessor triggers a fresh forward pass.
+block dirty so the next accessor triggers a fresh forward pass. Pass a set of δ indices
+as `only` to restrict the sweep to them (e.g. just-added products).
 
 Destructive: undo handles from earlier `PriceChange` / `PriceMultiply` calls in the
 same quarter will not correctly restore δ after this runs — the δ they were
 offsetting has been replaced.
 """
-function sweep_δ!(cf::Counterfactual, t::QuarterKey)
+function sweep_δ!(cf::Counterfactual, t::QuarterKey; only = nothing)
     model = cf.model
     bi = _block_index_for_quarter(model, t)
     K = model.K
@@ -1802,6 +1803,7 @@ function sweep_δ!(cf::Counterfactual, t::QuarterKey)
     dealer_uids = UUID[]
     for (tjf_key, idx) in pairs(model.product_lookup.tjf)
         tjf_key[1] == t || continue
+        isnothing(only) || idx in only || continue
         haskey(model.tjf_to_block_k, idx) || continue
         _, vehicle, dealer_uid = tjf_key
         _, k_local = model.tjf_to_block_k[idx]
