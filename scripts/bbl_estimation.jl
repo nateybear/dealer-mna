@@ -118,6 +118,21 @@ end
         Ct_blocks[bi] ./= n_col
     end
 
+    # All-zero rows are the tautology 0 ≥ 0 (e.g. one-shot rows at the seed quarter, where the
+    # perturbation is the observed policy); their σ is 0, so weighting would put 1/SIGMA_FLOOR² on them.
+    keep = [
+        (R_blocks[bi] .!= 0) .| vec(any(!iszero, Cj_blocks[bi]; dims = 2)) .|
+        vec(any(!iszero, Cf_blocks[bi]; dims = 2)) .| vec(any(!iszero, Ct_blocks[bi]; dims = 2))
+        for bi in eachindex(block_specs)
+    ]
+    @info "Dropping all-zero moment rows" n_dropped = [count(!, k) for k in keep]
+    for bi in eachindex(block_specs)
+        R_blocks[bi] = R_blocks[bi][keep[bi]]
+        Cj_blocks[bi] = Cj_blocks[bi][keep[bi], :]
+        Cf_blocks[bi] = Cf_blocks[bi][keep[bi], :]
+        Ct_blocks[bi] = Ct_blocks[bi][keep[bi], :]
+    end
+
     # SparseMatrixCSC is column-major; store the transpose so nzrange(_, i)
     # walks the nonzeros of C's row i as column i of the transpose.
     Cj_sps = [sparse(C') for C in Cj_blocks]
@@ -193,6 +208,7 @@ end
         let meta = Vector{NamedTuple{(:block, :t, :k), Tuple{Symbol, Demand.QuarterKey, Int}}}()
             for (bi, (name, n_scen, _lo, _hi, _sorted)) in enumerate(block_specs)
                 for i in 1:(n_tf * n_scen)
+                    keep[bi][i] || continue
                     tf_idx = ((i - 1) % n_tf) + 1
                     k = ((i - 1) ÷ n_tf) + 1
                     tf = index.tf_rows[tf_idx]
@@ -279,7 +295,7 @@ end
                     vals[canonical_row, s] = vals_raw[raw_row]
                 end
             end
-            append!(flat, vec(std(vals; dims = 2, corrected = false)))
+            append!(flat, vec(std(vals; dims = 2, corrected = false))[keep[bi]])
         end
         return flat
     end
