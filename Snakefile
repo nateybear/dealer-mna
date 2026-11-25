@@ -1469,10 +1469,8 @@ rule data_bbl_matrix:
         state_transition="data/state_transition.jld2",
         simulations=expand("data/bbl_simulation/seed_{seed}.jld2", seed=BBL_SEEDS),
         branches=expand("data/bbl_simulation/branches_seed_{seed}.jld2", seed=BBL_SEEDS),
-        fords="data/arrow/fords.arrow",
     output:
         matrix="data/bbl_matrix.jld2",
-        C_h="data/bbl_C_h.map",
     log:
         "logs/bbl_matrix.log",
     run:
@@ -1519,7 +1517,6 @@ rule data_bbl_estimation:
         C_j="data/bbl_C_j.map",
         C_f="data/bbl_C_f.map",
         C_t="data/bbl_C_t.map",
-        C_h="data/bbl_C_h.map",
         fords="data/arrow/fords.arrow",
         model_frames="data/model_frames.jld2",
     output:

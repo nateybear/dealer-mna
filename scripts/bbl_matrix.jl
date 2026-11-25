@@ -2,8 +2,6 @@ using DealerMnA
 using .Demand
 
 using SparseArrays
-using Mmap
-using Statistics: quantile
 
 import Lazy: iterated
 
@@ -35,13 +33,9 @@ struct BBLIndex
     tf_row_index::Dict{Tuple{QuarterKey, UUID}, Int}
     dealer_col_index::Dict{UUID, Int}
     vehicle_col_index::Dict{VehicleKey, Int}
-    # Dealer capacity θ_f = κ·capacity[f]; capacity aligned to dealer_cols, κ ∈ kappa_grid.
-    capacity::Vector{Float32}
-    kappa_grid::Vector{Float32}
-    capacity_obj_weights::Vector{Float64}
 end
 
-function BBLIndex(dealers::AbstractVector{UUID}, usable_vks, capacity, capacity_obj_weights)
+function BBLIndex(dealers::AbstractVector{UUID}, usable_vks)
     tf_rows = [(t, f) for t in Supply.T_START for f in dealers]
     dealer_cols = collect(dealers)
     vehicle_cols = sort(collect(usable_vks))
@@ -54,46 +48,7 @@ function BBLIndex(dealers::AbstractVector{UUID}, usable_vks, capacity, capacity_
         Dict(k => i for (i, k) in enumerate(tf_rows)),
         Dict(k => i for (i, k) in enumerate(dealer_cols)),
         Dict(k => i for (i, k) in enumerate(vehicle_cols)),
-        capacity,
-        copy(Supply.CAPACITY_MULTIPLES),
-        capacity_obj_weights,
     )
-end
-
-# Q̄_f = 75th percentile of the dealer's quarterly sales of BBL-universe products over T (quarters
-# with sales), aligned to `dealers`. obj_weights[k] = Σ_ft ½·max((q_ft − κ_k·Q̄_f)/Q̄_f, 0)² /
-# Σ_ft q_ft: the per-unit average overload at observed sales.
-function dealer_capacity(fords, dealers, usable_vks, T)
-    dealer_set = Set(dealers)
-    T_set = Set(T)
-    q_ft = @> fords begin
-        subset(
-            [:make, :model, :model_year, :trim_rank] =>
-                ByRow((mk, m, y, r) -> (mk, m, y, Float32(r)) ∈ usable_vks),
-            :dealer_uid => ByRow(∈(dealer_set)),
-            :t => ByRow(t -> (Dates.year(t), Dates.quarterofyear(t)) ∈ T_set),
-        )
-        groupby([:dealer_uid, :t])
-        combine(nrow => :q)
-    end
-    typical = Dict(
-        r.dealer_uid => r.q for
-        r in eachrow(combine(groupby(q_ft, :dealer_uid), :q => (q -> quantile(q, 0.75)) => :q))
-    )
-    missing_dealers = [f for f in dealers if !haskey(typical, f)]
-    isempty(missing_dealers) || error(
-        "$(length(missing_dealers)) BBL dealers have no sales in the panel, " *
-        "e.g. $(first(missing_dealers))",
-    )
-    capacity = Float32[typical[f] for f in dealers]
-    total_q = sum(q_ft.q)
-    obj_weights = [
-        sum(
-            max((r.q - κ * typical[r.dealer_uid]) / typical[r.dealer_uid], 0)^2 / 2 for
-            r in eachrow(q_ft)
-        ) / total_q for κ in Supply.CAPACITY_MULTIPLES
-    ]
-    return capacity, obj_weights
 end
 
 # Outer matrix structure:
@@ -114,7 +69,7 @@ struct BBLMatrices
     C_j::Matrix{M}
 end
 
-function BBLMatrices(idx::BBLIndex, simulations, branch_files; C_h_map = nothing)
+function BBLMatrices(idx::BBLIndex, simulations, branch_files)
     ### construction helpers
     # Row 1        = observed policy (the simulated spine)
     # Rows 2..1+N_SCENARIOS       = one-shot residual-demand draws at t0, then the policy
@@ -195,10 +150,6 @@ function BBLMatrices(idx::BBLIndex, simulations, branch_files; C_h_map = nothing
         (j_lookup, R_j, C_j),
     )
 
-    n_tf = length(idx.tf_rows)
-    n_h = length(idx.kappa_grid)
-    H_obs = zeros(Float32, n_tf, n_h)
-    H_pert = zeros(Float32, n_tf, n_h)
     for (isim, (simfile, branch_file)) in enumerate(zip(simulations, branch_files))
         sim = JLD2.load_object(simfile)
         branches = JLD2.load_object(branch_file)
@@ -208,44 +159,8 @@ function BBLMatrices(idx::BBLIndex, simulations, branch_files; C_h_map = nothing
                 aggregate!(aggregator(lookup), tf, steps, Rs[iscen + 1, isim], Cs[iscen + 1, isim])
             end
         end
-
-        # Overload columns go straight to disk as obs − pert, same row layout as the other maps.
-        C_h_map === nothing && continue
-        fill!(H_obs, 0.0f0)
-        for tf in idx.tf_rows
-            aggregate_overload!(H_obs, idx, tf, history_steps(tf, 0, sim, branches))
-        end
-        for iscen in 1:(outerM - 1)
-            fill!(H_pert, 0.0f0)
-            for tf in idx.tf_rows
-                aggregate_overload!(H_pert, idx, tf, history_steps(tf, iscen, sim, branches))
-            end
-            C_h_map[((iscen - 1) * n_tf + 1):(iscen * n_tf), isim, :] .= H_obs .- H_pert
-        end
-        @info "overload columns written" isim
     end
     return BBLMatrices(idx, R_f, C_f, R_t, C_t, R_j, C_j)
-end
-
-# Coefficient on γ_k: −Σ_fwd β^fwd · ½·max((Q − κ_k·Q̄_f)/Q̄_f, 0)², Q = dealer's total demand;
-# same sign convention as aggregate!'s C. kappa_grid is ascending, so stop at the first inactive κ.
-function aggregate_overload!(H::AbstractMatrix, idx::BBLIndex, tf, steps)
-    (_, f) = tf
-    row = idx.tf_row_index[tf]
-    Q̄ = idx.capacity[idx.dealer_col_index[f]]
-    for (fwd, (_, outcome, scenario_lookup)) in enumerate(steps)
-        disc = Float32(β^(fwd - 1))
-        Q = sum(
-            (scenario_lookup(i_j, outcome)[2] for i_j in eachindex(outcome.assortment));
-            init = 0.0,
-        )
-        for (k, κ) in enumerate(idx.kappa_grid)
-            r = (Q - κ * Q̄) / Q̄
-            r > 0 || break
-            H[row, k] -= disc * r^2 / 2
-        end
-    end
-    return nothing
 end
 
 # for a given (t,f) tuple, walk its history `steps` forward a year and add its contribution to
@@ -367,13 +282,7 @@ function (@main)(_)
             usable_vks
         )
 
-        capacity, capacity_obj_weights = dealer_capacity(
-            read_arrow(snakemake.input["fords"]), dealers, usable_vks, T
-        )
-        idx = BBLIndex(dealers, usable_vks, capacity, capacity_obj_weights)
-        @info "Dealer capacity" kappa_grid = idx.kappa_grid median_capacity = quantile(
-            idx.capacity, 0.5
-        ) extrema_capacity = extrema(idx.capacity) capacity_obj_weights
+        idx = BBLIndex(dealers, usable_vks)
 
         # Fail loud if the sim is missing any (t, f) the forward walk in
         # `aggregate!` will read. Check the union of walk_forward(tf, 5) —
@@ -400,17 +309,7 @@ function (@main)(_)
             "$(length(missing_rows)) BBL rows have no simulated histories, " *
             "e.g. $(first(missing_rows)); regenerate the branch files",
         )
-        n_scen = N_SCENARIOS + N_SHIFTS
-        n_h = length(idx.kappa_grid)
-        mats = open(snakemake.output["C_h"], "w+") do io
-            C_h_map = Mmap.mmap(
-                io, Array{Float32, 3}, (length(idx.tf_rows) * n_scen, length(sims), n_h)
-            )
-            m = BBLMatrices(idx, sims, branch_files; C_h_map)
-            Mmap.sync!(C_h_map)
-            m
-        end
-        JLD2.save_object(snakemake.output["matrix"], mats)
+        JLD2.save_object(snakemake.output["matrix"], BBLMatrices(idx, sims, branch_files))
     end
     return nothing
 end
