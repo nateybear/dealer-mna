@@ -3,8 +3,6 @@ using .Demand
 
 using SparseArrays
 
-import Lazy: iterated
-
 const β = 0.95^0.25
 
 const N_SCENARIOS = Supply.SIM_SIZE
@@ -12,12 +10,6 @@ const N_SCENARIOS = Supply.SIM_SIZE
 # Single source of truth is Supply.COORDINATED_SHIFTS — derived here so any
 # change to the coord-shift list flows through automatically.
 const N_SHIFTS = length(Supply.COORDINATED_SHIFTS)
-
-increment((y, q)) =
-    let new_q = (q % 4) + 1
-        y_inc = q ÷ 4
-        (y + y_inc, new_q)
-    end
 
 # -----------------------------------------------------------------------------
 # BBLIndex: canonical row/column orderings shared across every (fe_type,
@@ -122,7 +114,7 @@ function BBLMatrices(idx::BBLIndex, simulations, branch_files)
     # (0 = observed policy). Off-spine outcomes come from the sim's branch nodes.
     function history_steps(tf, iscen, sim, branches)
         (t0, f) = tf
-        quarters = first(iterated(increment, t0), Supply.WINDOW_QUARTERS)
+        quarters = Supply.window_quarters(t0)
         spine = [(t, sim[(t, f)], policy_lookup) for t in quarters]
         iscen == 0 && return spine
         h = branches.histories[tf]
@@ -285,13 +277,12 @@ function (@main)(_)
         idx = BBLIndex(dealers, usable_vks)
 
         # Fail loud if the sim is missing any (t, f) the forward walk in
-        # `aggregate!` will read. Check the union of walk_forward(tf, 5) —
+        # `aggregate!` will read. Check the union of window_quarters(t) —
         # not just tf_rows — since aggregate! looks up sim[(new_t, f)] for
         # new_t past T_START.
         sim0 = JLD2.load_object(snakemake.input["simulations"][1])
         expected = Set(
-            (new_t, f) for (t, f) in idx.tf_rows for
-            new_t in first(iterated(increment, t), Supply.WINDOW_QUARTERS)
+            (new_t, f) for (t, f) in idx.tf_rows for new_t in Supply.window_quarters(t)
         )
         missing_keys = [k for k in expected if !haskey(sim0, k)]
         if !isempty(missing_keys)

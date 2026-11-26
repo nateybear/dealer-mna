@@ -215,6 +215,15 @@ const NodeKey = Tuple{QuarterKey, Vector{Bool}}
 
 next_quarter((y, q)) = q == 4 ? (y + 1, 1) : (y, q + 1)
 
+# Quarters of the BBL window starting at t0: WINDOW_QUARTERS long, cut off at T_END.
+function window_quarters(t0)
+    quarters = QuarterKey[t0]
+    while length(quarters) < WINDOW_QUARTERS && quarters[end] < T_END
+        push!(quarters, next_quarter(quarters[end]))
+    end
+    return quarters
+end
+
 """
     simulate_histories!(histories, cf, pb, spine, f, seed, t_seed) → nodes
 
@@ -280,8 +289,8 @@ function simulate_histories!(
         return sum(@view rec.coordinated_demands[m, :]) ≥ rec.phi
     end
 
-    n_ahead = WINDOW_QUARTERS - 1
     for t0 in T_START
+        n_ahead = length(window_quarters(t0)) - 1
         root = (t0, Bool[])
         sp = spine[(t0, f)]
         flips = falses(SIM_SIZE)

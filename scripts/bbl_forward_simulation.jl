@@ -46,7 +46,7 @@ function (@main)(_)
         # outputs lines up.
         kept_vks = _rd.kept_vks
         kept_set = Set(kept_vks)
-        price_table = read_arrow(snakemake.input["price_table"])
+        fords = read_arrow(snakemake.input["fords"])
 
         # Match residual_demands.jl's _PRICE_SEEDS stream exactly.
         let rng_seeds = MersenneTwister(20260709)
@@ -111,22 +111,30 @@ function (@main)(_)
         prod_index = Dict(p => i for (i, p) in enumerate(products))
         ncols_state = size(state_matrix_obs, 2)
 
-        # VehicleKey ↔ compliance group (model, model_year, extra). price_table
-        # is the canonical source of the extra ↔ trim_rank mapping — the
-        # demand model's VehicleKeys and the compliance groups both flow from
-        # it, so joining on trim_rank is exact.
+        # VehicleKey ↔ compliance group (model, model_year, extra), read off the
+        # registrations: the demand model's VehicleKeys and the compliance groups
+        # are both built from fords' (extra, trim_rank) columns, whereas
+        # price_table.arrow can be re-ranked after the registrations were built.
         vk_to_group = Dict{VehicleKey, Tuple{String, Int64, String}}()
         group_to_vks = Dict{Tuple{String, Int64, String}, Vector{VehicleKey}}()
-        for row in eachrow(price_table)
+        unmatched_fitted = Tuple{Tuple{String, Int64, String}, Float32}[]
+        for row in eachrow(unique(select(fords, :make, :model, :model_year, :extra, :trim_rank)))
             vk = (row.make, row.model, row.model_year, Float32(row.trim_rank))
-            haskey(model.product_lookup.j, vk) || continue
             group = (row.model, row.model_year, row.extra)
+            if !haskey(model.product_lookup.j, vk)
+                haskey(compliance_fits, group) && push!(unmatched_fitted, (group, vk[4]))
+                continue
+            end
             vk_to_group[vk] = group
             push!(get!(group_to_vks, group, VehicleKey[]), vk)
         end
         @info "VehicleKey ↔ compliance-group map" n_vks = length(vk_to_group) n_groups = length(
             group_to_vks
         )
+        isempty(unmatched_fitted) ||
+            @warn "Fitted compliance groups whose trim matches no demand VK; the policy never draws them" n = length(
+                unmatched_fitted
+            ) groups = sort(unmatched_fitted)
 
         # -----------------------------------------------------------------------------
         # Deserialize boosters up front. Each Booster is stateful — allocate one
@@ -218,6 +226,8 @@ function (@main)(_)
         # cap the VK universe at the last simulated year.
         # -----------------------------------------------------------------------------
         T::Vector{QuarterKey} = [(y, q) for y in 2017:2019 for q in 1:4]
+        T[end] == Supply.T_END ||
+            error("sim horizon ends at $(T[end]) but BBL windows are cut off at $(Supply.T_END)")
         t₀ = T[1]
         max_model_year = maximum(y for (y, _) in T)
 
@@ -262,6 +272,13 @@ function (@main)(_)
         # rate proportional to the fraction of dead groups.
         filter!(kv -> haskey(group_to_vks, kv.first), pbase_boosters)
         filter!(kv -> haskey(group_to_vks, kv.first), rho_boosters)
+
+        drawable = Set(vk for (g, vks) in group_to_vks if haskey(pbase_boosters, g) for vk in vks)
+        undrawable = sort([vk for vk in usable_vks if vk ∉ drawable])
+        isempty(undrawable) ||
+            @warn "Usable VKs no fitted compliance group maps to; they appear only in the seed quarter and get no BBL moments" n = length(
+                undrawable
+            ) vks = undrawable
 
         pb = Supply.PolicyBoosters(
             sales_booster, pbase_boosters, rho_boosters, group_to_vks, price_boosters,

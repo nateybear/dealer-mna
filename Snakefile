@@ -1199,7 +1199,7 @@ rule data_bbl_simulation:
         state_transition="data/state_transition.jld2",
         compliance="data/compliance.arrow",
         residual_demand="data/residual_demand.jld2",
-        price_table="data/price_table.arrow",
+        fords="data/arrow/fords.arrow",
     output:
         sim="data/bbl_simulation/seed_{seed}.jld2",
         branches="data/bbl_simulation/branches_seed_{seed}.jld2",
@@ -1261,7 +1261,7 @@ rule data_bbl_simulation_state_locked:
         state_transition="data/state_transition.jld2",
         compliance="data/compliance.arrow",
         residual_demand="data/residual_demand.jld2",
-        price_table="data/price_table.arrow",
+        fords="data/arrow/fords.arrow",
     output:
         sim="data/bbl_simulation_state_locked/seed_{seed}.jld2",
     log:

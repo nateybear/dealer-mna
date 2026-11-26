@@ -371,8 +371,8 @@ end
     # index.vehicle_cols / index.dealer_cols / 1:4. Restricted to the BBL
     # panel's (t, f, j) universe so the objective is defined only on the
     # (w, f, t) space the LP actually identifies. Years 2017–2019 mirror the
-    # panel's coverage: T_START ∈ 2017Q1..2018Q4, each row walks 5 quarters
-    # forward → last touched quarter is 2019Q4.
+    # panel's coverage: T_START ∈ 2017Q1..2019Q2, each row walks up to 5 quarters
+    # forward, cut off at Supply.T_END = 2019Q4.
     function compute_sales_weights()
         fords = read_arrow("data/arrow/fords.arrow")
         vehicle_set = Set(index.vehicle_cols)
@@ -462,6 +462,11 @@ end
 end
 
 function (@main)(_)
+    unseen_vks = @fetch index.vehicle_cols[w_skip_min .& w_skip_max]
+    isempty(unseen_vks) ||
+        @warn "Vehicle columns with no moment mass; their w is set by the objective alone" n = length(
+            unseen_vks
+        ) unseen_vks
     @info "Step 1: unweighted feasibility" total_constraints n_j n_f n_t
     c_unweighted, start_vals, sv = @fetch solve_bound!(MIN_SENSE, sum(ϵ .^ 2))
     @info "Unweighted feasibility done" c_unweighted
